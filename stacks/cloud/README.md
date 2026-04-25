@@ -7,19 +7,31 @@ paths/names it is `cloud`. See `docs/plan.md` step 7.
 Reachable only via `ingress` at `cloud.antarctica-engineering.com`.
 There are no public port bindings on this service.
 
+**As of the SSO migration, identity is delegated to Authelia.** copyparty
+runs in IdP / forward-auth mode and trusts the `Remote-User` and
+`Remote-Groups` headers that NPM injects after a successful auth_request
+against Authelia. Per-user passwords are no longer used.
+
 ## Hard rules
 
 - **No public ports.** This stack never publishes to the host. The only
   way in is through `ingress` over the `edge` Docker network.
-- **ACLs are strictly per-user.** `sagan` has no access to `/marcus`
-  and vice versa. Do not add a shared volume without re-opening that
-  decision.
-- **No anonymous access.** Every request must authenticate.
+- **ACLs are strictly per-user.** `sagan` has no access to `/u/marcus`
+  and vice versa. The `[/u/${u}]` volume block grants permissions only
+  to `${u}` itself.
+- **No anonymous access.** Authelia gates the proxy host with policy
+  `two_factor`; copyparty itself rejects requests where
+  `Remote-User` is absent (defence in depth).
 - **Per-user data lives behind LUKS.** `/srv/store/mnt/sagan` and
   `/srv/store/mnt/marcus` on the host are LUKS unlock points (see
   build-sequence step 6). When the blob is unmounted, the path is an
   empty directory — copyparty then sees an empty volume, which is the
   desired fail-closed behaviour.
+- **Trust boundary is the docker network.** `xff-src: 172.16.0.0/12`
+  in `conf/copyparty.conf` restricts header trust to docker-internal
+  upstreams. Anyone reaching `cloud:3923` from outside the docker
+  network — which can't happen because there is no public port —
+  would have their forwarded headers ignored.
 
 ## Layout
 
@@ -27,55 +39,57 @@ There are no public port bindings on this service.
 stacks/cloud/
 ├── docker-compose.yml      # service definition (image pinned)
 ├── conf/
-│   └── copyparty.conf      # accounts + volumes + ACLs (mounted /cfg:ro)
+│   └── copyparty.conf      # IdP-mode config: idp-h-usr, idp-h-grp, ${u} volume
 ├── data/                   # persistent state (hash DB, thumbs); gitignored
-├── .env.example            # placeholders for argon2 password hashes
+├── .env.example            # placeholder; no secrets in IdP mode
 └── README.md               # this file
 ```
 
 The `data/` directory is created on first run and holds copyparty's
 internal state: per-volume upload index, thumbnail cache, the salt file
-under `ah-salt.txt`, etc. It is gitignored and treated as cache (safe
-to delete; will be rebuilt; thumbnails will regenerate on access).
+under `ah-salt.txt`, and the IdP user cache (idp-store=3 — remembers
+users + groups across restarts so volumes don't have to be re-walked).
+It is gitignored and treated as cache (safe to delete; will be rebuilt;
+thumbnails will regenerate on access).
 
-## Generating password hashes
-
-copyparty stores passwords as argon2 hashes (`ah-alg: argon2` in the
-config). Generate a hash by running the bundled CLI inside a throwaway
-copyparty container so the version and algorithm match the running
-service exactly:
-
-```sh
-docker run --rm -it copyparty/ac:1.20.14 \
-    --ah-alg argon2 --ah-cli
-```
-
-It prompts for a password twice and prints one line beginning with `+`
-(e.g. `+argon2id$v=19$m=...$<salt>$<hash>`). Paste that entire line —
-**including the leading `+`** — into the `.env` on the VPS:
+## SSO flow (end to end)
 
 ```
-# /opt/stacks/cloud/.env  (chmod 0600)
-SAGAN_PW_HASH=+argon2id$v=19$m=...$...$...
-MARCUS_PW_HASH=+argon2id$v=19$m=...$...$...
+browser → ingress (NPM, :443) ──auth_request──→ authelia:9091/api/verify
+                                                        │
+                                            ↓ 200 + Remote-* headers
+                                                        │
+                                       → cloud:3923 (with Remote-User: sagan)
+                                                        │
+                                       → copyparty serves /u/sagan
 ```
 
-Then `docker compose up -d` from `/opt/stacks/cloud/`. Confirm the
-hashes were applied by trying to log in over the `ingress` proxy.
-
-If you change the password for an account, regenerate the hash and
-restart the container; copyparty does not re-read its config without
-a restart (`docker compose restart cloud`).
-
-If you ever change `ah-alg`, every existing hash becomes invalid —
-regenerate all of them in one pass.
+If the user has no Authelia session, the auth_request returns 401, NPM
+issues a 302 to `https://auth.antarctica-engineering.com/?rd=…`, the
+user logs in (TOTP-required), Authelia redirects them back, the auth
+cookie is now set on the apex `antarctica-engineering.com` domain so
+`cloud.antarctica-engineering.com` shares it.
 
 ## Bind-mount semantics (LUKS interaction)
 
 `/srv/store/mnt/sagan` and `/srv/store/mnt/marcus` on the host are the
 mount points for each user's encrypted blob (see plan step 6). The
 compose file bind-mounts them into the container at `/w/sagan` and
-`/w/marcus`. Three states matter:
+`/w/marcus`. The IdP-mode volume rule is:
+
+```
+[/u/${u}]
+  /w/${u}
+```
+
+So `${u}` is substituted with the authenticated username. The set of
+*usable* usernames is the intersection of (Authelia-issued usernames)
+× (host bind-mounts present). Currently both sagan and marcus exist on
+both sides; if a future user is added in Authelia without a matching
+`/srv/store/mnt/<name>` bind-mount + LUKS blob, they would log in fine
+but their volume would 404.
+
+Three states matter:
 
 | Host state                                  | What `cloud` sees                  |
 |---|---|
@@ -91,43 +105,44 @@ in the web UI after reboot are *expected*, not a bug.
 If a user reports "my files are gone": check `mountpoint -q
 /srv/store/mnt/$user` on the host before assuming any data loss.
 
+## Migration from password-mode (one-time)
+
+If `data/` already exists from a pre-SSO deploy, copyparty's user index
+remembers the old `[accounts]` users — but those accounts are now
+unreachable (no password is ever sent through Authelia). They're
+harmless. New per-user volumes are created via the IdP path on first
+hit. Optional: clean up by deleting `data/up2k.snap` and letting
+copyparty rebuild.
+
+The `.env` file (which used to hold `SAGAN_PW_HASH` / `MARCUS_PW_HASH`)
+is now obsolete on the VPS; delete it post-migration:
+
+```sh
+sudo rm /opt/stacks/cloud/.env
+```
+
 ## Adding the proxy host in `ingress` (NPM)
 
-Once `ingress` is up with the wildcard cert provisioned for
-`*.antarctica-engineering.com`, add `cloud` as a proxy host:
+Use the wire-up script in the authelia stack:
 
-1. Open the NPM admin UI (loopback / SSH-tunnel /
-   `mesh` — never public). `Hosts -> Proxy Hosts -> Add Proxy Host`.
-2. **Details tab**
-   - Domain Names: `cloud.antarctica-engineering.com`
-   - Scheme: `http`
-   - Forward Hostname / IP: `cloud`  (the Docker DNS name of this
-     service on the `edge` network; resolves because `ingress` shares
-     that network)
-   - Forward Port: `3923`  (copyparty's default)
-   - Cache Assets: off
-   - Block Common Exploits: on
-   - Websockets Support: **on**  (copyparty's UI uses websockets for
-     uploads and live progress)
-3. **SSL tab**
-   - SSL Certificate: pick the existing `*.antarctica-engineering.com`
-     wildcard cert.
-   - Force SSL: on
-   - HTTP/2 Support: on
-   - HSTS Enabled: on (only after you've confirmed the host works end
-     to end — HSTS is sticky)
-4. Save. Test from outside the VPS:
-   ```sh
-   curl -sI https://cloud.antarctica-engineering.com
-   ```
-   Expect HTTP 200 (or 401 challenge), valid cert covering the
-   wildcard, no `Server: copyparty` banner leaking through (copyparty
-   doesn't advertise itself in the default banner — fine).
+```sh
+NPM_URL=http://127.0.0.1:81 \
+NPM_EMAIL=raphaelcasimir.inge@gmail.com \
+NPM_PASS=changeme \
+/opt/stacks/authelia/scripts/wire-npm-routes.sh
+```
 
-The `ingress` container must be on the `edge` network for the
-`cloud:3923` Docker-DNS lookup to work; it is, by virtue of its own
-compose file. If you see `host not found`, check that both stacks are
-attached to the `edge` external network.
+The script idempotently UPDATES the existing `cloud` proxy host (host
+id 1 in the current NPM state) with the forward-auth Advanced config
+that includes the snippets from `/opt/stacks/authelia/snippets/`.
+
+Verify from outside the VPS:
+
+```sh
+# Without a session: redirect to Authelia portal.
+curl -sIL https://cloud.antarctica-engineering.com | head -20
+# Expect: 302 → https://auth.antarctica-engineering.com/?rd=...
+```
 
 ## Steady state
 
@@ -147,7 +162,8 @@ docker compose pull && docker compose up -d
 ```
 
 Check the [release notes](https://github.com/9001/copyparty/releases)
-before bumping — copyparty's config syntax is occasionally extended.
+before bumping — copyparty's config syntax is occasionally extended,
+and IdP-mode directives in particular have evolved.
 
 ## Operational notes
 
@@ -164,5 +180,6 @@ before bumping — copyparty's config syntax is occasionally extended.
   `data/` directory triggers a hash sweep across mounted volumes.
   Expect elevated CPU for a few minutes per user with a non-empty
   blob; subsequent restarts are quick.
-- **Don't add `r: *` anywhere.** That would make the volume world-
-  readable and break the no-anonymous-access invariant.
+- **Don't add `r: *` anywhere.** That would make a volume world-
+  readable and break the no-anonymous-access invariant — even though
+  Authelia would gate it at the front, defence in depth matters.

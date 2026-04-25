@@ -10,11 +10,29 @@ peers/
 .env
 .env.*
 !.env.example
-secrets/
+# Do NOT use a blanket `secrets/` because it forecloses re-including
+# .gitkeep stubs in committed stack scaffolding (see authelia/secrets/).
+# Specific paths are listed in their respective stack sections below.
 
 # Generated artifacts
 *.img
 *.qr.png
+
+# Authelia: rendered configuration.yml (from .template) + users db + state.
+# Only the .template, .example, and DESIGN.md are committed.
+stacks/authelia/configuration.yml
+stacks/authelia/users_database.yml
+stacks/authelia/data/*
+!stacks/authelia/data/.gitkeep
+stacks/authelia/secrets/*
+!stacks/authelia/secrets/.gitkeep
+
+# enrol: persisted runtime data (not produced under repo, but defensive)
+stacks/enrol/data/
+
+# cloud: copyparty runtime state (hash DB, thumbs)
+stacks/cloud/data/
+stacks/console/data/
 
 # Editor / OS noise
 .DS_Store

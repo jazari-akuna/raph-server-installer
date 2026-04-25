@@ -1,0 +1,53 @@
+/* enrol — minimal stylesheet. No external assets, no JS. */
+:root {
+  --fg: #1a1a1a;
+  --bg: #fafaf7;
+  --muted: #666;
+  --accent: #2c5282;
+  --danger: #c53030;
+  --warn: #d97706;
+  --border: #d0d0c8;
+}
+* { box-sizing: border-box; }
+body {
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  margin: 0;
+  padding: 0;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 1.5em;
+  padding: 0.75em 1.5em;
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+}
+header h1 { margin: 0; font-size: 1.1em; letter-spacing: 0.02em; }
+header h1 a { color: var(--fg); text-decoration: none; }
+header nav { display: flex; gap: 1em; flex: 1; }
+header nav a { color: var(--accent); text-decoration: none; }
+header .who { color: var(--muted); font-size: 0.9em; }
+main { max-width: 880px; margin: 1.5em auto; padding: 0 1.5em; }
+section { margin-bottom: 2em; }
+h2 { font-size: 1.05em; border-bottom: 1px solid var(--border); padding-bottom: 0.25em; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 0.4em 0.6em; text-align: left; border-bottom: 1px solid var(--border); }
+th { font-weight: 600; font-size: 0.85em; color: var(--muted); }
+code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; }
+form label { display: block; margin: 0.5em 0; }
+form input[type=text] { width: 320px; max-width: 100%; padding: 0.4em; border: 1px solid var(--border); border-radius: 3px; }
+button {
+  background: var(--accent); color: #fff; border: 0; padding: 0.5em 1em;
+  border-radius: 3px; cursor: pointer; font-size: inherit;
+}
+button.danger { background: var(--danger); }
+button:hover { filter: brightness(0.9); }
+.button { display: inline-block; padding: 0.4em 0.9em; background: #eee; border-radius: 3px; color: var(--fg); text-decoration: none; }
+.flash { padding: 0.6em 1em; background: #e6fffa; border-left: 3px solid #38b2ac; margin-bottom: 1em; }
+.warn  { padding: 0.6em 1em; background: #fffaf0; border-left: 3px solid var(--warn); margin-bottom: 1em; }
+pre.conf { background: #fff; border: 1px solid var(--border); padding: 0.75em; overflow-x: auto; font-size: 0.85em; }
+img.qr { max-width: 320px; border: 1px solid var(--border); }
+dl dt { font-weight: 600; margin-top: 0.4em; color: var(--muted); font-size: 0.85em; }
+dl dd { margin-left: 0; margin-bottom: 0.3em; }

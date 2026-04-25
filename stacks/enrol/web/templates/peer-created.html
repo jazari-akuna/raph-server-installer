@@ -1,0 +1,24 @@
+{{template "head" .}}
+
+<section class="created">
+  <h2>peer created: {{.Peer.Name}}</h2>
+
+  {{if .ReloadNote}}<div class="warn">{{.ReloadNote}}</div>{{end}}
+
+  <p><strong>ip:</strong> <code>{{.Peer.IP}}</code></p>
+  <p><strong>public key:</strong> <code>{{.Peer.PublicKey}}</code></p>
+
+  <p>The configuration below contains the peer's <strong>private key</strong> —
+  this is the only time you will see it. Hand it to the device owner via a
+  secure channel and clear your browser history.</p>
+
+  <h3>config</h3>
+  <pre class="conf">{{.ClientConf}}</pre>
+
+  <h3>QR (scan with the AmneziaWG client)</h3>
+  <p><img class="qr" src="/peers/{{.Peer.Name}}/qr.png" alt="peer QR"></p>
+
+  <p><a class="button" href="/peers">← back to peers</a></p>
+</section>
+
+{{template "tail" .}}

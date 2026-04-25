@@ -1,0 +1,90 @@
+# authelia — SSO gate for the shared VPS.
+#
+# Camouflage: external hostname is `auth.antarctica-engineering.com`.
+# Internal container/service name `authelia` is fine — the camouflage layer
+# only constrains user-visible artifacts (DNS, paths, banner-grabbable).
+#
+# Reachable only via `ingress` over the `edge` network on :9091.
+# No public port binding. NPM proxies auth.antarctica-engineering.com →
+# authelia:9091 (with bypass policy — see DESIGN.md).
+#
+# Three forms of secret material live next to this compose:
+#   .env              jwt/session/storage/oidc-hmac secrets   (mode 0600)
+#   secrets/oidc-key.pem   RSA-2048 PKCS#8 OIDC issuer key     (mode 0600)
+#   users_database.yml     argon2id pw hashes for sagan/marcus (mode 0600)
+# All three are gitignored; .example shells live in the repo.
+
+services:
+  authelia:
+    # Pin to the verified-stable tag from Phase 0 research (2026-04).
+    # Bump deliberately; do not use `latest`.
+    image: authelia/authelia:4.39.19
+    container_name: authelia
+    restart: unless-stopped
+    mem_limit: 256m
+
+    # No `ports:` — strictly internal. NPM reaches us at authelia:9091
+    # over the `edge` network.
+
+    volumes:
+      # Main configuration. Read-only mount; container can't mutate it.
+      - ./configuration.yml:/config/configuration.yml:ro
+      # Users database (argon2id hashes + group membership). Mode 0600
+      # on host. Authelia rewrites this file when a user changes their
+      # password through the portal, so it must be RW.
+      - ./users_database.yml:/config/users_database.yml
+      # Persistent storage: sqlite, totp secrets (encrypted at rest with
+      # storage.encryption_key), session metadata.
+      - ./data:/var/lib/authelia
+      # OIDC issuer private key. Mode 0600 on host. Read-only in container.
+      - ./secrets/oidc-key.pem:/secrets/oidc-key.pem:ro
+
+    environment:
+      # Authelia reads its core secrets from these *_FILE env vars
+      # (Authelia maps env to config keys via _ delimiters).
+      # Compose secrets land at /run/secrets/<name>; that's what we point at.
+      AUTHELIA_JWT_SECRET_FILE: /run/secrets/jwt-secret
+      AUTHELIA_SESSION_SECRET_FILE: /run/secrets/session-secret
+      AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/storage-encryption-key
+      AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE: /run/secrets/oidc-hmac-secret
+      # Enable the template filter so configuration.yml can use the
+      # `secret` template function to load the OIDC issuer key from disk.
+      X_AUTHELIA_CONFIG_FILTERS: template
+      # Keep timezone aligned with the host so log timestamps are sane.
+      TZ: UTC
+
+    secrets:
+      - jwt-secret
+      - session-secret
+      - storage-encryption-key
+      - oidc-hmac-secret
+
+    healthcheck:
+      # Authelia exposes a health endpoint suitable for liveness probes.
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    networks:
+      - edge
+
+# Top-level secrets: file-based (not Docker swarm secrets — we are not on
+# swarm). Compose mounts each as /run/secrets/<name> in the container,
+# which our env-var *_FILE knobs point at via /secrets/* symlink-equivalent.
+# Since Authelia reads *_FILE knobs directly we set the env to /secrets/*
+# and rely on the bind below.
+secrets:
+  jwt-secret:
+    file: ./secrets/jwt-secret
+  session-secret:
+    file: ./secrets/session-secret
+  storage-encryption-key:
+    file: ./secrets/storage-encryption-key
+  oidc-hmac-secret:
+    file: ./secrets/oidc-hmac-secret
+
+networks:
+  edge:
+    external: true

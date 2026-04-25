@@ -21,6 +21,10 @@ services:
     volumes:
       - ./data:/data
       - ./letsencrypt:/etc/letsencrypt
+      # Forward-auth snippets shared with authelia. Mounted read-only;
+      # included from per-proxy-host Advanced config (see
+      # ../authelia/snippets/ and ../authelia/DESIGN.md).
+      - ../authelia/snippets:/snippets:ro
     networks:
       - edge
     mem_limit: 2g

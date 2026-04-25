@@ -1,0 +1,202 @@
+# Authelia configuration TEMPLATE — see DESIGN.md for rationale.
+#
+# This file ends in .template because it contains one $-style placeholder
+# (`${AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH}`) that is rendered by
+# envsubst at deploy time:
+#
+#   AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH='$pbkdf2-sha512$...' \
+#       envsubst '$AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH' \
+#       < configuration.yml.template > configuration.yml
+#   sudo chmod 0600 configuration.yml
+#
+# The rendered configuration.yml is gitignored. It is bind-mounted
+# read-only into the container at /config/configuration.yml.
+#
+# Other secrets (jwt, session, storage_encryption_key, oidc_hmac_secret)
+# are supplied via *_FILE env vars from compose secrets — they do NOT
+# appear in this file at all.
+#
+# Tag-pinned for Authelia 4.39.x. Schema may shift on major bumps; consult
+# https://www.authelia.com/configuration/ before upgrading.
+
+###############################################################################
+# Server
+###############################################################################
+server:
+  address: 'tcp://0.0.0.0:9091/'
+  buffers:
+    read: 4096
+    write: 4096
+
+log:
+  level: 'info'
+  format: 'text'
+
+###############################################################################
+# TOTP — second-factor for everyone
+###############################################################################
+totp:
+  disable: false
+  issuer: 'antarctica-engineering.com'
+  algorithm: 'sha1'    # Authy/Google Authenticator compat
+  digits: 6
+  period: 30
+  skew: 1
+  secret_size: 32
+
+###############################################################################
+# WebAuthn — disabled for now (TOTP is enough for two co-admins)
+###############################################################################
+webauthn:
+  disable: true
+
+###############################################################################
+# Identity validation
+###############################################################################
+identity_validation:
+  reset_password:
+    # Even if reset-password is exposed, we don't ship SMTP creds at bootstrap.
+    # Operator can either reset by editing users_database.yml directly, or
+    # add SMTP later. Ship with the flow disabled by default.
+    jwt_lifespan: '5 minutes'
+    jwt_algorithm: 'HS256'
+
+###############################################################################
+# Authentication backend — file-based YAML (2 users, no LDAP)
+###############################################################################
+authentication_backend:
+  password_reset:
+    disable: true   # operator-managed at bootstrap
+  refresh_interval: '5 minutes'
+  file:
+    path: '/config/users_database.yml'
+    watch: true
+    search:
+      email: false
+      case_insensitive: false
+    password:
+      algorithm: 'argon2'
+      argon2:
+        variant: 'argon2id'
+        iterations: 3
+        memory: 65536      # 64 MiB — tunecost target from the brief
+        parallelism: 4
+        key_length: 32
+        salt_length: 16
+
+###############################################################################
+# Access control — see DESIGN.md §Access control rules
+###############################################################################
+access_control:
+  default_policy: 'deny'
+
+  rules:
+    # Authelia portal itself — never gate (would loop).
+    - domain: 'auth.antarctica-engineering.com'
+      policy: 'bypass'
+
+    # Public file server: 2FA required for everyone, both admins.
+    - domain: 'cloud.antarctica-engineering.com'
+      policy: 'two_factor'
+
+    # Peer-management UI: 2FA, admins-only group.
+    - domain: 'enrol.antarctica-engineering.com'
+      policy: 'two_factor'
+      subject:
+        - 'group:admins'
+
+    # Portainer: 2FA, admins-only group.
+    - domain: 'console.antarctica-engineering.com'
+      policy: 'two_factor'
+      subject:
+        - 'group:admins'
+
+###############################################################################
+# Session — cookies on the apex so subdomains share the SSO session
+###############################################################################
+session:
+  name: 'authelia_session'
+  same_site: 'lax'
+  inactivity: '15m'
+  expiration: '12h'
+  remember_me: '1M'
+
+  cookies:
+    - domain: 'antarctica-engineering.com'
+      authelia_url: 'https://auth.antarctica-engineering.com'
+      default_redirection_url: 'https://cloud.antarctica-engineering.com'
+
+###############################################################################
+# Regulation — brute-force lockout (5 attempts / 15 min)
+###############################################################################
+regulation:
+  max_retries: 5
+  find_time: '15m'
+  ban_time: '15m'
+
+###############################################################################
+# Storage backend — sqlite is plenty for 2 users
+###############################################################################
+storage:
+  local:
+    path: '/var/lib/authelia/db.sqlite3'
+
+###############################################################################
+# Notifier — file-based (no SMTP at bootstrap)
+###############################################################################
+notifier:
+  disable_startup_check: true
+  filesystem:
+    filename: '/var/lib/authelia/notifications.txt'
+
+###############################################################################
+# Identity providers — OIDC for Portainer
+###############################################################################
+identity_providers:
+  oidc:
+    # hmac_secret comes from AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE
+    jwks:
+      - key_id: 'main'
+        algorithm: 'RS256'
+        use: 'sig'
+        # The `secret` template func reads /secrets/oidc-key.pem (bind-mounted
+        # in compose). Requires X_AUTHELIA_CONFIG_FILTERS=template (set in compose).
+        key: {{ secret "/secrets/oidc-key.pem" | mindent 10 "|" | msquote }}
+
+    # Lifetimes — short enough to limit blast radius, long enough that
+    # users don't get bounced mid-session.
+    lifespans:
+      access_token: '1h'
+      authorize_code: '1m'
+      id_token: '1h'
+      refresh_token: '90m'
+
+    cors:
+      endpoints:
+        - 'authorization'
+        - 'token'
+        - 'revocation'
+        - 'introspection'
+        - 'userinfo'
+      allowed_origins_from_client_redirect_uris: true
+
+    clients:
+      - client_id: 'console'
+        client_name: 'Console'
+        # client_secret is the pbkdf2-sha512 hash; the plaintext goes into
+        # Portainer's UI. Generate with:
+        #   docker run --rm authelia/authelia:4.39.19 \
+        #     authelia crypto hash generate pbkdf2 --variant sha512
+        client_secret: '${AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH}'
+        public: false
+        authorization_policy: 'two_factor'
+        require_pkce: false
+        redirect_uris:
+          - 'https://console.antarctica-engineering.com'
+        scopes:
+          - 'openid'
+          - 'profile'
+          - 'groups'
+          - 'email'
+        userinfo_signed_response_alg: 'none'
+        token_endpoint_auth_method: 'client_secret_post'

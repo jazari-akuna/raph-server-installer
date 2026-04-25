@@ -1,0 +1,39 @@
+# users_database.yml — example shell for sagan + marcus.
+#
+# This is the COMMITTED template. Copy to users_database.yml on the VPS,
+# substitute the password hashes, then `chmod 0600`.
+#
+# Generating an argon2id hash for `changeme` (the bootstrap password):
+#
+#   docker run --rm authelia/authelia:4.39.19 \
+#       authelia crypto hash generate argon2 \
+#       --variant argon2id --iterations 3 --memory 65536 --parallelism 4 \
+#       --key-length 32 --salt-length 16 --password 'changeme'
+#
+# Paste the resulting digest (it begins with `$argon2id$v=19$m=65536,t=3,p=4$...`)
+# into the password field below. Quote it as a YAML single-quoted string.
+#
+# TOTP is NOT pre-seeded. On first login, Authelia prompts the user to
+# enrol — it generates the secret, displays a QR, and only then accepts
+# 2FA. The deploy report will display each user's QR ASCII for scanning.
+#
+# Group `admins` gates enrol + console access (see configuration.yml access_control).
+
+users:
+  sagan:
+    disabled: false
+    displayname: 'sagan'
+    # Replace with the argon2id digest of `changeme`.
+    password: '$argon2id$v=19$m=65536,t=3,p=4$REPLACE_ME$REPLACE_ME'
+    email: 'raphaelcasimir.inge@gmail.com'
+    groups:
+      - 'admins'
+
+  marcus:
+    disabled: false
+    displayname: 'marcus'
+    # Replace with the argon2id digest of `changeme`.
+    password: '$argon2id$v=19$m=65536,t=3,p=4$REPLACE_ME$REPLACE_ME'
+    email: 'marcus@antarctica-engineering.com'
+    groups:
+      - 'admins'

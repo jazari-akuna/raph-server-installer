@@ -1,0 +1,67 @@
+# enrol — gw0 peer-management web UI.
+#
+# Camouflage: external hostname is `enrol.antarctica-engineering.com`.
+# The internal container/service name `enrol` is fine. The image embeds
+# wireguard-tools + util-linux so it can `nsenter` into the host's PID 1
+# net+mount namespace to reload the gw0 interface after editing gw0.conf.
+#
+# Auth is delegated entirely to Authelia via NPM forward-auth. enrol
+# trusts the Remote-User and Remote-Groups headers and rejects any
+# request missing them. See ../authelia/DESIGN.md.
+#
+# Privilege model:
+#   - cap_add: NET_ADMIN — needed for `wg syncconf` even via nsenter.
+#   - bind-mount /etc/amnezia/amneziawg:rw — gw0.conf is the source of truth.
+#   - bind-mount /var/run/netns + share host pid namespace via pid: host
+#     so nsenter can find PID 1 and join its net namespace where gw0 lives.
+
+services:
+  enrol:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: enrol:local
+    container_name: enrol
+    restart: unless-stopped
+    mem_limit: 128m
+
+    # PID-share with host so nsenter --target 1 can find the init namespace.
+    # This is a controlled escalation: enrol's process can see host PIDs but
+    # cannot write to /proc/<pid>/* without matching uid/caps.
+    pid: host
+
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN   # required by nsenter to join other namespaces
+
+    # No `ports:` — strictly internal. Reachable via NPM at enrol:8080
+    # over the `edge` network.
+
+    volumes:
+      # Source of truth: gw0.conf + sidecar metadata + audit log.
+      - /etc/amnezia/amneziawg:/etc/amnezia/amneziawg:rw
+
+    environment:
+      ENROL_LISTEN: ":8080"
+      ENROL_AWG_DIR: "/etc/amnezia/amneziawg"
+      ENROL_AWG_IFACE: "gw0"
+      ENROL_AWG_ENDPOINT: "gw.antarctica-engineering.com:51820"
+      ENROL_PEER_SUBNET: "10.99.0.0/24"
+      ENROL_PEER_START: "10"
+      ENROL_HEADER_USER: "Remote-User"
+      ENROL_HEADER_GROUPS: "Remote-Groups"
+      ENROL_REQUIRED_GROUP: "admins"
+
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    networks:
+      - edge
+
+networks:
+  edge:
+    external: true

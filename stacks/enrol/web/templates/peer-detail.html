@@ -1,0 +1,25 @@
+{{template "head" .}}
+
+<section>
+  <h2>peer: {{.Peer.Name}}</h2>
+  <dl>
+    <dt>ip</dt><dd><code>{{.Peer.IP}}</code></dd>
+    <dt>public key</dt><dd><code>{{.Peer.PublicKey}}</code></dd>
+    <dt>device tag</dt><dd>{{.Peer.DeviceTag}}</dd>
+    <dt>added by</dt><dd>{{.Peer.AddedBy}}</dd>
+    <dt>added at</dt><dd>{{if .Peer.AddedAt.IsZero}}—{{else}}{{.Peer.AddedAt.Format "2006-01-02 15:04 UTC"}}{{end}}</dd>
+  </dl>
+
+  <h3>current config (private key not retained)</h3>
+  <pre class="conf">{{.ClientConf}}</pre>
+  <p><a class="button" href="/peers/{{.Peer.Name}}/config">download .conf</a></p>
+
+  <form method="POST" action="/peers/{{.Peer.Name}}/delete"
+        onsubmit="return confirm('Remove peer {{.Peer.Name}}?')">
+    <button type="submit" class="danger">remove peer</button>
+  </form>
+
+  <p><a class="button" href="/peers">← back to peers</a></p>
+</section>
+
+{{template "tail" .}}

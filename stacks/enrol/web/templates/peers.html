@@ -1,0 +1,46 @@
+{{template "head" .}}
+
+{{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+
+<section>
+  <h2>peers</h2>
+  {{if .Peers}}
+  <table>
+    <thead>
+      <tr><th>name</th><th>ip</th><th>tag</th><th>added by</th><th>added at</th><th></th></tr>
+    </thead>
+    <tbody>
+    {{range .Peers}}
+      <tr>
+        <td><a href="/peers/{{.Name}}">{{.Name}}</a></td>
+        <td><code>{{.IP}}</code></td>
+        <td>{{.DeviceTag}}</td>
+        <td>{{.AddedBy}}</td>
+        <td>{{if .AddedAt.IsZero}}—{{else}}{{.AddedAt.Format "2006-01-02 15:04"}}{{end}}</td>
+        <td>
+          <form method="POST" action="/peers/{{.Name}}/delete"
+                onsubmit="return confirm('Remove peer {{.Name}}?')">
+            <button type="submit" class="danger">remove</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>no peers yet.</p>
+  {{end}}
+</section>
+
+<section>
+  <h2>add peer</h2>
+  <form method="POST" action="/peers">
+    <label>name <input type="text" name="name" required
+      pattern="[A-Za-z0-9._\-]{1,64}" placeholder="e.g. sagan-phone"></label>
+    <label>device tag <input type="text" name="device_tag"
+      placeholder="optional, free-form"></label>
+    <button type="submit">add</button>
+  </form>
+</section>
+
+{{template "tail" .}}

@@ -1,0 +1,29 @@
+{{/*
+   _layout.html — shared HTML chrome.
+
+   Pages bracket their body with {{template "head" .}} and {{template "tail" .}}.
+   The page context object must expose .Title (string) and .User (string).
+*/}}
+
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} — enrol</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1><a href="/peers">enrol</a></h1>
+    <nav>
+      <a href="/peers">peers</a>
+      <a href="/audit">audit</a>
+    </nav>
+    <div class="who">{{.User}}</div>
+  </header>
+  <main>{{end}}
+
+{{define "tail"}}</main>
+</body>
+</html>{{end}}
