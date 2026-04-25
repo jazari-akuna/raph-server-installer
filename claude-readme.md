@@ -44,7 +44,7 @@ Do not propose, do not scaffold:
 
 - Hard multi-tenant isolation (LXC / VM / rootless Docker per user).
 - Client-side end-to-end encryption (Cryptomator, age, etc.).
-- Cloudflare orange-cloud proxy on any record (breaks `gw0` / `qedge` ingress).
+- CDN / DNS-proxy fronting on any record (Cloudflare orange-cloud, OVH AlwaysOn, etc.) — breaks `gw0` / `qedge` ingress.
 - Any admin UI on public DNS.
 - A push-based backup tool running on the server.
 - `qedge` (alternate ingress) running by default. It stays stopped until needed.

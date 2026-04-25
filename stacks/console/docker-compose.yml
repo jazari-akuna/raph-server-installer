@@ -1,0 +1,40 @@
+# console — Docker management UI (internally: Portainer CE)
+#
+# Camouflage: service/container/volume use the neutral name `console`.
+# Admin UI is mesh-only. Bindings are 127.0.0.1 ONLY — never 0.0.0.0,
+# never published through `ingress`. Reach it via SSH tunnel or via the
+# `mesh` (Tailscale) overlay once that is up.
+
+services:
+  console:
+    # Pinned to current stable LTS (verified 2026-04: 2.39.1 LTS).
+    # Bump deliberately; do not use `latest`.
+    image: portainer/portainer-ce:2.39.1
+    container_name: console
+    restart: unless-stopped
+    mem_limit: 2g
+    ports:
+      # HTTPS admin UI — bound to loopback only.
+      - "127.0.0.1:9443:9443"
+      # Edge agent tunnel — optional. Only needed if remote Edge agents
+      # are being adopted into this Portainer instance. Safe to leave
+      # bound to loopback; remove this line entirely if unused.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - portainer_data:/data
+      # Read-only docker socket: Portainer can list/observe but a
+      # compromise can't directly mutate the daemon via the socket.
+      # NOTE: Portainer features that require write access (deploying
+      # stacks, pulling images, container lifecycle) will be limited.
+      # If full management is required, drop the `:ro` suffix —
+      # accepting that this then becomes a root-equivalent endpoint.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - edge
+
+volumes:
+  portainer_data:
+
+networks:
+  edge:
+    external: true

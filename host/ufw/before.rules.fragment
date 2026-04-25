@@ -1,0 +1,25 @@
+# BEGIN gw0-nat
+# Spliced into /etc/ufw/before.rules by scripts/install-gw0.sh.
+# The marker comments above and below are load-bearing — the install script
+# uses them to detect prior installation (idempotency) and to re-render
+# without clobbering hand-edits elsewhere in before.rules.
+#
+# ${PUBLIC_IFACE} is substituted at install time from:
+#   ip route show default | awk '/default/ {print $5; exit}'
+
+# NAT table: MASQUERADE outbound traffic from the gw0 subnet so the kernel
+# rewrites the source to the VPS public IP. Without this, return packets
+# never come back. *nat must precede the *filter section already present in
+# before.rules — the install script splices this block at the top.
+*nat
+:POSTROUTING ACCEPT [0:0]
+-A POSTROUTING -s 10.99.0.0/24 -o ${PUBLIC_IFACE} -j MASQUERADE
+COMMIT
+
+# Filter table additions: ufw's default FORWARD policy is DROP. These two
+# rules let packets enter and leave gw0 freely. The install script appends
+# them inside the existing *filter section of before.rules (before its
+# COMMIT), not as a standalone table.
+-A ufw-before-forward -i gw0 -j ACCEPT
+-A ufw-before-forward -o gw0 -j ACCEPT
+# END gw0-nat

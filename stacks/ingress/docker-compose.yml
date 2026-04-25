@@ -1,0 +1,30 @@
+# ingress — Nginx Proxy Manager (NPM)
+#
+# Public on :80/:443. Admin UI bound to 127.0.0.1:81 only — reachable
+# via the `mesh` overlay or via SSH tunnel, never from the public internet.
+# DNS-01 wildcard cert is requested through the admin UI using an OVH
+# application token scoped to the single zone. See ./README.md for the runbook.
+
+services:
+  ingress:
+    # jc21/nginx-proxy-manager — current stable: 2.14.0 (verified 2026-04-25 against Docker Hub)
+    # Pin a specific tag, not `latest`, so deploys are reproducible.
+    image: jc21/nginx-proxy-manager:2.14.0
+    container_name: ingress
+    restart: unless-stopped
+    ports:
+      # Public HTTP/HTTPS ingress.
+      - "80:80"
+      - "443:443"
+      # Admin UI: loopback-only. Reach it via SSH tunnel or the mesh overlay.
+      - "127.0.0.1:81:81"
+    volumes:
+      - ./data:/data
+      - ./letsencrypt:/etc/letsencrypt
+    networks:
+      - edge
+    mem_limit: 2g
+
+networks:
+  edge:
+    external: true

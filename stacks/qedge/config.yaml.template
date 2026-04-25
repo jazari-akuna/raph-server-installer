@@ -1,0 +1,48 @@
+# qedge server config — Hysteria 2 (tobyxdd/hysteria, v2 syntax)
+#
+# This is a TEMPLATE. To render the live config:
+#
+#   1. Copy to ./config/config.yaml on the VPS:
+#         install -d -m 0750 /opt/stacks/qedge/config
+#         cp /opt/stacks/qedge/config.yaml.template /opt/stacks/qedge/config/config.yaml
+#   2. Substitute ${QEDGE_PASSWORD} with the value from ./.env, e.g.:
+#         set -a; . /opt/stacks/qedge/.env; set +a
+#         envsubst < /opt/stacks/qedge/config.yaml.template \
+#             > /opt/stacks/qedge/config/config.yaml
+#   3. chmod 0640 /opt/stacks/qedge/config/config.yaml
+#
+# Camouflage notes:
+#   - The cert presented on this :443/udp endpoint is the wildcard
+#     *.antarctica-engineering.com from NPM. Clients connect with SNI
+#     `cdn.antarctica-engineering.com`. To a passive observer, the TLS
+#     handshake is indistinguishable from an ordinary CDN edge.
+#   - The masquerade block below makes any non-Hysteria HTTP probe of this
+#     endpoint reverse-proxy to www.cloudflare.com — the response looks like
+#     a generic CDN page, not a Hysteria server.
+
+# Listen on :443/udp inside the container. The compose file publishes
+# host :443/udp -> container :443/udp.
+listen: :443
+
+tls:
+  # These paths are inside the container; on the host they are symlinks under
+  # /opt/stacks/qedge/tls/ into NPM's letsencrypt live/npm-N/ directory.
+  cert: /etc/hysteria/tls/fullchain.pem
+  key: /etc/hysteria/tls/privkey.pem
+
+auth:
+  type: password
+  # Substituted at render time from ./.env (see header). Never commit a real
+  # value to this template.
+  password: ${QEDGE_PASSWORD}
+
+masquerade:
+  # If anything that isn't a valid Hysteria client probes this endpoint over
+  # HTTP/3, reverse-proxy the request to a real CDN so the response looks
+  # legitimate. `rewriteHost: true` makes the upstream see its own hostname
+  # in the Host header, so Cloudflare returns its normal landing page rather
+  # than a routing error.
+  type: proxy
+  proxy:
+    url: https://www.cloudflare.com/
+    rewriteHost: true

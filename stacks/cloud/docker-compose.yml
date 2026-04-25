@@ -1,0 +1,64 @@
+# cloud — file server (internally: copyparty)
+#
+# Camouflage: service/container/network use the neutral name `cloud`.
+# No public port bindings — reachable only via `ingress`
+# (cloud.antarctica-engineering.com) over the shared `edge` network.
+# copyparty's default port is 3923; we expose nothing to the host.
+#
+# Volume semantics: /srv/store/mnt/{sagan,marcus} on the host are LUKS
+# unlock points. When the per-user blob is NOT unlocked these are empty
+# directories, and copyparty serves an empty volume — fail-closed by
+# accident, intentional. See ./README.md.
+
+services:
+  cloud:
+    # copyparty/ac — "all-codecs" image (bundles ffmpeg etc. for thumbnails
+    # and audio transcoding). Pinned to current stable verified 2026-04-25:
+    # tag v1.20.14 ("autolocalization"). Bump deliberately; do not use
+    # `latest`. Upstream: https://github.com/9001/copyparty
+    image: copyparty/ac:1.20.14
+    container_name: cloud
+    restart: unless-stopped
+    mem_limit: 2g
+
+    # No `ports:` — strictly internal. `ingress` reaches us over `edge`
+    # at cloud:3923. Adding a public port binding is a misconfiguration.
+
+    # The image's entrypoint reads /cfg/*.conf automatically when /cfg
+    # is present (`-c /cfg`-equivalent behavior baked into the upstream
+    # entrypoint). We mount our config there read-only and let the
+    # default startup pick it up. No `command:` override needed.
+
+    volumes:
+      # Per-user data roots — bind-mounts onto LUKS mountpoints.
+      # When the LUKS blob isn't unlocked these are empty dirs (fine).
+      - /srv/store/mnt/sagan:/w/sagan
+      - /srv/store/mnt/marcus:/w/marcus
+      # Config (read-only). copyparty auto-loads *.conf from /cfg.
+      - ./conf:/cfg:ro
+      # Persistent state: hash DB, thumbs cache, ah-salt.txt, etc.
+      - ./data:/var/lib/copyparty
+
+    environment:
+      # Make logs flush promptly so `docker logs` is useful during
+      # auth / volume troubleshooting.
+      PYTHONUNBUFFERED: "1"
+
+    # Allow the thumbnailer to drain on shutdown (matches upstream advice).
+    stop_grace_period: 15s
+
+    healthcheck:
+      # `/?reset=/._` matches the default --lf-url filter so health pings
+      # don't spam the access log.
+      test: ["CMD-SHELL", "wget --spider -q 127.0.0.1:3923/?reset=/._"]
+      interval: 1m
+      timeout: 2s
+      retries: 5
+      start_period: 15s
+
+    networks:
+      - edge
+
+networks:
+  edge:
+    external: true

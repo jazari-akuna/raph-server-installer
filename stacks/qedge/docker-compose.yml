@@ -1,0 +1,61 @@
+# qedge — alternate ingress (internally: Hysteria2 over QUIC on :443/udp)
+#
+# Stays STOPPED by default. This stack is the contingency path: it is only
+# brought up when the primary `gw0` (AmneziaWG) gateway is being actively
+# probed or blocked under heavy regional pressure. See ./README.md for the
+# switchover runbook.
+#
+# Camouflage:
+#   - Service name, container name, on-disk paths all use the neutral `qedge`.
+#     The package is `hysteria` (out of scope for the camouflage layer).
+#   - The server presents SNI cdn.antarctica-engineering.com via the wildcard
+#     cert provisioned by `ingress` (NPM). To a passive observer this looks
+#     like a CDN edge: a TLS handshake on :443 with a *.antarctica-engineering
+#     cert, and any HTTP probe is masqueraded as a generic CDN response (see
+#     ./config.yaml.template's masquerade block).
+#
+# Port layout — IMPORTANT:
+#   - 443/UDP only. NPM (`ingress`) owns 443/TCP for ordinary HTTPS. There is
+#     no conflict because TCP and UDP port spaces are disjoint, but the
+#     publish line below MUST stay UDP-only.
+#   - No 80/TCP, no 80/UDP. ACME HTTP-01 isn't used for this service; the
+#     wildcard cert is supplied by NPM via the ./tls/ symlinks.
+#
+# Cert source:
+#   ./tls/fullchain.pem and ./tls/privkey.pem are SYMLINKS into NPM's
+#   letsencrypt store on the host (NPM uses numbered live/ dirs:
+#   /opt/stacks/ingress/letsencrypt/live/npm-N/). Mounted read-only here.
+#   See ./README.md for the symlink procedure.
+#
+# Restart policy: deliberately `no`. We do NOT want this auto-starting after
+# a host reboot — the whole point is that it stays cold until an operator
+# decides to switch over. `docker compose up -d` from /opt/stacks/qedge will
+# bring it up; `docker compose down` (or stopping from `console`) brings it
+# back to cold.
+
+services:
+  qedge:
+    # tobyxdd/hysteria — Hysteria 2. Pin a specific version, not `latest` /
+    # `v2`, so deploys are reproducible. Current stable: v2.8.1
+    # (verified 2026-04-25 against Docker Hub). Bump deliberately.
+    image: tobyxdd/hysteria:v2.8.1
+    container_name: qedge
+    restart: "no"
+    command: ["server", "-c", "/etc/hysteria/config.yaml"]
+    ports:
+      # 443/UDP only. Do NOT add a TCP mapping here — NPM owns 443/TCP.
+      - "443:443/udp"
+    volumes:
+      # Server config (rendered from ./config.yaml.template with the password
+      # from .env — see ./README.md). Read-only.
+      - ./config:/etc/hysteria:ro
+      # TLS material. These are symlinks on the host into NPM's letsencrypt
+      # live/ directory. Read-only.
+      - ./tls:/etc/hysteria/tls:ro
+    networks:
+      - edge
+    mem_limit: 2g
+
+networks:
+  edge:
+    external: true

@@ -1,0 +1,28 @@
+[Unit]
+Description=Unlock and mount store volume for %i
+Documentation=file:///srv/rarcus-server/docs/plan.md
+# Both the blob source and the mountpoint parent must exist before we run.
+RequiresMountsFor=/srv/store/data /srv/store/mnt
+# Manual unlock only — never on boot. This unit is intentionally absent from
+# any WantedBy=. Started on demand via `systemctl start store-mount@<user>`.
+ConditionPathExists=/srv/store/data/%i.img
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+
+# Open the encrypted blob. systemd-ask-password --no-tty so this works under
+# `systemctl start` from any context (SSH, cron, web): the prompt is delivered
+# to whatever password agent is registered (plymouth, wall, systemd-tty-ask-
+# password-agent on a console). Pipe the answer to cryptsetup on stdin.
+ExecStart=/bin/sh -c '/bin/systemd-ask-password --no-tty "Passphrase for store/%i:" | /sbin/cryptsetup open --type luks2 --key-file=- /srv/store/data/%i.img store_%i'
+ExecStart=/bin/mkdir -p /srv/store/mnt/%i
+ExecStart=/bin/mount /dev/mapper/store_%i /srv/store/mnt/%i
+
+# Clean teardown: unmount, then close the mapper device. `-` prefix on the
+# umount lets close still run if the mount was already gone.
+ExecStop=-/bin/umount /srv/store/mnt/%i
+ExecStop=/sbin/cryptsetup close store_%i
+
+# Not in any WantedBy — on-demand only.
+[Install]

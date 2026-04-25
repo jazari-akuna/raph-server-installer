@@ -89,7 +89,7 @@ Single-host, single-Docker-daemon, ingress (NPM) is the only thing on :80/:443. 
 | Host OS | Ubuntu 24.04 LTS (not 25.10) | LTS gets 5-yr support; kernel 6.8 is well-supported by every module below. |
 | Container runtime | Docker CE + compose v2 | Already familiar, manageable from the web UI, vast image ecosystem. |
 | Container UI | **Portainer CE** (referred to internally as `console`) | Mature, supports compose stacks, custom containers, image build, volume/network management. ~150 MB RAM. |
-| Reverse proxy | **Nginx Proxy Manager** (referred to internally as `ingress`) | Click-driven UI, auto-Let's Encrypt with DNS-01 wildcard via Cloudflare API, per-host access lists. ~100 MB RAM. |
+| Reverse proxy | **Nginx Proxy Manager** (referred to internally as `ingress`) | Click-driven UI, auto-Let's Encrypt with DNS-01 wildcard via OVH API (or any DNS-01-supported provider), per-host access lists. ~100 MB RAM. |
 | File server | **copyparty** in Docker (referred to internally as `cloud`) | What you asked for; great UX; ACL'd per-user. |
 | At-rest encryption | **LUKS2** sparse file per user, mounted at unlock time via systemd | Maintainer-recommended; portable single-file blob; ~0% perf overhead; trivial backup target. |
 | Primary gateway | **AmneziaWG** kernel module via DKMS, interface `gw0` | WireGuard variant with anti-DPI junk packets + randomized init headers. Single-digit-% overhead. Survives "reliable for daily work" regional pressure. Interface name `gw0`, not `awg0`/`wg0`, to avoid the obvious banner. |
@@ -120,7 +120,7 @@ Subdomains, paths, container names, systemd units all follow this naming. Public
 
 - Hard multi-tenant isolation (LXC/VM per user). You're co-admins.
 - Client-side end-to-end encryption (Cryptomator etc.). You picked encrypted-at-rest only.
-- Cloudflare proxy (orange-cloud) for the apex. We use Cloudflare DNS + DNS-01 ACME for wildcard certs but leave records grey-cloud — orange-cloud breaks `gw0`/`qedge` ingress and adds an unwanted MITM.
+- CDN / DNS-proxy fronting (Cloudflare orange-cloud, OVH AlwaysOn, etc.) on the apex or any subdomain. We use OVH for DNS only and DNS-01 ACME for wildcard certs; records stay direct (no proxy in front) — proxy-fronting breaks `gw0`/`qedge` ingress and adds an unwanted MITM.
 - `qedge` as the daily driver. It stays stopped until the primary path is actively under pressure.
 
 ## DNS Layout (`antarctica-engineering.com`)
@@ -141,7 +141,7 @@ Public app subdomains, created in `ingress` as needed:
 
 **Admin UIs are not on public DNS.** `console` (Portainer) and `ingress`'s own admin panel are reachable **only** via the `mesh` overlay or via SSH-tunnel — there's no public hostname for them. This matters because admin UIs are the highest-value compromise targets and exposing them publicly is the main thing that gets DIY self-hosters owned.
 
-DNS-01 ACME against the Cloudflare API gives `ingress` a wildcard cert covering everything, no per-subdomain HTTP-01 dance. SNI for `cdn.antarctica-engineering.com` (`qedge`) is presented by Hysteria2 itself with the same cert, so it looks like a perfectly ordinary CDN edge to a passive observer.
+DNS-01 ACME against the OVH API gives `ingress` a wildcard cert covering everything, no per-subdomain HTTP-01 dance. SNI for `cdn.antarctica-engineering.com` (`qedge`) is presented by Hysteria2 itself with the same cert, so it looks like a perfectly ordinary CDN edge to a passive observer.
 
 ## Filesystem Layout
 
@@ -178,10 +178,10 @@ This is the order to actually do things; each step depends on the previous.
 
 0. **Create project repo on the laptop** — `mkdir -p /home/sagan/Projects/rarcus-server/{docs,stacks/{ingress,console,cloud,qedge},host/{sysctl,ufw,wireguard,systemd},scripts,peers}`; copy this plan into `docs/plan.md`; `git init`; write the `.gitignore` (peers/, *.key, *.crt, *.env, secrets/); first commit. Everything else flows from this directory.
 1. **Base host hardening** — fresh Ubuntu 24.04, non-root admin users (`sagan`, `marcus`), SSH key-only auth, `fail2ban`, `ufw` default-deny inbound, `unattended-upgrades`, swapfile (4 GB), enable BBR + `net.ipv4.ip_forward=1` in `/etc/sysctl.d/99-host.conf`.
-2. **DNS** — set Cloudflare A + wildcard + `gw.` + `cdn.` records (all grey-cloud); generate Cloudflare API token scoped to DNS:Edit on the zone (`ingress` will use this for DNS-01).
+2. **DNS** — create A + wildcard + `gw.` + `cdn.` records at OVH (no CDN / proxy in front); generate an OVH application token scoped to DNS read/write on the single zone (`ingress` will use this for DNS-01). See `stacks/ingress/README.md` §2 for the exact token grant list.
 3. **Docker** — install Docker CE, add both users to the `docker` group, create the `edge` Docker network that all `ingress`-fronted services join.
 4. **`console` (Portainer)** — bootstrap via one-shot `docker run`, then create admin accounts. From here on, every other stack is created via `console`.
-5. **`ingress` (NPM) stack** — deploy via `console`; configure Cloudflare DNS-01 with the API token; provision wildcard cert for `*.antarctica-engineering.com`; expose `cloud.antarctica-engineering.com` as the first proxy host (proves the stack works end-to-end). Do **not** create a public proxy host for `console` or for `ingress`'s own admin — restrict those to the `mesh` overlay.
+5. **`ingress` (NPM) stack** — deploy via `console`; configure OVH DNS-01 with the application token; provision wildcard cert for `*.antarctica-engineering.com`; expose `cloud.antarctica-engineering.com` as the first proxy host (proves the stack works end-to-end). Do **not** create a public proxy host for `console` or for `ingress`'s own admin — restrict those to the `mesh` overlay.
 6. **`store` volumes** — create `sagan.img` + `marcus.img` under `/srv/store/data/` (50 GB each, sparse, LUKS2, argon2id KDF); each user sets their own passphrase; install `store-mount@.service` systemd template that prompts via `systemd-ask-password` at unlock time (manual unlock on each reboot — passphrases never on disk).
 7. **`cloud` (copyparty) stack** — deploy via `console` with bind-mounts to `/srv/store/mnt/sagan` and `/srv/store/mnt/marcus`; configure two copyparty user accounts mapped to those volumes; expose at `cloud.antarctica-engineering.com` through `ingress`. Verify: when a volume isn't mounted, copyparty just sees an empty directory (fail-closed by accident — fine).
 8. **Gateway server (`gw0`)** — install `amneziawg-dkms` + `amneziawg-tools` from the upstream PPA; rename the interface to `gw0` in the unit; if DKMS doesn't build against the running kernel, fall back to the userspace `amneziawg-go` binary; configure anti-DPI parameters (`Jc/Jmin/Jmax/S1/S2/H1/H2/H3/H4`); add NAT MASQUERADE for `gw0` in `/etc/ufw/before.rules`; enable on boot.
@@ -238,6 +238,6 @@ End-to-end checks before declaring done. Run from outside the VPS unless noted.
 - **DKMS module against newer kernels.** Mitigation: pin Ubuntu 24.04 LTS (kernel 6.8) and accept the userspace fallback (~30% perf hit but still hits the 50 Mbps target).
 - **`console` is a single point of compromise** for the Docker daemon. Keeping it off public DNS and reachable only via `mesh` (or SSH tunnel) is doing a lot of the heavy lifting here. Enable Portainer's MFA on top.
 - **Manual volume unlock on every reboot.** Intentional — passphrases not on disk. If the VPS reboots while you're asleep, `cloud` is unavailable until someone unlocks. Acceptable for the threat model.
-- **Wildcard cert via Cloudflare DNS-01** means a Cloudflare API token lives on the server. Scope it tightly (DNS:Edit on the single zone), rotate yearly, store in `ingress`'s encrypted config — not in plain compose files.
+- **Wildcard cert via OVH DNS-01** means an OVH application token (application_key / application_secret / consumer_key triple) lives on the server. Scope it tightly (DNS read/write on the single zone), rotate yearly, store in `ingress`'s encrypted config — not in plain compose files.
 - **CIDR list drift.** Updates monthly-ish. If a domestic service moves to a new prefix that isn't yet in the list, traffic to it briefly transits the VPS (correct destination, slower path, no breakage). Acceptable.
 - **Camouflage is defense-in-depth, not invisibility.** Anyone with shell access on the box can `apt list --installed`, `ip -d link show gw0`, `ss -tulpn` and identify every component. The renamed paths/subdomains/units protect against passive DNS observation, casual SNI fingerprinting, banner grabs, and backup-blob filename leakage — not against an attacker who already has root.

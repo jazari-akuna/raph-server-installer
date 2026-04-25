@@ -1,0 +1,11 @@
+# /etc/fail2ban/jail.local
+# Installed by scripts/bootstrap-host.sh.
+
+[DEFAULT]
+bantime = 1h
+findtime = 10m
+maxretry = 5
+bantime.increment = true
+
+[sshd]
+enabled = true
