@@ -17,16 +17,19 @@ FROM golang:1.23-bookworm AS build
 
 WORKDIR /src
 
-# Copy go.mod first for layer caching.
+# Copy go.mod first for layer caching. go.sum may or may not be
+# present in the source tree — the laptop has no Go installed so we
+# can't `go mod tidy` there. The COPY pattern here uses a glob so a
+# missing go.sum doesn't fail the layer.
 COPY go.mod ./
-# go.sum is produced by `go mod tidy`; if absent at build time the
-# `go mod download` below seeds it. We don't commit go.sum because the
-# laptop doesn't have network for `go mod tidy` in this flow — it'll be
-# regenerated and committed in a follow-up if/when the build is exercised
-# against the network. For now keep deps to stdlib + skip2/go-qrcode.
-RUN go mod download || true
+COPY go.su[m] ./
 
 COPY . .
+
+# Generate go.sum if missing (laptop case), then download. This is
+# slower than the cached download path but only runs once per image.
+RUN test -f go.sum || go mod tidy
+RUN go mod download
 
 # Build a static binary. CGO disabled.
 RUN CGO_ENABLED=0 GOOS=linux go build \
@@ -38,18 +41,42 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 ###############################################################################
 FROM debian:trixie-slim
 
-# wireguard-tools provides `wg` (used as the fall-back if the bind-mounted
-# host /usr/bin/awg is missing). util-linux gives us nsenter for backward
-# compatibility when ENROL_RELOAD_NSENTER=true. iproute2 + qrencode +
-# wget are runtime deps.
+# Runtime deps:
+#   ca-certificates       — TLS roots (for `docker exec authelia …` over
+#                           the docker socket; not strictly required but
+#                           cheap; future-proofs HTTPS-talking code).
+#   wireguard-tools       — `wg` fallback if host /usr/bin/awg is absent.
+#   util-linux + mount    — `mount` / `umount` / `nsenter` / `findmnt`.
+#   iproute2              — `ip` (rare debug; cheap).
+#   qrencode              — render TOTP + peer-config QR PNGs.
+#   wget                  — healthcheck only.
+#   cryptsetup-bin        — luksFormat / open / close / luksAddKey /
+#                           luksRemoveKey / luksDump for LUKS lifecycle.
+#   e2fsprogs             — mkfs.ext4 / resize2fs / e2label.
+#   coreutils             — `shred` for secure deletion of LUKS blobs.
+#                           (already in -slim but listed explicitly so
+#                           future image switches don't drop it.)
+#   docker-cli            — used to call `docker exec authelia authelia
+#                           storage user totp generate <user>` via the
+#                           bind-mounted /var/run/docker.sock.
+#   passwd / login        — useradd / userdel for host-side user
+#                           management; provided by the `passwd` package
+#                           in trixie.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
         wireguard-tools \
         util-linux \
+        mount \
         iproute2 \
         qrencode \
         wget \
+        cryptsetup-bin \
+        e2fsprogs \
+        coreutils \
+        docker-cli \
+        passwd \
+        login \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/enrol /usr/local/bin/enrol

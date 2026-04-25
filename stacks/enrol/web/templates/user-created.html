@@ -1,0 +1,40 @@
+{{template "head" .}}
+
+<section class="created">
+  <h2>user created: {{.Created}}</h2>
+
+  {{if .Flash}}<div class="warn">{{.Flash}}</div>{{end}}
+
+  <p>
+    The user account has been created in Authelia, the LUKS volume
+    was provisioned, and a TOTP secret has been generated. The QR
+    below is the <strong>only</strong> opportunity to capture the TOTP
+    seed — it is not stored in any log and cannot be retrieved later.
+    If you navigate away without scanning, regenerate from the user
+    page (this invalidates any previously displayed secret).
+  </p>
+
+  {{if .QRDataURI}}
+  <h3>scan this QR with the user's authenticator app</h3>
+  <p><img class="qr" src="{{.QRDataURI}}" alt="TOTP enrolment QR"></p>
+  {{end}}
+
+  {{if .OtpauthURI}}
+  <h3>otpauth URI (for password managers)</h3>
+  <pre class="conf">{{.OtpauthURI}}</pre>
+  {{end}}
+
+  <p>
+    The login password set at create-time has been hashed (argon2id) and
+    written to <code>users_database.yml</code>. Communicate the password
+    to the user out of band; do not display it on a screen anyone else
+    can see.
+  </p>
+
+  <p>
+    <a class="button" href="/users/{{.Created}}">→ continue to user detail</a>
+    <a class="button" href="/users">← users list</a>
+  </p>
+</section>
+
+{{template "tail" .}}

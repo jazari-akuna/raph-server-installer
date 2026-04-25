@@ -1,0 +1,74 @@
+{{template "head" .}}
+
+{{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+
+<section>
+  <h2>users</h2>
+  {{if .Users}}
+  <table>
+    <thead>
+      <tr><th>name</th><th>display</th><th>email</th><th>groups</th><th>volume</th><th></th></tr>
+    </thead>
+    <tbody>
+    {{range .Users}}
+      <tr>
+        <td><a href="/users/{{.Name}}">{{.Name}}</a></td>
+        <td>{{.DisplayName}}</td>
+        <td><code>{{.Email}}</code></td>
+        <td>{{join .Groups ", "}}</td>
+        <td>
+          {{if .HasVolume}}
+            {{if .VolMounted}}<span class="ok">unlocked</span>{{else}}<span class="muted">locked</span>{{end}}
+          {{else}}
+            <span class="warn">none</span>
+          {{end}}
+        </td>
+        <td><a class="button" href="/users/{{.Name}}">manage</a></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>no users yet.</p>
+  {{end}}
+</section>
+
+<section>
+  <h2>create user</h2>
+  <p class="hint">
+    Creates the Authelia entry, host system user, 50&nbsp;GB LUKS volume,
+    and a fresh TOTP secret. The TOTP QR is shown once on the next page —
+    save it before navigating away. The login password and the LUKS
+    passphrase are intentionally separate (a leaked Authelia password
+    must not also unlock the data blob at rest).
+  </p>
+  <form method="POST" action="/users">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label>username
+      <input type="text" name="name" required
+        pattern="[a-z][a-z0-9_\-]{0,31}" maxlength="32"
+        placeholder="e.g. enrolqc">
+    </label>
+    <label>display name
+      <input type="text" name="displayname" required
+        maxlength="64" placeholder="e.g. QC test user">
+    </label>
+    <label>email
+      <input type="email" name="email" required
+        placeholder="user@example.com">
+    </label>
+    <label>login password
+      <input type="password" name="password" required
+        minlength="12" autocomplete="new-password"
+        placeholder="at least 12 chars">
+    </label>
+    <label>LUKS passphrase
+      <input type="password" name="luks_passphrase" required
+        minlength="12" autocomplete="new-password"
+        placeholder="separate from login password">
+    </label>
+    <button type="submit">create</button>
+  </form>
+</section>
+
+{{template "tail" .}}

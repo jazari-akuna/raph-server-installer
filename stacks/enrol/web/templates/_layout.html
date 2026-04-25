@@ -1,8 +1,9 @@
 {{/*
-   _layout.html — shared HTML chrome.
+   _layout.html — shared HTML chrome for enrol.
 
-   Pages bracket their body with {{template "head" .}} and {{template "tail" .}}.
-   The page context object must expose .Title (string) and .User (string).
+   Page contexts must expose:
+     .Title  string
+     .User   string  (Authelia username from Remote-User)
 */}}
 
 {{define "head"}}<!doctype html>
@@ -15,9 +16,10 @@
 </head>
 <body>
   <header>
-    <h1><a href="/peers">enrol</a></h1>
+    <h1><a href="/users">enrol</a></h1>
     <nav>
-      <a href="/peers">peers</a>
+      <a href="/users">users</a>
+      <a href="/peers">devices</a>
       <a href="/audit">audit</a>
     </nav>
     <div class="who">{{.User}}</div>

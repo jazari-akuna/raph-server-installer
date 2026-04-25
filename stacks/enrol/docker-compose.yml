@@ -1,28 +1,39 @@
-# enrol — gw0 peer-management web UI.
+# enrol — server admin UI (users, LUKS storage, TOTP, devices).
 #
 # Camouflage: external hostname is `enrol.antarctica-engineering.com`.
-# The internal container/service name `enrol` is fine.
+# Internal container/service name `enrol` is fine.
 #
 # Auth is delegated entirely to Authelia via NPM forward-auth. enrol
 # trusts the Remote-User and Remote-Groups headers and rejects any
-# request missing them. See ../authelia/DESIGN.md.
+# request missing them. CSRF tokens further gate every mutating POST.
+# See DESIGN.md.
 #
-# Privilege model (plan B — network_mode: host):
-#   - network_mode: host — the container shares the host's network
-#     namespace directly, so `awg syncconf gw0` runs against the live
-#     interface without needing nsenter. ENROL_RELOAD_NSENTER=false
-#     tells the Go reload routine to skip the nsenter wrapper.
-#   - cap_add: NET_ADMIN — required for the netlink syscalls behind
-#     `awg syncconf`. SYS_ADMIN was only needed for nsenter; dropped.
-#   - bind-mount /etc/amnezia/amneziawg:rw — gw0.conf is the source of
-#     truth on disk; container edits it then issues syncconf.
-#   - No security_opt overrides — default docker AppArmor profile is
-#     fine without namespace crossing.
-#   - ENROL_LISTEN bound to the docker bridge gateway IP (172.17.0.1)
-#     so NPM (on the edge bridge) can reach us via host.docker.internal
-#     while the public WAN interface is NOT bound. Cannot bind to
-#     127.0.0.1 because containers on docker0 reach the host as
-#     172.17.0.1 (their default gateway), not as host loopback.
+# === PRIVILEGE WARNING ====================================================
+# enrol runs PRIVILEGED. It can:
+#   - format/wipe LUKS blobs under /srv/store
+#   - mount / unmount filesystems on the host
+#   - rewrite Authelia's users_database.yml (create/delete users,
+#     change passwords, change group membership)
+#   - exec into any container via the bind-mounted docker socket
+# Anyone with admin access to enrol is effectively root on this host.
+# Mitigations: NPM HTTPS + Authelia 2FA + CSRF + audit log. See
+# README.md "Security & Threat Model" and DESIGN.md § 3.
+# ==========================================================================
+#
+# Privilege model:
+#   - privileged: true — covers loop devices, dm-crypt, mount, shred.
+#     We considered a surgical alternative (cap_add SYS_ADMIN/MKNOD/
+#     NET_ADMIN + --device=/dev/loop-control + cgroup rule for /dev/loopN
+#     + AppArmor=unconfined), but the practical access set is the same
+#     and the surgical version is fragile across kernel updates. See
+#     DESIGN.md § 0.4.
+#   - network_mode: host — kept from prior compose. `awg syncconf gw0`
+#     needs to run in the host's net namespace and is simpler with
+#     network_mode: host than with nsenter.
+#   - The container exposes ENROL_LISTEN on 172.17.0.1:8080. NPM (on the
+#     edge bridge) reaches us via that bridge gateway IP. The public WAN
+#     interface is NOT bound. We cannot bind 127.0.0.1 because edge-network
+#     containers reach the host as 172.17.0.1, not as loopback.
 
 services:
   enrol:
@@ -39,21 +50,48 @@ services:
     # needed. Mutually exclusive with `networks:` and `ports:`.
     network_mode: host
 
-    cap_add:
-      - NET_ADMIN
+    # privileged: true covers the entire LUKS toolchain: loop devices,
+    # dm-mapper, mount syscalls, raw block-device shred. cap_add is
+    # implied but listed for documentation.
+    privileged: true
 
     volumes:
-      # Source of truth: gw0.conf + sidecar metadata + audit log.
+      # Source of truth for peers: gw0.conf + sidecar metadata + the
+      # shared audit log (peers + users + LUKS lifecycle entries).
       - /etc/amnezia/amneziawg:/etc/amnezia/amneziawg:rw
+
+      # LUKS blobs (/srv/store/data/<u>.img) and mountpoints
+      # (/srv/store/mnt/<u>). Bind-propagation: rshared lets mounts
+      # done inside the container appear on the host (so `cloud` —
+      # which mounts /srv/store/mnt:/w with rslave — picks them up),
+      # AND lets host-driven mounts come back into the container.
+      # See ../enrol/DESIGN.md § 0.3 and stacks/cloud/docker-compose.yml.
+      - type: bind
+        source: /srv/store
+        target: /srv/store
+        bind:
+          propagation: rshared
+
+      # Authelia's users_database.yml — the source of truth for users
+      # + password hashes + group membership. Rendered at /etc/authelia/
+      # path inside the container (a different mount point than the
+      # /config/users_database.yml the authelia container itself uses,
+      # to avoid implying we share that container's mount layout).
+      - /opt/stacks/authelia/users_database.yml:/etc/authelia/users_database.yml:rw
+
+      # Docker socket for `docker exec authelia authelia storage user
+      # totp generate <user>`. This is the second-most-sensitive bind
+      # after /srv/store; together they make this container effectively
+      # root-equivalent on the host. See DESIGN.md § 3.
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+
       # AmneziaWG userspace tools live on the host (the kernel module
       # understands the Jc/Jmin/H1-H4 params; vanilla wg-quick strip
-      # in our base image rejects them with "Line unrecognized: Jc=4").
-      # network_mode: host shares the host's net ns but NOT its mount
-      # ns, so we bind-mount the host binaries directly. awg-quick is
-      # a bash script that re-execs awg from the same dir; mounting
-      # both into /usr/local/bin (which precedes /usr/bin in PATH for
-      # most shells, but here we put them in /usr/bin to override the
-      # vanilla wg/wg-quick that the image installs).
+      # in our base image rejects them). network_mode: host shares
+      # the host's net ns but NOT its mount ns, so we bind-mount the
+      # host binaries directly. awg-quick is a bash script that re-
+      # execs awg from the same dir; mounting both into /usr/bin to
+      # override the vanilla wg/wg-quick that the image installs.
       - /usr/bin/awg:/usr/bin/awg:ro
       - /usr/bin/awg-quick:/usr/bin/awg-quick:ro
 
@@ -76,8 +114,20 @@ services:
       # right namespace; skip the nsenter wrapper.
       ENROL_RELOAD_NSENTER: "false"
 
+      # Authelia integration: the YAML file enrol writes (its own bind
+      # mount path), and the docker-exec target for TOTP generation.
+      ENROL_USERS_DB: "/etc/authelia/users_database.yml"
+      ENROL_AUTHELIA_CONTAINER: "authelia"
+
+      # LUKS storage layout. Match scripts/create-store-volume.sh.
+      ENROL_STORE_DATA_DIR: "/srv/store/data"
+      ENROL_STORE_MNT_DIR: "/srv/store/mnt"
+      ENROL_LUKS_SIZE_GB: "50"
+
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/healthz"]
+      # ENROL_LISTEN binds to 172.17.0.1:8080 (the docker bridge gateway),
+      # not 127.0.0.1, so the healthcheck must hit the bridge IP too.
+      test: ["CMD", "wget", "--quiet", "--spider", "http://172.17.0.1:8080/healthz"]
       interval: 30s
       timeout: 5s
       retries: 5

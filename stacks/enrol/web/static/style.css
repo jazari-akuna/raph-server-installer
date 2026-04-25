@@ -6,6 +6,7 @@
   --accent: #2c5282;
   --danger: #c53030;
   --warn: #d97706;
+  --ok: #2f855a;
   --border: #d0d0c8;
 }
 * { box-sizing: border-box; }
@@ -37,13 +38,23 @@ th, td { padding: 0.4em 0.6em; text-align: left; border-bottom: 1px solid var(--
 th { font-weight: 600; font-size: 0.85em; color: var(--muted); }
 code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; }
 form label { display: block; margin: 0.5em 0; }
-form input[type=text] { width: 320px; max-width: 100%; padding: 0.4em; border: 1px solid var(--border); border-radius: 3px; }
+form input[type=text],
+form input[type=email],
+form input[type=password],
+form select { width: 320px; max-width: 100%; padding: 0.4em; border: 1px solid var(--border); border-radius: 3px; background: #fff; font-size: inherit; }
 button {
   background: var(--accent); color: #fff; border: 0; padding: 0.5em 1em;
   border-radius: 3px; cursor: pointer; font-size: inherit;
 }
 button.danger { background: var(--danger); }
+button.warn-btn { background: var(--warn); }
 button:hover { filter: brightness(0.9); }
+.hint { color: var(--muted); font-size: 0.9em; margin-top: 0; }
+.ok { color: var(--ok); font-weight: 600; }
+.muted { color: var(--muted); }
+.group-heading { color: var(--accent); font-size: 1em; margin-top: 1.4em; margin-bottom: 0.3em; }
+.danger-zone { border: 1px solid var(--danger); border-radius: 4px; padding: 1em; background: #fff5f5; }
+.danger-zone h2 { color: var(--danger); border-bottom-color: var(--danger); }
 .button { display: inline-block; padding: 0.4em 0.9em; background: #eee; border-radius: 3px; color: var(--fg); text-decoration: none; }
 .flash { padding: 0.6em 1em; background: #e6fffa; border-left: 3px solid #38b2ac; margin-bottom: 1em; }
 .warn  { padding: 0.6em 1em; background: #fffaf0; border-left: 3px solid var(--warn); margin-bottom: 1em; }
