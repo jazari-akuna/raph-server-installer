@@ -46,17 +46,39 @@ for u in "${ADMINS[@]}"; do
   passwd -l "$u" >/dev/null
 done
 
-echo "==> mirroring root authorized_keys to admin users"
+echo "==> installing per-user authorized_keys"
 ROOT_KEYS="/root/.ssh/authorized_keys"
-if [[ ! -f "$ROOT_KEYS" ]]; then
-  echo "    ERROR: $ROOT_KEYS missing — refusing to create admins without keys" >&2
-  exit 1
-fi
 for u in "${ADMINS[@]}"; do
   home="/home/$u"
   install -d -o "$u" -g "$u" -m 700 "$home/.ssh"
-  install -o "$u" -g "$u" -m 600 "$ROOT_KEYS" "$home/.ssh/authorized_keys"
+  per_user_keys="${REPO_HOST_DIR}/ssh/keys/${u}.authorized_keys"
+  if [[ -f "$per_user_keys" ]]; then
+    install -o "$u" -g "$u" -m 600 "$per_user_keys" "$home/.ssh/authorized_keys"
+    echo "    $u: installed from $per_user_keys"
+  elif [[ -f "$ROOT_KEYS" ]]; then
+    install -o "$u" -g "$u" -m 600 "$ROOT_KEYS" "$home/.ssh/authorized_keys"
+    echo "    $u: fell back to mirroring $ROOT_KEYS"
+  else
+    echo "    ERROR: no $per_user_keys and no $ROOT_KEYS — refusing to create admin $u without keys" >&2
+    exit 1
+  fi
 done
+
+echo "==> NOPASSWD sudo for sudo group"
+# WHY: key-only SSH + locked passwords means sudo otherwise can't authenticate.
+SUDOERS_DROPIN="/etc/sudoers.d/90-admins-nopasswd"
+TMP_SUDOERS="$(mktemp)"
+printf '%%sudo ALL=(ALL) NOPASSWD: ALL\n' > "$TMP_SUDOERS"
+chmod 0440 "$TMP_SUDOERS"
+if visudo -cf "$TMP_SUDOERS" >/dev/null; then
+  install -m 0440 -o root -g root "$TMP_SUDOERS" "$SUDOERS_DROPIN"
+  rm -f "$TMP_SUDOERS"
+  echo "    installed $SUDOERS_DROPIN"
+else
+  rm -f "$TMP_SUDOERS"
+  echo "    ERROR: visudo validation failed for sudoers drop-in" >&2
+  exit 1
+fi
 
 echo "==> swapfile"
 SWAPFILE="/swapfile"
