@@ -43,7 +43,16 @@ services:
     image: enrol:local
     container_name: enrol
     restart: unless-stopped
-    mem_limit: 128m
+    # 128 MiB is enough for the Go binary itself but cryptsetup's
+    # luksFormat invokes argon2id KDF which sizes itself to *available
+    # memory* on the system (cryptsetup --pbkdf-memory or --iter-time
+    # default targets ~1 s of CPU regardless of how much RAM that ends
+    # up costing). On the 4 GB VPS it picks ~1 GiB; under our prior
+    # 128 MiB cgroup limit the kernel OOM-kills the cryptsetup process
+    # mid-format. Lift the limit to 1.5 GiB — the steady-state RSS of
+    # the Go binary is still tiny (~10 MiB), this is just headroom for
+    # the bursty luksFormat/luksAddKey paths.
+    mem_limit: 1500m
 
     # Share the host's network namespace directly. syncconf runs in the
     # same namespace as gw0, so no nsenter / no /proc/1/ns/net access
