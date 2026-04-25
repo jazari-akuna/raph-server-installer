@@ -66,9 +66,13 @@ func totpDelete(cfg config, user string) error {
 	cmd := exec.Command("docker", "exec", cfg.autheliaContainer,
 		"authelia", "storage", "user", "totp", "delete", user)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		// Tolerate "no rows" gracefully — surface anything else.
+		// Tolerate "no TOTP configuration" / "no rows" / "not found"
+		// gracefully — that's the success case for a delete on a user
+		// who never enrolled TOTP. Surface anything else.
 		s := strings.ToLower(string(out))
-		if strings.Contains(s, "no rows") || strings.Contains(s, "not found") {
+		if strings.Contains(s, "no rows") ||
+			strings.Contains(s, "not found") ||
+			strings.Contains(s, "no totp configuration") {
 			return nil
 		}
 		return fmt.Errorf("authelia totp delete %s: %w (%s)",

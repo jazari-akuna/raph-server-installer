@@ -160,15 +160,35 @@ func (db *UsersDB) remove(name string) error {
 	return fmt.Errorf("user %q not found", name)
 }
 
-// flush writes the YAML to disk via tmpfile+rename. The rename triggers
-// the parent-directory inotify event that Authelia's fsnotify watcher
-// listens for.
+// flush writes the YAML to disk *in place* (truncate + write). We do
+// NOT use tmpfile+rename here, even though it's the textbook atomic
+// pattern, because Authelia bind-mounts users_database.yml as a single
+// file: a rename onto that path replaces the inode, and the bind in
+// the Authelia container then points at the orphan, never seeing our
+// edits. Truncate+write keeps the inode stable so both enrol and
+// Authelia see the same content.
+//
+// The trade-off: a partial write is briefly observable. We mitigate
+// by writing under our internal mutex (s.mu) and by serialising every
+// edit, but a power loss between Truncate and Write would leave the
+// file empty. We accept that — the YAML is reproducible from this
+// repo's users_database.yml.example + the operator's password manager;
+// it is never the canonical source of TOTP secrets (those live in
+// Authelia's encrypted sqlite, which survives independently).
 func (db *UsersDB) flush() error {
 	out, err := yaml.Marshal(&db.root)
 	if err != nil {
 		return fmt.Errorf("marshal users_database.yml: %w", err)
 	}
-	return atomicWrite(db.path, out, 0o600)
+	f, err := os.OpenFile(db.path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open users_database.yml: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(out); err != nil {
+		return fmt.Errorf("write users_database.yml: %w", err)
+	}
+	return f.Sync()
 }
 
 // --- argon2id PHC ----------------------------------------------------------
