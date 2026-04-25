@@ -58,8 +58,14 @@ Create an OVH application token scoped to **only** this single zone.
    - **Application name:** `antarctica-engineering DNS-01` (anything
      descriptive — visible only in your OVH manager).
    - **Validity:** unlimited (we rotate manually).
-   - **Rights:** add three rows, scoped tightly to the single zone:
+   - **Rights:** add five rows, scoped tightly to the single zone.
+     The leading `GET /domain/zone/` (note: no wildcard, just that one
+     literal path) is required by `certbot-dns-ovh` to enumerate zones
+     when the rest of the grants are zone-scoped — without it, certbot
+     fails with `403 Forbidden for url: https://eu.api.ovh.com/1.0/domain/zone/`:
+     - `GET    /domain/zone/`
      - `GET    /domain/zone/antarctica-engineering.com/*`
+     - `PUT    /domain/zone/antarctica-engineering.com/*`
      - `POST   /domain/zone/antarctica-engineering.com/*`
      - `DELETE /domain/zone/antarctica-engineering.com/*`
      Do **not** grant `/domain/zone/*` (all zones).
