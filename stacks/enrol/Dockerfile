@@ -46,6 +46,7 @@ RUN apt-get update \
         util-linux \
         iproute2 \
         qrencode \
+        wget \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/enrol /usr/local/bin/enrol
