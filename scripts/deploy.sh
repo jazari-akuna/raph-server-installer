@@ -63,7 +63,8 @@ WHAT IT DOES
          sysctl/*.conf            -> /etc/sysctl.d/        (sysctl --system)
          ssh/sshd_config.d/*.conf -> /etc/ssh/sshd_config.d (sshd -t; reload ssh)
          fail2ban/jail.local      -> /etc/fail2ban/         (reload fail2ban)
-         systemd/*.service        -> /etc/systemd/system/   (daemon-reload)
+         systemd/*.{service,timer,target,path}
+                                  -> /etc/systemd/system/   (daemon-reload)
     6. Prints a per-step summary of what changed.
 
 WHAT IT DOES NOT DO
@@ -357,7 +358,12 @@ if (( F2B_CHANGED )); then
     fi
 fi
 
-# --- systemd/*.service -> /etc/systemd/system/ ---
+# --- systemd/*.{service,timer,target,path} -> /etc/systemd/system/ ---
+# .path units are inotify watchers (see qedge-cert-watcher.path); they
+# get the same diff-gated copy treatment as services. The narrower glob
+# below intentionally excludes .socket / .mount / .swap — none of our
+# stacks ship those, and broadening blindly risks pulling in upstream
+# vendor units if someone drops one into host/systemd/ by accident.
 UNITS_CHANGED=0
 if [[ -d /root/host/systemd ]]; then
     while IFS= read -r -d '' f; do
@@ -367,7 +373,8 @@ if [[ -d /root/host/systemd ]]; then
             note "systemd: /etc/systemd/system/${bn} updated"
         fi
     done < <(find /root/host/systemd -maxdepth 1 -type f \
-                \( -name '*.service' -o -name '*.timer' -o -name '*.target' \) -print0)
+                \( -name '*.service' -o -name '*.timer' -o -name '*.target' \
+                   -o -name '*.path' \) -print0)
 fi
 if (( UNITS_CHANGED )); then
     if systemctl daemon-reload; then
@@ -376,6 +383,25 @@ if (( UNITS_CHANGED )); then
         echo "deploy.sh(remote): systemctl daemon-reload failed" >&2
         exit 14
     fi
+fi
+
+# --- enable + start path units (idempotent) ---
+# .path units are inert until enabled. We enable --now any path unit we
+# shipped, every deploy, regardless of whether it changed this run. This
+# is idempotent (systemd is a no-op on already-enabled-and-active units)
+# and recovers cleanly from a manual `systemctl disable` between deploys.
+# Note: .service files referenced by these .path units are NOT enabled —
+# they get triggered by the path unit, not by boot.
+if [[ -d /root/host/systemd ]]; then
+    while IFS= read -r -d '' f; do
+        bn="$(basename "$f")"
+        if systemctl enable --now "${bn}" >/dev/null 2>&1; then
+            note "systemd: ${bn} enable --now OK"
+        else
+            echo "deploy.sh(remote): systemctl enable --now ${bn} failed" >&2
+            exit 15
+        fi
+    done < <(find /root/host/systemd -maxdepth 1 -type f -name '*.path' -print0)
 fi
 
 if (( CHANGES == 0 )); then

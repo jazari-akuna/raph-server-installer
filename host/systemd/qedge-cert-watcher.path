@@ -1,0 +1,35 @@
+# /etc/systemd/system/qedge-cert-watcher.path
+#
+# Watches NPM's letsencrypt live/ directory for any change (most
+# notably: a new live/npm-N+1/ subdir appearing on cert renewal).
+# When it fires, systemd activates the matching .service unit, which
+# repoints qedge's TLS symlinks at the newest matching cert dir.
+#
+# Why PathChanged= and not PathModified=:
+#   PathChanged= triggers on any inotify event under the path
+#   (creation, deletion, rename, attribute change). NPM's certbot
+#   renewal materializes a brand-new npm-(N+1)/ subdirectory and then
+#   atomic-renames symlinks/state files inside live/. PathChanged=
+#   catches the directory-content event reliably without us having to
+#   guess whether NPM creates the dir before or after writing files.
+#
+# Why this lives at all:
+#   qedge's tls/ symlinks are pinned to a specific npm-N at install
+#   time (see stacks/qedge/README.md). Without this watcher they go
+#   stale silently the moment NPM rotates. See
+#   /root/scripts/cert-renewal-hook.sh for the rotation logic.
+
+[Unit]
+Description=Watch NPM letsencrypt live/ for cert rotation (qedge)
+Documentation=file:/root/scripts/cert-renewal-hook.sh
+
+[Path]
+# Fires on any change to the directory's contents, including a new
+# npm-N+1/ subdirectory appearing on renewal.
+PathChanged=/opt/stacks/ingress/letsencrypt/live
+# Coalesce bursts: certbot writes several files in quick succession
+# during a renewal; we don't need to fire the service per-file.
+Unit=qedge-cert-watcher.service
+
+[Install]
+WantedBy=multi-user.target

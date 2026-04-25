@@ -1,0 +1,27 @@
+# /etc/systemd/system/qedge-cert-watcher.service
+#
+# Oneshot triggered by qedge-cert-watcher.path whenever NPM's
+# letsencrypt live/ directory changes. Runs the rotation hook, which
+# repoints /opt/stacks/qedge/tls/{fullchain,privkey}.pem at the newest
+# npm-N/ dir whose cert covers *.antarctica-engineering.com.
+#
+# Deliberately NOT WantedBy any target — this unit is activated only
+# by the .path unit (or manually for testing). Enabling it directly
+# would just make it run once at boot, which is harmless but
+# pointless.
+
+[Unit]
+Description=Repoint qedge TLS symlinks at NPM's current wildcard cert
+Documentation=file:/root/scripts/cert-renewal-hook.sh
+# Don't fight a deploy: if the script file is mid-rsync, wait for the
+# filesystem to settle. The path unit naturally rate-limits us anyway.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/root/scripts/cert-renewal-hook.sh
+# Keep stdout/stderr in journald under this unit's name so
+# `journalctl -u qedge-cert-watcher.service` shows everything.
+StandardOutput=journal
+StandardError=journal
