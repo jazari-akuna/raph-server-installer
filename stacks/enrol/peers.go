@@ -270,7 +270,13 @@ func (pc *parsedConf) removePeerByPubkey(path, pubkey string) (bool, error) {
 	return true, atomicWrite(path, []byte(out), 0o600)
 }
 
-// listPeersWithMeta returns the merged view of [Peer] blocks + sidecar metadata.
+// listPeersWithMeta returns the merged view of [Peer] blocks + sidecar
+// metadata. Peers that have no sidecar entry (e.g. ones added by
+// scripts/provision-peer.sh, or by the prior version of enrol whose
+// metadata file has since been wiped) are adopted by parsing the
+// "# peer: <name> (added <ts> by <actor>)" comment line above the
+// [Peer] header. If no such comment is present, the peer is rendered
+// as "(unmanaged)" so the operator can still see + remove it.
 func (pc *parsedConf) listPeersWithMeta(meta *metaStore) []peer {
 	out := make([]peer, 0, len(pc.peers))
 	for _, e := range pc.peers {
@@ -281,14 +287,47 @@ func (pc *parsedConf) listPeersWithMeta(meta *metaStore) []peer {
 			out = append(out, m)
 			continue
 		}
+		name, addedBy, addedAt := parsePeerComment(e.comment)
+		if name == "" {
+			name = "(unmanaged)"
+		}
 		out = append(out, peer{
-			Name:      "(unmanaged)",
+			Name:      name,
 			PublicKey: e.publicKey,
 			IP:        ip,
+			AddedBy:   addedBy,
+			AddedAt:   addedAt,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
 	return out
+}
+
+// parsePeerComment extracts (name, addedBy, addedAt) from a comment of
+// the form
+//
+//	# peer: <name> (added <RFC3339> by <actor>)
+//
+// Returns ("", "", zero) on any parse failure — caller treats that as
+// an unmanaged peer.
+var rePeerComment = regexp.MustCompile(
+	`^# peer:\s*(\S+)\s*(?:\(added\s+(\S+)(?:\s+by\s+(\S+))?\))?\s*$`)
+
+func parsePeerComment(comment string) (name, addedBy string, addedAt time.Time) {
+	m := rePeerComment.FindStringSubmatch(comment)
+	if m == nil {
+		return "", "", time.Time{}
+	}
+	name = m[1]
+	if len(m) >= 3 && m[2] != "" {
+		if t, err := time.Parse(time.RFC3339, m[2]); err == nil {
+			addedAt = t
+		}
+	}
+	if len(m) >= 4 {
+		addedBy = m[3]
+	}
+	return name, addedBy, addedAt
 }
 
 // ---------------------------------------------------------------------------
