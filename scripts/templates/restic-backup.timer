@@ -1,0 +1,35 @@
+# restic-backup.timer — systemd USER timer for restic-backup.service.
+#
+# Drop into ~/.config/systemd/user/ on the admin's laptop alongside the
+# .service unit. Substitute the <USER> placeholder before installing:
+#
+#   sed "s/<USER>/sagan/g" restic-backup.timer \
+#       > ~/.config/systemd/user/restic-backup-sagan.timer
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now restic-backup-sagan.timer
+#
+# Placeholders:
+#   <USER>  — sagan | marcus. Must match the .service file's <USER>.
+#
+# Schedule: daily at 03:00 laptop-local, with up to 30 minutes of
+# randomized delay so two laptops backing up the same VPS don't collide
+# on the SSH read.
+#
+# `Persistent=true` ensures that if the laptop was asleep / off at 03:00,
+# the timer fires once on next wake (instead of waiting until tomorrow).
+# Without this, an admin who closes their laptop overnight could go a long
+# time between backups.
+
+[Unit]
+Description=Daily timer for restic-backup-<USER>.service
+Documentation=file:///%h/Projects/rarcus-server/docs/backups.md
+
+[Timer]
+Unit=restic-backup-<USER>.service
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=30min
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

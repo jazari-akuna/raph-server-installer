@@ -1,0 +1,45 @@
+# restic-backup.service — systemd USER unit, runs the laptop-side backup.
+#
+# Drop into ~/.config/systemd/user/ on the admin's laptop. Paired with
+# restic-backup.timer for scheduled invocation. Substitute the <USER>
+# placeholder before installing:
+#
+#   sed "s/<USER>/sagan/g" restic-backup.service \
+#       > ~/.config/systemd/user/restic-backup-sagan.service
+#   sed "s/<USER>/sagan/g" restic-backup.timer \
+#       > ~/.config/systemd/user/restic-backup-sagan.timer
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now restic-backup-sagan.timer
+#
+# Placeholders:
+#   <USER>  — sagan | marcus. Used to name the script and to build the
+#             unit description. Must match the USER_NAME baked into
+#             ~/.local/bin/restic-backup-<USER>.sh.
+#
+# This is a USER unit, not a system unit. It runs as the laptop's logged-in
+# user, with that user's environment and SSH key access. Enabling
+# `loginctl enable-linger` on the user account is recommended so the timer
+# fires even when no graphical session is open.
+
+[Unit]
+Description=restic pull-backup of /srv/store/data/<USER>.img
+Documentation=file:///%h/Projects/rarcus-server/docs/backups.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=5
+ExecStart=%h/.local/bin/restic-backup-<USER>.sh
+
+# Don't queue a second run if the previous one is still going.
+TimeoutStartSec=4h
+
+# A failed backup is loud (journal entry) but not fatal — the next timer
+# tick retries from scratch. No automatic Restart= here; we don't want a
+# tight loop on persistent SSH failures.
+
+[Install]
+WantedBy=default.target
