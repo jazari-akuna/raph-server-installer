@@ -98,6 +98,27 @@ services:
       # root-equivalent on the host. See DESIGN.md § 3.
       - /var/run/docker.sock:/var/run/docker.sock:rw
 
+      # Host's NSS files. Required so that:
+      #   (a) useradd / userdel inside the container actually edit the
+      #       HOST's /etc/passwd + /etc/group (otherwise the container
+      #       has its own private passwd db; we'd allocate uid 1000 in
+      #       the container and chown the LUKS mountpoint to whatever
+      #       uid 1000 maps to on the host — collision with `ubuntu`).
+      #   (b) `getent passwd <user>` resolves to a uid that the cloud
+      #       container ALSO sees correctly. cloud has its own passwd
+      #       so it doesn't strictly need this, but the LUKS chown is
+      #       what matters.
+      # Trade-off: this gives enrol full read/write access to /etc/passwd
+      # and friends — but it's already privileged and effectively root,
+      # so this isn't a new threat surface. Bind only the three files
+      # rather than all of /etc, to limit accidental damage.
+      - /etc/passwd:/etc/passwd:rw
+      - /etc/group:/etc/group:rw
+      - /etc/shadow:/etc/shadow:rw
+      - /etc/gshadow:/etc/gshadow:rw
+      - /etc/subuid:/etc/subuid:rw
+      - /etc/subgid:/etc/subgid:rw
+
       # AmneziaWG userspace tools live on the host (the kernel module
       # understands the Jc/Jmin/H1-H4 params; vanilla wg-quick strip
       # in our base image rejects them). network_mode: host shares

@@ -281,10 +281,13 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 func (s *server) renderUserCreated(w http.ResponseWriter, r *http.Request,
 	name, otpauth string, qrPNG []byte, flash string) {
 	csrf := ensureCSRF(w, r)
-	var qrDataURI string
+	// template.URL marks the data: URI as safe so html/template doesn't
+	// rewrite it to "#ZgotmplZ" — the package's default policy treats
+	// data:-URIs as untrusted unless explicitly trusted by the caller.
+	var qrDataURI template.URL
 	if len(qrPNG) > 0 {
-		qrDataURI = "data:image/png;base64," +
-			base64.StdEncoding.EncodeToString(qrPNG)
+		qrDataURI = template.URL("data:image/png;base64," +
+			base64.StdEncoding.EncodeToString(qrPNG))
 	}
 	data := struct {
 		Title      string
@@ -292,7 +295,7 @@ func (s *server) renderUserCreated(w http.ResponseWriter, r *http.Request,
 		CSRF       string
 		Created    string
 		OtpauthURI string
-		QRDataURI  string
+		QRDataURI  template.URL
 		Flash      string
 	}{
 		Title:      "user created: " + name,
