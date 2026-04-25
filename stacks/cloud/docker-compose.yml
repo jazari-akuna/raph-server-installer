@@ -43,6 +43,13 @@ services:
       # Make logs flush promptly so `docker logs` is useful during
       # auth / volume troubleshooting.
       PYTHONUNBUFFERED: "1"
+      # Per-user copyparty password hashes. Compose only substitutes
+      # ${VAR} in this YAML, NOT inside mounted files — so we have to
+      # pass these into the container and let copyparty do the
+      # ${VAR} expansion in its own config (./conf/copyparty.conf).
+      # Values come from ./.env (gitignored); see .env.example.
+      SAGAN_PW_HASH: ${SAGAN_PW_HASH}
+      MARCUS_PW_HASH: ${MARCUS_PW_HASH}
 
     # Allow the thumbnailer to drain on shutdown (matches upstream advice).
     stop_grace_period: 15s

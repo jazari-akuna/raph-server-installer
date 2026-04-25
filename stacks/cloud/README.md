@@ -151,10 +151,12 @@ before bumping — copyparty's config syntax is occasionally extended.
 
 ## Operational notes
 
-- **Memory limit is 384 MB.** copyparty is small but the `/ac` image
-  bundles ffmpeg and Pillow for thumbnails; transcoding a large media
-  library can spike. If you see OOM-kills in `dmesg`, raise the limit
-  in `docker-compose.yml` rather than removing it.
+- **Memory limit is 2 GB** (per-app cap from the plan). copyparty is
+  small but the `/ac` image bundles ffmpeg and Pillow for thumbnails;
+  transcoding a large media library can spike. The 2 GB ceiling is a
+  cap, not a guarantee — typical RSS stays well below. If you see
+  OOM-kills in `dmesg`, the limit is the wrong knob to turn first;
+  investigate which workload is eating the budget.
 - **Restart on config change.** Edits to `conf/copyparty.conf` only
   apply after `docker compose restart cloud`. The config volume is
   mounted read-only; the container cannot mutate it from inside.
