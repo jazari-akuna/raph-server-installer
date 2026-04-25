@@ -104,7 +104,9 @@ srv_append() {     # srv_append <path>  (content on stdin)
 }
 
 srv_test_iface_up() {
-    srv_run "ip link show ${AWG_IFACE} 2>/dev/null | grep -q 'state UP'" \
+    # tun-style interfaces report 'state UNKNOWN' even when usably up (no LL),
+    # so 'state UP' alone misses gw0. The IFF_UP flag in <…> is the real signal.
+    srv_run "ip link show ${AWG_IFACE} 2>/dev/null | head -1 | grep -qE '<[^>]*\\bUP\\b[^>]*>'" \
         && return 0 || return 1
 }
 
