@@ -34,6 +34,15 @@ services:
       - NET_ADMIN
       - SYS_ADMIN   # required by nsenter to join other namespaces
 
+    # AppArmor's default docker profile blocks `open(/proc/1/ns/net)` even
+    # with SYS_ADMIN — surfaced by the SSO smoke test (Permission denied on
+    # nsenter despite pid: host + caps). Unconfined here is the documented
+    # workaround for "container needs to enter host namespaces"; the blast
+    # radius is bounded by the cap_add list above. If we ever switch the
+    # reload mechanism to a host-side fifo+watcher, this can come off.
+    security_opt:
+      - apparmor=unconfined
+
     # No `ports:` — strictly internal. Reachable via NPM at enrol:8080
     # over the `edge` network.
 
