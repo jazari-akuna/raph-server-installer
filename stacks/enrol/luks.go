@@ -360,14 +360,20 @@ func runCommand(name string, args ...string) error {
 	return nil
 }
 
-// lookupHostUser returns the host uid/gid for `name`. This is required
-// before mounting + chowning the per-user mountpoint. The container
-// has the host's /etc/passwd accessible via the standard libc lookup
-// because both the host and the container's nss are file-based.
+// lookupHostUser returns the host uid/gid for `name`. We must read this
+// from the host's /etc/passwd, NOT the container's. nsenter into PID 1's
+// mount namespace gives us that. The container's own /etc/passwd is the
+// image's snapshot from build-time and would not see users added at
+// runtime.
+//
+// (We considered bind-mounting /etc/passwd into the container — that
+// fails because useradd uses the rename-onto-/etc/passwd pattern which
+// invalidates a single-file bind on each write. So we route both reads
+// and writes through nsenter, keeping the container's image-time passwd
+// untouched as a stable fallback.)
 func lookupHostUser(name string) (int, int, error) {
-	// Use `getent passwd <user>` — most reliable in a container.
-	cmd := exec.Command("getent", "passwd", name)
-	out, err := cmd.Output()
+	out, err := exec.Command("nsenter", "--target", "1", "--mount", "--",
+		"getent", "passwd", name).Output()
 	if err != nil || len(out) == 0 {
 		return 0, 0, fmt.Errorf("user %q not found", name)
 	}
@@ -387,16 +393,23 @@ func lookupHostUser(name string) (int, int, error) {
 }
 
 // hostUserAdd creates a host system user (no home dir, no login shell)
-// idempotently. Required before mounting + chowning. If the user already
-// exists we return nil.
+// idempotently. Required before chowning the LUKS mountpoint to that
+// user's uid. If the user already exists we return nil.
+//
+// Implementation: useradd writes /etc/passwd via the
+// "write-to-/etc/passwd+ then rename" pattern. Inside our container,
+// /etc/passwd is a single-file bind-mount, and rename onto a single-
+// file mount is EBUSY. We therefore run useradd in the host's mount
+// namespace via nsenter, which uses the host's /etc directly.
+//
+// Bind-mounting all of /etc was considered and rejected — too coarse
+// a privilege grant; the nsenter path is only used by useradd/userdel
+// and getent.
 func hostUserAdd(name string) error {
 	if _, _, err := lookupHostUser(name); err == nil {
 		return nil
 	}
-	// `useradd -M -s /usr/sbin/nologin -U <user>` — -U creates a same-
-	// named primary group. -M skips home-dir creation; the LUKS mountpoint
-	// is the data area.
-	if err := runCommand("useradd", "-M", "-s", "/usr/sbin/nologin", "-U", name); err != nil {
+	if err := runHostCommand("useradd", "-M", "-s", "/usr/sbin/nologin", "-U", name); err != nil {
 		return fmt.Errorf("useradd %s: %w", name, err)
 	}
 	return nil
@@ -409,10 +422,21 @@ func hostUserDel(name string) error {
 	if _, _, err := lookupHostUser(name); err != nil {
 		return nil // not present
 	}
-	// userdel -r would remove the home dir; we never had one. -f
-	// forces deletion even if the user is logged in (unlikely on
-	// our nologin shells but safe).
-	return runCommand("userdel", "-f", name)
+	return runHostCommand("userdel", "-f", name)
+}
+
+// runHostCommand wraps the command in `nsenter --target 1 --mount --
+// <name> <args...>` so writes to /etc land in the host's filesystem
+// rather than the container's overlay. Required for useradd / userdel.
+// Other paths (cryptsetup / mount / shred) operate on /srv/store which
+// is bind-mounted rshared, so they don't need the namespace switch.
+func runHostCommand(name string, args ...string) error {
+	full := append([]string{"--target", "1", "--mount", "--", name}, args...)
+	out, err := exec.Command("nsenter", full...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("nsenter %s: %w (%s)", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // atoiSafe — small int parsing without importing strconv here (it's
