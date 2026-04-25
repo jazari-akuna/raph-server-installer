@@ -33,10 +33,32 @@ services:
     # default startup pick it up. No `command:` override needed.
 
     volumes:
-      # Per-user data roots — bind-mounts onto LUKS mountpoints.
-      # When the LUKS blob isn't unlocked these are empty dirs (fine).
-      - /srv/store/mnt/sagan:/w/sagan
-      - /srv/store/mnt/marcus:/w/marcus
+      # Per-user data roots, served as a single bind-mount.
+      #
+      # PRIOR LAYOUT (deprecated): two static per-user binds
+      #     /srv/store/mnt/sagan:/w/sagan
+      #     /srv/store/mnt/marcus:/w/marcus
+      # which required editing this file + recreating the container
+      # for every new user.
+      #
+      # NEW LAYOUT: a single bind-mount of the parent /srv/store/mnt
+      # at /w. copyparty's IdP rule [/u/${u}] /w/${u} resolves at
+      # request time against any /srv/store/mnt/<u>/ subdirectory
+      # that exists on the host — so a fresh user added via enrol
+      # is visible to copyparty without restarting cloud.
+      #
+      # `bind-propagation=rslave` is load-bearing: it makes mounts
+      # done on the host *after* this container started — e.g. when
+      # a LUKS blob is unlocked + mounted onto /srv/store/mnt/<u> —
+      # propagate into /w/<u> inside the container. The default
+      # `rprivate` propagation does NOT do this; we verified
+      # empirically before changing this stack. See
+      # ../enrol/DESIGN.md § 0.3 for the propagation gotcha.
+      - type: bind
+        source: /srv/store/mnt
+        target: /w
+        bind:
+          propagation: rslave
       # Config (read-only). copyparty auto-loads *.conf from /cfg.
       - ./conf:/cfg:ro
       # Persistent state: hash DB, thumbs cache, ah-salt.txt, IdP user

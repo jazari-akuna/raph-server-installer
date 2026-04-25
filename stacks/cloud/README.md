@@ -72,22 +72,30 @@ cookie is now set on the apex `antarctica-engineering.com` domain so
 
 ## Bind-mount semantics (LUKS interaction)
 
-`/srv/store/mnt/sagan` and `/srv/store/mnt/marcus` on the host are the
-mount points for each user's encrypted blob (see plan step 6). The
-compose file bind-mounts them into the container at `/w/sagan` and
-`/w/marcus`. The IdP-mode volume rule is:
+The host's `/srv/store/mnt` directory is bind-mounted into the
+container as `/w` (a **single** mount, not per-user). copyparty's
+IdP rule resolves the `${u}` placeholder at request time:
 
 ```
 [/u/${u}]
   /w/${u}
 ```
 
-So `${u}` is substituted with the authenticated username. The set of
-*usable* usernames is the intersection of (Authelia-issued usernames)
-× (host bind-mounts present). Currently both sagan and marcus exist on
-both sides; if a future user is added in Authelia without a matching
-`/srv/store/mnt/<name>` bind-mount + LUKS blob, they would log in fine
-but their volume would 404.
+So an authenticated request from `sagan` is served from `/w/sagan`
+which is `/srv/store/mnt/sagan` on the host. Adding a new user is
+purely a host-side operation — `enrol` creates the LUKS blob, the
+mountpoint, and the Authelia user, and copyparty picks it up on
+the next request without any cloud-side change. (Earlier versions
+used two static per-user bind-mounts and required editing this
+compose every time a user was added; we removed that.)
+
+The bind-mount uses `propagation: rslave` so that subsequent host
+mounts under `/srv/store/mnt/<u>` (when enrol or `mount-stores.sh`
+unlocks a LUKS blob) become visible inside the container at
+`/w/<u>`. With the default `rprivate` propagation, the container
+keeps seeing the underlying empty directory even after the host
+unlocks the volume — that was a real bug we hit and fixed. See
+`../enrol/DESIGN.md` § 0.3.
 
 Three states matter:
 
