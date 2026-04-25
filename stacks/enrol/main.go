@@ -10,10 +10,15 @@
 // Audit log: peers-audit.log (one JSON line per change).
 //
 // After mutating gw0.conf we attempt a live reload via:
-//   nsenter --target 1 --net --mount -- \
-//     sh -c 'awg syncconf gw0 <(awg-quick strip /etc/amnezia/amneziawg/gw0.conf)'
-// If nsenter or awg are unavailable, log a warning and instruct the
-// operator to `sudo systemctl restart awg-quick@gw0` on the host.
+//   awg syncconf gw0 <(awg-quick strip /etc/amnezia/amneziawg/gw0.conf)
+// When $ENROL_RELOAD_NSENTER is unset/"true" we wrap the command in
+//   nsenter --target 1 --net --mount --
+// to enter the host's namespaces (used when running on a private docker
+// network). When set to "false" — e.g. with network_mode: host — the
+// command runs directly in the already-shared host net+mount namespace.
+// If awg is unavailable, fall back to vanilla wg / wg-quick. On any
+// failure, log a warning and instruct the operator to
+// `sudo systemctl restart awg-quick@gw0` on the host.
 //
 // No external Go deps. Curve25519 keypair generation via crypto/ecdh.
 // QR code generation by shelling out to `qrencode` in the runtime image.
@@ -405,18 +410,26 @@ func readAudit(path string, max int) []auditEntry {
 func reloadInterface(awgDir, iface string) error {
 	confPath := filepath.Join(awgDir, iface+".conf")
 	// Pipeline: awg-quick strip <conf> | awg syncconf <iface> /dev/stdin
-	// Run inside host's net+mount namespaces via nsenter.
+	// When ENROL_RELOAD_NSENTER=true (default), wrap in nsenter to enter
+	// the host's net+mount namespaces. When "false" (e.g. when the
+	// container uses network_mode: host), run directly.
+	useNsenter := os.Getenv("ENROL_RELOAD_NSENTER") != "false"
+	mkCmd := func(script string) *exec.Cmd {
+		if useNsenter {
+			return exec.Command("nsenter", "--target", "1", "--net", "--mount", "--",
+				"bash", "-c", script)
+		}
+		return exec.Command("bash", "-c", script)
+	}
 	script := fmt.Sprintf(
 		`awg syncconf %s <(awg-quick strip %s)`, iface, confPath)
-	cmd := exec.Command("nsenter", "--target", "1", "--net", "--mount", "--",
-		"bash", "-c", script)
+	cmd := mkCmd(script)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// Fall back to vanilla wg if awg/awg-quick unavailable on host.
 		script = fmt.Sprintf(
 			`wg syncconf %s <(wg-quick strip %s)`, iface, confPath)
-		cmd2 := exec.Command("nsenter", "--target", "1", "--net", "--mount", "--",
-			"bash", "-c", script)
+		cmd2 := mkCmd(script)
 		out2, err2 := cmd2.CombinedOutput()
 		if err2 != nil {
 			return fmt.Errorf("syncconf failed: awg=%v (%s) wg=%v (%s)",

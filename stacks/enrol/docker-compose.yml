@@ -1,19 +1,28 @@
 # enrol — gw0 peer-management web UI.
 #
 # Camouflage: external hostname is `enrol.antarctica-engineering.com`.
-# The internal container/service name `enrol` is fine. The image embeds
-# wireguard-tools + util-linux so it can `nsenter` into the host's PID 1
-# net+mount namespace to reload the gw0 interface after editing gw0.conf.
+# The internal container/service name `enrol` is fine.
 #
 # Auth is delegated entirely to Authelia via NPM forward-auth. enrol
 # trusts the Remote-User and Remote-Groups headers and rejects any
 # request missing them. See ../authelia/DESIGN.md.
 #
-# Privilege model:
-#   - cap_add: NET_ADMIN — needed for `wg syncconf` even via nsenter.
-#   - bind-mount /etc/amnezia/amneziawg:rw — gw0.conf is the source of truth.
-#   - bind-mount /var/run/netns + share host pid namespace via pid: host
-#     so nsenter can find PID 1 and join its net namespace where gw0 lives.
+# Privilege model (plan B — network_mode: host):
+#   - network_mode: host — the container shares the host's network
+#     namespace directly, so `awg syncconf gw0` runs against the live
+#     interface without needing nsenter. ENROL_RELOAD_NSENTER=false
+#     tells the Go reload routine to skip the nsenter wrapper.
+#   - cap_add: NET_ADMIN — required for the netlink syscalls behind
+#     `awg syncconf`. SYS_ADMIN was only needed for nsenter; dropped.
+#   - bind-mount /etc/amnezia/amneziawg:rw — gw0.conf is the source of
+#     truth on disk; container edits it then issues syncconf.
+#   - No security_opt overrides — default docker AppArmor profile is
+#     fine without namespace crossing.
+#   - ENROL_LISTEN bound to the docker bridge gateway IP (172.17.0.1)
+#     so NPM (on the edge bridge) can reach us via host.docker.internal
+#     while the public WAN interface is NOT bound. Cannot bind to
+#     127.0.0.1 because containers on docker0 reach the host as
+#     172.17.0.1 (their default gateway), not as host loopback.
 
 services:
   enrol:
@@ -25,33 +34,36 @@ services:
     restart: unless-stopped
     mem_limit: 128m
 
-    # PID-share with host so nsenter --target 1 can find the init namespace.
-    # This is a controlled escalation: enrol's process can see host PIDs but
-    # cannot write to /proc/<pid>/* without matching uid/caps.
-    pid: host
+    # Share the host's network namespace directly. syncconf runs in the
+    # same namespace as gw0, so no nsenter / no /proc/1/ns/net access
+    # needed. Mutually exclusive with `networks:` and `ports:`.
+    network_mode: host
 
     cap_add:
       - NET_ADMIN
-      - SYS_ADMIN   # required by nsenter to join other namespaces
-
-    # AppArmor's default docker profile blocks `open(/proc/1/ns/net)` even
-    # with SYS_ADMIN — surfaced by the SSO smoke test (Permission denied on
-    # nsenter despite pid: host + caps). Unconfined here is the documented
-    # workaround for "container needs to enter host namespaces"; the blast
-    # radius is bounded by the cap_add list above. If we ever switch the
-    # reload mechanism to a host-side fifo+watcher, this can come off.
-    security_opt:
-      - apparmor=unconfined
-
-    # No `ports:` — strictly internal. Reachable via NPM at enrol:8080
-    # over the `edge` network.
 
     volumes:
       # Source of truth: gw0.conf + sidecar metadata + audit log.
       - /etc/amnezia/amneziawg:/etc/amnezia/amneziawg:rw
+      # AmneziaWG userspace tools live on the host (the kernel module
+      # understands the Jc/Jmin/H1-H4 params; vanilla wg-quick strip
+      # in our base image rejects them with "Line unrecognized: Jc=4").
+      # network_mode: host shares the host's net ns but NOT its mount
+      # ns, so we bind-mount the host binaries directly. awg-quick is
+      # a bash script that re-execs awg from the same dir; mounting
+      # both into /usr/local/bin (which precedes /usr/bin in PATH for
+      # most shells, but here we put them in /usr/bin to override the
+      # vanilla wg/wg-quick that the image installs).
+      - /usr/bin/awg:/usr/bin/awg:ro
+      - /usr/bin/awg-quick:/usr/bin/awg-quick:ro
 
     environment:
-      ENROL_LISTEN: ":8080"
+      # Bind to the docker0 bridge gateway IP, which is what NPM's
+      # ingress container sees as `host.docker.internal`. This excludes
+      # the public WAN NIC (eth0), so public exposure remains strictly
+      # via NPM. 172.17.0.1 is the default Docker bridge gateway and is
+      # stable absent custom daemon.json bip changes.
+      ENROL_LISTEN: "172.17.0.1:8080"
       ENROL_AWG_DIR: "/etc/amnezia/amneziawg"
       ENROL_AWG_IFACE: "gw0"
       ENROL_AWG_ENDPOINT: "gw.antarctica-engineering.com:51820"
@@ -60,6 +72,9 @@ services:
       ENROL_HEADER_USER: "Remote-User"
       ENROL_HEADER_GROUPS: "Remote-Groups"
       ENROL_REQUIRED_GROUP: "admins"
+      # network_mode: host means the reload command is already in the
+      # right namespace; skip the nsenter wrapper.
+      ENROL_RELOAD_NSENTER: "false"
 
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/healthz"]
@@ -67,10 +82,3 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-
-    networks:
-      - edge
-
-networks:
-  edge:
-    external: true

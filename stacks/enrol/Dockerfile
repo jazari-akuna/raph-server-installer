@@ -2,17 +2,16 @@
 #
 # Multi-stage build:
 #   stage 1: golang:1.23 to build a static binary
-#   stage 2: debian:bookworm-slim with wireguard-tools (for `wg`/`wg-quick`)
-#            and util-linux (for `nsenter`) so we can syncconf the host
-#            interface from inside the container.
+#   stage 2: debian:trixie-slim (glibc 2.41) so we can directly run the
+#            host's bind-mounted /usr/bin/awg (Ubuntu 24.04 host, glibc
+#            2.39). Bookworm slim ships glibc 2.36 which is too old.
 #
-# Note: we use vanilla wireguard-tools binaries here; AmneziaWG's `awg`
-# variant is not in upstream Debian, but `wg syncconf` understands the
-# AmneziaWG interface fine because the kernel module is what reads the
-# anti-DPI params (Jc/Jmin/.../H1-H4) — userspace only sees standard
-# WireGuard fields plus passthrough. If the host interface name is `gw0`
-# and was configured with awg-quick, we still reload it via nsenter into
-# the host's PID 1 namespace, calling the host's own `awg`/`awg-quick`.
+# We rely on bind-mounts of the host's /usr/bin/awg + /usr/bin/awg-quick
+# for the reload pipeline — vanilla wg-quick from upstream Debian does
+# NOT understand the AmneziaWG-specific `Jc=` / `Jmin=` / `H1..H4=` lines
+# in gw0.conf and rejects them with "Line unrecognized". With
+# network_mode: host, the binaries operate on the host's already-shared
+# net namespace and do not need nsenter.
 
 FROM golang:1.23-bookworm AS build
 
@@ -37,8 +36,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         .
 
 ###############################################################################
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
+# wireguard-tools provides `wg` (used as the fall-back if the bind-mounted
+# host /usr/bin/awg is missing). util-linux gives us nsenter for backward
+# compatibility when ENROL_RELOAD_NSENTER=true. iproute2 + qrencode +
+# wget are runtime deps.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \

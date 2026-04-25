@@ -27,6 +27,11 @@ services:
       - ../authelia/snippets:/snippets:ro
     networks:
       - edge
+    # Resolve `host.docker.internal` to the host's bridge gateway so NPM
+    # can proxy to host-networked services (e.g. enrol on 127.0.0.1:8080
+    # of the host — see stacks/enrol/docker-compose.yml plan B).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     mem_limit: 2g
 
 networks:
