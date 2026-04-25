@@ -1,0 +1,34 @@
+# /etc/systemd/system/gw0-nat.service
+#
+# INTERIM workaround. The plan's design has NAT MASQUERADE for the gw0
+# subnet living in /etc/ufw/before.rules and activated when ufw is
+# enabled (Step 3 / ufw-docker integration). ufw is currently deferred
+# because vanilla ufw + Docker requires the ufw-docker shim, and that
+# integration is its own (riskier) task.
+#
+# Until ufw-docker is in, this oneshot keeps a live MASQUERADE rule
+# applied on boot so peers can actually egress through the VPS. When
+# ufw-docker lands and the spliced before.rules NAT activates, this
+# unit becomes a duplicate and should be removed:
+#
+#   sudo systemctl disable --now gw0-nat.service
+#   sudo rm /etc/systemd/system/gw0-nat.service
+#   sudo systemctl daemon-reload
+#
+# Detects the public interface dynamically so the rule survives a
+# different VPS / NIC rename.
+
+[Unit]
+Description=NAT MASQUERADE for gw0 (10.99.0.0/24)
+After=network-online.target
+Before=awg-quick@gw0.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'WAN=$(ip route show default | awk "/default/ {print \$5; exit}"); /sbin/iptables -t nat -C POSTROUTING -s 10.99.0.0/24 -o "$WAN" -j MASQUERADE 2>/dev/null || /sbin/iptables -t nat -A POSTROUTING -s 10.99.0.0/24 -o "$WAN" -j MASQUERADE'
+ExecStop=/bin/bash -c 'WAN=$(ip route show default | awk "/default/ {print \$5; exit}"); /sbin/iptables -t nat -D POSTROUTING -s 10.99.0.0/24 -o "$WAN" -j MASQUERADE 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
