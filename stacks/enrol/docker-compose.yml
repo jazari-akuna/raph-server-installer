@@ -72,12 +72,16 @@ services:
         bind:
           propagation: rshared
 
-      # Authelia's users_database.yml — the source of truth for users
-      # + password hashes + group membership. Rendered at /etc/authelia/
-      # path inside the container (a different mount point than the
-      # /config/users_database.yml the authelia container itself uses,
-      # to avoid implying we share that container's mount layout).
-      - /opt/stacks/authelia/users_database.yml:/etc/authelia/users_database.yml:rw
+      # Authelia's source-of-truth directory — we bind the parent dir
+      # (not just users_database.yml) so atomic tmpfile+rename writes
+      # work. A single-file bind would refuse the rename with EBUSY
+      # because the destination path *is* the mount-line itself; the
+      # kernel sees a rename "into" a mount point and refuses. Mounting
+      # the dir lets us tmpfile+rename inside the dir without crossing
+      # any mount boundary. enrol only writes users_database.yml, so
+      # the rest of the dir's contents are immaterial. ENROL_USERS_DB
+      # points at the file path inside this bind.
+      - /opt/stacks/authelia:/etc/authelia:rw
 
       # Docker socket for `docker exec authelia authelia storage user
       # totp generate <user>`. This is the second-most-sensitive bind
