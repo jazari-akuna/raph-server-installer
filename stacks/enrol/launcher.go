@@ -2,7 +2,9 @@
 //
 // Tile grid of apps backed by <launcherDir>/apps.json + per-app icons under
 // <launcherDir>/icons/<id>.<ext>. The dir is bootstrapped with three default
-// tiles (cloud, enrol-users, console) — those use CSS-initials fallback.
+// tiles (cloud, enrol-users, console) whose PNGs are seeded from the image
+// repo at /app/web/static/launcher-defaults/<id>.png on first run; if a copy
+// fails the tile falls back to CSS-initials.
 //
 // Custom icons are fetched server-side from a user-supplied URL via an
 // SSRF-hardened HTTP client: pre-resolution and post-resolution IP filtering
@@ -113,12 +115,50 @@ func bootstrapLauncher(dir string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	icons := seedDefaultIcons(dir, "/app/web/static/launcher-defaults")
 	defaults := []LauncherApp{
-		{ID: "cloud", Name: "Cloud", URL: "https://cloud.antarctica-engineering.com/", Icon: ""},
-		{ID: "enrol-users", Name: "Enrol", URL: "https://enrol.antarctica-engineering.com/users", Icon: ""},
-		{ID: "console", Name: "Console", URL: "https://console.antarctica-engineering.com/", Icon: ""},
+		{ID: "cloud", Name: "Cloud", URL: "https://cloud.antarctica-engineering.com/", Icon: icons["cloud"]},
+		{ID: "enrol-users", Name: "Enrol", URL: "https://enrol.antarctica-engineering.com/users", Icon: icons["enrol-users"]},
+		{ID: "console", Name: "Console", URL: "https://console.antarctica-engineering.com/", Icon: icons["console"]},
 	}
 	return saveLauncher(dir, defaults)
+}
+
+func seedDefaultIcons(launcherDir, sourceDir string) map[string]string {
+	out := map[string]string{}
+	for _, id := range []string{"cloud", "enrol-users", "console"} {
+		src := filepath.Join(sourceDir, id+".png")
+		dst := filepath.Join(launcherDir, "icons", id+".png")
+		if err := copyFileMode(src, dst, 0o640); err != nil {
+			fmt.Fprintf(os.Stderr, "launcher: seed icon %s: %v\n", id, err)
+			continue
+		}
+		out[id] = "icons/" + id + ".png"
+	}
+	return out
+}
+
+func copyFileMode(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dst + ".seed.tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 func removeOldIcons(dir, id string) error {
