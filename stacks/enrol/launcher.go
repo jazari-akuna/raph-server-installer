@@ -122,12 +122,9 @@ func bootstrapLauncher(dir string) error {
 }
 
 func removeOldIcons(dir, id string) error {
-	matches, err := filepath.Glob(filepath.Join(dir, "icons", id+".*"))
-	if err != nil {
-		return err
-	}
-	for _, m := range matches {
-		if err := os.Remove(m); err != nil && !errors.Is(err, os.ErrNotExist) {
+	for _, ext := range []string{"png", "jpg", "webp", "gif"} {
+		p := filepath.Join(dir, "icons", id+"."+ext)
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
@@ -233,7 +230,8 @@ func fetchIcon(dir, id, rawURL string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("icon fetch: status %d", resp.StatusCode)
 	}
-	body := io.LimitReader(resp.Body, 256*1024)
+	const maxIconBytes = 256 * 1024
+	body := io.LimitReader(resp.Body, maxIconBytes+1)
 	br := bufio.NewReader(body)
 	peek, err := br.Peek(512)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, bufio.ErrBufferFull) {
@@ -243,15 +241,21 @@ func fetchIcon(dir, id, rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	tmp := filepath.Join(dir, "icons", id+".tmp")
+	tmp := filepath.Join(dir, "icons", id+".fetch.tmp")
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(f, br); err != nil {
+	n, err := io.Copy(f, br)
+	if err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return "", err
+	}
+	if n > maxIconBytes {
+		f.Close()
+		os.Remove(tmp)
+		return "", fmt.Errorf("icon too large (>%d bytes)", maxIconBytes)
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
