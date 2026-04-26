@@ -37,6 +37,15 @@ type server struct {
 func newServer(cfg config) (*server, error) {
 	tmpl := template.New("").Funcs(template.FuncMap{
 		"join": strings.Join,
+		"gb": func(n int64) string {
+			return fmt.Sprintf("%.1f", float64(n)/(1<<30))
+		},
+		"pct": func(part, whole int64) string {
+			if whole <= 0 {
+				return "0"
+			}
+			return fmt.Sprintf("%.2f", 100*float64(part)/float64(whole))
+		},
 		"prettyBytes": func(n int64) string {
 			const (
 				kib = 1024
@@ -115,11 +124,12 @@ func (s *server) handleUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 type usersListData struct {
-	Title string
-	User  string
-	CSRF  string
-	Users []userRow
-	Flash string
+	Title   string
+	User    string
+	CSRF    string
+	Users   []userRow
+	Storage StorageInfo
+	Flash   string
 }
 
 type userRow struct {
@@ -138,8 +148,9 @@ func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash s
 		http.Error(w, "load users: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	rows := make([]userRow, 0, len(db.Users))
-	for _, name := range db.listSorted() {
+	names := db.listSorted()
+	rows := make([]userRow, 0, len(names))
+	for _, name := range names {
 		u := db.Users[name]
 		v := describeVolume(s.cfg, name)
 		rows = append(rows, userRow{
@@ -148,11 +159,12 @@ func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash s
 		})
 	}
 	data := usersListData{
-		Title: "users",
-		User:  r.Header.Get("X-Enrol-User"),
-		CSRF:  csrf,
-		Users: rows,
-		Flash: flash,
+		Title:   "users",
+		User:    r.Header.Get("X-Enrol-User"),
+		CSRF:    csrf,
+		Users:   rows,
+		Storage: storageSnapshot(s.cfg, names),
+		Flash:   flash,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "users.html", data); err != nil {

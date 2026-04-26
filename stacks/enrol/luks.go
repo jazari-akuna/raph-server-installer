@@ -35,6 +35,69 @@ type VolumeInfo struct {
 	SizeBytes  int64
 }
 
+// StorageInfo aggregates host-disk + per-user volume metrics for the
+// /users overview panel.
+type StorageInfo struct {
+	Root          string // filesystem root we Statfs'd (e.g. /srv/store)
+	TotalBytes    int64  // total capacity of the underlying filesystem
+	FreeBytes     int64  // bytes free to non-root
+	UserOnDisk    int64  // sum of per-user .img on-disk allocation
+	UserUsedInner int64  // sum of bytes actually used inside unlocked volumes
+	NominalBytes  int64  // sum of per-user nominal allocation (luksSizeGB each)
+	SystemBytes   int64  // total - free - userOnDisk (everything else)
+	Users         []UserStorage
+}
+
+// UserStorage is the per-user row in the storage panel.
+type UserStorage struct {
+	Name          string
+	Exists        bool
+	Mounted       bool
+	NominalBytes  int64 // luksSizeGB advertised envelope
+	OnDiskBytes   int64 // real on-disk consumption of the sparse blob
+	UsedInner     int64 // bytes used inside the mounted ext4, 0 when locked
+	InnerCapacity int64 // ext4 size when mounted, 0 when locked
+}
+
+// storageSnapshot collects the data the /users storage panel renders.
+// Read-only; tolerates Stat/Statfs errors per-user (zeroes that field).
+func storageSnapshot(cfg config, users []string) StorageInfo {
+	si := StorageInfo{Root: "/srv/store"}
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(si.Root, &fs); err == nil {
+		si.TotalBytes = int64(fs.Blocks) * int64(fs.Bsize)
+		si.FreeBytes = int64(fs.Bavail) * int64(fs.Bsize)
+	}
+	nominal := int64(cfg.luksSizeGB) << 30
+	for _, name := range users {
+		us := UserStorage{Name: name, NominalBytes: nominal}
+		img, mnt, _ := volumePaths(cfg, name)
+		if st, err := os.Stat(img); err == nil {
+			us.Exists = true
+			if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+				us.OnDiskBytes = int64(sys.Blocks) * 512
+			}
+		}
+		if isMounted(mnt) {
+			us.Mounted = true
+			var mfs syscall.Statfs_t
+			if err := syscall.Statfs(mnt, &mfs); err == nil {
+				us.InnerCapacity = int64(mfs.Blocks) * int64(mfs.Bsize)
+				us.UsedInner = int64(mfs.Blocks-mfs.Bfree) * int64(mfs.Bsize)
+			}
+		}
+		si.UserOnDisk += us.OnDiskBytes
+		si.UserUsedInner += us.UsedInner
+		si.NominalBytes += us.NominalBytes
+		si.Users = append(si.Users, us)
+	}
+	si.SystemBytes = si.TotalBytes - si.FreeBytes - si.UserOnDisk
+	if si.SystemBytes < 0 {
+		si.SystemBytes = 0
+	}
+	return si
+}
+
 func volumePaths(cfg config, user string) (img, mountpoint, mapper string) {
 	return filepath.Join(cfg.storeDataDir, user+".img"),
 		filepath.Join(cfg.storeMntDir, user),

@@ -2,6 +2,60 @@
 
 {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
 
+<section class="storage">
+  <h2>storage</h2>
+  <p class="hint">
+    {{gb .Storage.TotalBytes}}&nbsp;GB filesystem hosting <code>/srv/store</code>:
+    {{gb .Storage.UserOnDisk}}&nbsp;GB used by user volumes,
+    {{gb .Storage.SystemBytes}}&nbsp;GB by the system,
+    {{gb .Storage.FreeBytes}}&nbsp;GB free.
+  </p>
+  <div class="bar">
+    <div class="seg seg-system" style="width:{{pct .Storage.SystemBytes .Storage.TotalBytes}}%" title="system {{gb .Storage.SystemBytes}} GB"></div>
+    {{range .Storage.Users}}
+      {{if .Exists}}
+      <div class="seg seg-user{{if not .Mounted}} seg-locked{{end}}" style="width:{{pct .OnDiskBytes $.Storage.TotalBytes}}%" title="{{.Name}} {{gb .OnDiskBytes}} GB on-disk"></div>
+      {{end}}
+    {{end}}
+    <div class="seg seg-free" style="width:{{pct .Storage.FreeBytes .Storage.TotalBytes}}%" title="free {{gb .Storage.FreeBytes}} GB"></div>
+  </div>
+  <table class="storage-legend">
+    <thead>
+      <tr><th></th><th>segment</th><th>on-disk</th><th>used inside</th><th>nominal</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="swatch swatch-system"></span></td>
+        <td>system (OS, docker, logs)</td>
+        <td>{{gb .Storage.SystemBytes}} GB</td>
+        <td>—</td>
+        <td>—</td>
+      </tr>
+      {{range .Storage.Users}}
+      <tr>
+        <td><span class="swatch swatch-user{{if not .Mounted}} swatch-locked{{end}}"></span></td>
+        <td>
+          {{.Name}}
+          {{if not .Exists}}<span class="muted">(no volume)</span>
+          {{else if .Mounted}}<span class="ok">unlocked</span>
+          {{else}}<span class="muted">locked</span>{{end}}
+        </td>
+        <td>{{gb .OnDiskBytes}} GB</td>
+        <td>{{if .Mounted}}{{gb .UsedInner}} / {{gb .InnerCapacity}} GB{{else}}—{{end}}</td>
+        <td>{{gb .NominalBytes}} GB</td>
+      </tr>
+      {{end}}
+      <tr>
+        <td><span class="swatch swatch-free"></span></td>
+        <td>free</td>
+        <td>{{gb .Storage.FreeBytes}} GB</td>
+        <td>—</td>
+        <td>—</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
 <section>
   <h2>users</h2>
   {{if .Users}}

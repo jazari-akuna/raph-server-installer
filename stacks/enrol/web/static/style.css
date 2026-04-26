@@ -67,3 +67,23 @@ pre.conf { background: #fff; border: 1px solid var(--border); padding: 0.75em; o
 img.qr { max-width: 320px; border: 1px solid var(--border); }
 dl dt { font-weight: 600; margin-top: 0.4em; color: var(--muted); font-size: 0.85em; }
 dl dd { margin-left: 0; margin-bottom: 0.3em; }
+.storage .bar {
+  display: flex; width: 100%; height: 18px;
+  border: 1px solid var(--border); border-radius: 3px;
+  overflow: hidden; background: #fff; margin: 0.5em 0;
+}
+.storage .seg { height: 100%; }
+.storage .seg-system { background: var(--muted); }
+.storage .seg-user   { background: var(--accent); border-right: 1px solid #fff; }
+.storage .seg-locked { background: repeating-linear-gradient(45deg, var(--accent), var(--accent) 4px, #6b8bb5 4px, #6b8bb5 8px); }
+.storage .seg-free   { background: #fff; }
+.storage-legend { font-size: 0.85em; }
+.storage-legend th, .storage-legend td { padding: 0.25em 0.5em; }
+.swatch {
+  display: inline-block; width: 12px; height: 12px;
+  border: 1px solid var(--border); vertical-align: middle;
+}
+.swatch-system { background: var(--muted); }
+.swatch-user   { background: var(--accent); }
+.swatch-locked { background: repeating-linear-gradient(45deg, var(--accent), var(--accent) 3px, #6b8bb5 3px, #6b8bb5 6px); }
+.swatch-free   { background: #fff; }
