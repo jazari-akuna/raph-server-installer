@@ -72,6 +72,9 @@ func newServer(cfg config) (*server, error) {
 	if err := bootstrapLauncher(cfg.launcherDir); err != nil {
 		return nil, fmt.Errorf("bootstrap launcher: %w", err)
 	}
+	if err := ensureArchiveDir(cfg); err != nil {
+		return nil, fmt.Errorf("ensure peers archive dir: %w", err)
+	}
 	return &server{cfg: cfg, tmpl: tmpl}, nil
 }
 
@@ -934,6 +937,15 @@ func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 	}
 	clientConf := renderClientConf(p, pc, s.cfg)
 
+	if err := archiveWrite(s.cfg, p.Name, []byte(clientConf)); err != nil {
+		log.Printf("archive write %s: %v", p.Name, err)
+		writeAudit(auditPath, auditEntry{Action: "peer.archive", Actor: actor,
+			Target: p.Name, Result: "fail", Note: err.Error()})
+	} else {
+		writeAudit(auditPath, auditEntry{Action: "peer.archive", Actor: actor,
+			Target: p.Name, Result: "ok", Note: "auto on create"})
+	}
+
 	csrf := ensureCSRF(w, r)
 	data := struct {
 		Title      string
@@ -997,10 +1009,14 @@ func (s *server) handlePeerSub(w http.ResponseWriter, r *http.Request) {
 		s.handlePeerDetail(w, r, name)
 	case "delete":
 		s.handleDeletePeer(w, r, name)
-	case "config":
+	case "conf", "config":
 		s.handleDownloadConf(w, r, name)
 	case "qr.png":
 		s.handleQR(w, r, name)
+	case "upload-conf":
+		s.handleUploadPeerConf(w, r, name)
+	case "forget-conf":
+		s.handleForgetPeerConf(w, r, name)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1032,17 +1048,19 @@ func (s *server) handlePeerDetail(w http.ResponseWriter, r *http.Request, name s
 	}
 	clientConf := renderClientConf(p, pc, s.cfg)
 	data := struct {
-		Title      string
-		User       string
-		CSRF       string
-		Peer       peer
-		ClientConf string
+		Title         string
+		User          string
+		CSRF          string
+		Peer          peer
+		ClientConf    string
+		ArchiveExists bool
 	}{
-		Title:      "peer " + p.Name,
-		User:       r.Header.Get("X-Enrol-User"),
-		CSRF:       csrf,
-		Peer:       p,
-		ClientConf: clientConf,
+		Title:         "peer " + p.Name,
+		User:          r.Header.Get("X-Enrol-User"),
+		CSRF:          csrf,
+		Peer:          p,
+		ClientConf:    clientConf,
+		ArchiveExists: archiveExists(s.cfg, p.Name),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "peer-detail.html", data); err != nil {
@@ -1105,6 +1123,17 @@ func (s *server) handleDeletePeer(w http.ResponseWriter, r *http.Request, name s
 }
 
 func (s *server) handleDownloadConf(w http.ResponseWriter, r *http.Request, name string) {
+	if archiveExists(s.cfg, name) {
+		if b, err := archiveRead(s.cfg, name); err == nil {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Content-Disposition",
+				fmt.Sprintf(`attachment; filename="%s.conf"`, name))
+			w.Write(b)
+			return
+		} else {
+			log.Printf("archive read %s: %v (falling back to render)", name, err)
+		}
+	}
 	p, pc, err := s.findPeerByName(name)
 	if err != nil {
 		http.NotFound(w, r)
@@ -1115,6 +1144,88 @@ func (s *server) handleDownloadConf(w http.ResponseWriter, r *http.Request, name
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="%s.conf"`, name))
 	io.WriteString(w, conf)
+}
+
+func (s *server) handleUploadPeerConf(w http.ResponseWriter, r *http.Request, name string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	actor := r.Header.Get("X-Enrol-User")
+	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
+
+	if _, _, err := s.findPeerByName(name); err != nil {
+		http.Error(w, "peer not found", http.StatusNotFound)
+		return
+	}
+	if err := r.ParseMultipartForm(16 << 10); err != nil {
+		http.Error(w, "parse multipart: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	f, _, err := r.FormFile("conf")
+	if err != nil {
+		http.Error(w, "missing form file 'conf': "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer f.Close()
+	body, err := io.ReadAll(io.LimitReader(f, 16<<10))
+	if err != nil {
+		http.Error(w, "read upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !looksLikePeerConf(body) {
+		writeAudit(auditPath, auditEntry{Action: "peer.archive", Actor: actor,
+			Target: name, Result: "fail", Note: "via upload: failed sanity check"})
+		http.Error(w, "uploaded file does not look like a peer .conf "+
+			"(expected [Interface], PrivateKey =, and a [Peer] block)",
+			http.StatusBadRequest)
+		return
+	}
+	if err := archiveWrite(s.cfg, name, body); err != nil {
+		writeAudit(auditPath, auditEntry{Action: "peer.archive", Actor: actor,
+			Target: name, Result: "fail", Note: "via upload: " + err.Error()})
+		http.Error(w, "write archive: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeAudit(auditPath, auditEntry{Action: "peer.archive", Actor: actor,
+		Target: name, Result: "ok", Note: "via upload"})
+	http.Redirect(w, r, "/peers/"+name, http.StatusSeeOther)
+}
+
+func (s *server) handleForgetPeerConf(w http.ResponseWriter, r *http.Request, name string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	actor := r.Header.Get("X-Enrol-User")
+	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
+	if err := archiveDelete(s.cfg, name); err != nil {
+		writeAudit(auditPath, auditEntry{Action: "peer.archive.forget", Actor: actor,
+			Target: name, Result: "fail", Note: err.Error()})
+		http.Error(w, "delete archive: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeAudit(auditPath, auditEntry{Action: "peer.archive.forget", Actor: actor,
+		Target: name, Result: "ok"})
+	http.Redirect(w, r, "/peers/"+name, http.StatusSeeOther)
+}
+
+func looksLikePeerConf(b []byte) bool {
+	s := string(b)
+	if !strings.Contains(s, "[Interface]") {
+		return false
+	}
+	if !strings.Contains(s, "[Peer]") {
+		return false
+	}
+	if !strings.Contains(s, "PrivateKey") {
+		return false
+	}
+	return true
 }
 
 func (s *server) handleQR(w http.ResponseWriter, r *http.Request, name string) {

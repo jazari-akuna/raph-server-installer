@@ -59,6 +59,11 @@ type config struct {
 
 	// Launcher (post-login app tile grid).
 	launcherDir string // /srv/store/enrol-launcher
+
+	// Peer .conf archive — authoritative copy of rendered client .conf
+	// files (with private keys), used to re-serve downloads after the
+	// initial creation page is gone. See peers_archive.go.
+	peersArchiveDir string // /srv/store/enrol-peers-archive
 }
 
 func loadConfig() config {
@@ -97,6 +102,7 @@ func loadConfig() config {
 		storeMntDir:       envOr("ENROL_STORE_MNT_DIR", "/srv/store/mnt"),
 		luksSizeGB:        luksSize,
 		launcherDir:       envOr("ENROL_LAUNCHER_DIR", "/srv/store/enrol-launcher"),
+		peersArchiveDir:   envOr("ENROL_PEERS_ARCHIVE_DIR", "/srv/store/enrol-peers-archive"),
 	}
 }
 

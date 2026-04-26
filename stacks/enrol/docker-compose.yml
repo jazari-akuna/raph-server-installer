@@ -165,6 +165,13 @@ services:
       # bootstrapped on startup with three default tiles.
       ENROL_LAUNCHER_DIR: "/srv/store/enrol-launcher"
 
+      # Authoritative on-disk archive of rendered peer .conf files.
+      # gw0.conf does not retain peer private keys, so without this
+      # archive the only way to obtain a peer's working .conf is to
+      # catch the creation page before navigating away. Stored 0700
+      # root-owned dir; files 0600 root-owned. See peers_archive.go.
+      ENROL_PEERS_ARCHIVE_DIR: "/srv/store/enrol-peers-archive"
+
     healthcheck:
       # ENROL_LISTEN binds to 172.17.0.1:8080 (the docker bridge gateway),
       # not 127.0.0.1, so the healthcheck must hit the bridge IP too.
