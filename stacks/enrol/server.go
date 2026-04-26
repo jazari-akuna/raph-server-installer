@@ -1160,7 +1160,7 @@ func (s *server) handleUploadPeerConf(w http.ResponseWriter, r *http.Request, na
 		http.Error(w, "peer not found", http.StatusNotFound)
 		return
 	}
-	if err := r.ParseMultipartForm(16 << 10); err != nil {
+	if err := r.ParseMultipartForm(256 << 10); err != nil {
 		http.Error(w, "parse multipart: "+err.Error(), http.StatusBadRequest)
 		return
 	}
