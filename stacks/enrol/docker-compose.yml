@@ -154,6 +154,11 @@ services:
       ENROL_STORE_MNT_DIR: "/srv/store/mnt"
       ENROL_LUKS_SIZE_GB: "50"
 
+      # Launcher (post-login app tile grid). Lives under /srv/store so it
+      # rides the same bind mount as the user volumes; the directory is
+      # bootstrapped on startup with three default tiles.
+      ENROL_LAUNCHER_DIR: "/srv/store/enrol-launcher"
+
     healthcheck:
       # ENROL_LISTEN binds to 172.17.0.1:8080 (the docker bridge gateway),
       # not 127.0.0.1, so the healthcheck must hit the bridge IP too.

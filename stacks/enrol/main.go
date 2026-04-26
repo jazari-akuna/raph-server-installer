@@ -55,6 +55,9 @@ type config struct {
 	storeDataDir string // /srv/store/data
 	storeMntDir  string // /srv/store/mnt
 	luksSizeGB   int
+
+	// Launcher (post-login app tile grid).
+	launcherDir string // /srv/store/enrol-launcher
 }
 
 func loadConfig() config {
@@ -91,6 +94,7 @@ func loadConfig() config {
 		storeDataDir:      envOr("ENROL_STORE_DATA_DIR", "/srv/store/data"),
 		storeMntDir:       envOr("ENROL_STORE_MNT_DIR", "/srv/store/mnt"),
 		luksSizeGB:        luksSize,
+		launcherDir:       envOr("ENROL_LAUNCHER_DIR", "/srv/store/enrol-launcher"),
 	}
 }
 

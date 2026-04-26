@@ -124,7 +124,7 @@ session:
   cookies:
     - domain: 'antarctica-engineering.com'
       authelia_url: 'https://auth.antarctica-engineering.com'
-      default_redirection_url: 'https://cloud.antarctica-engineering.com'
+      default_redirection_url: 'https://enrol.antarctica-engineering.com/'
 
 ###############################################################################
 # Regulation — brute-force lockout (5 attempts / 15 min)

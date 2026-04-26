@@ -69,6 +69,9 @@ func newServer(cfg config) (*server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse templates %s: %w", pattern, err)
 	}
+	if err := bootstrapLauncher(cfg.launcherDir); err != nil {
+		return nil, fmt.Errorf("bootstrap launcher: %w", err)
+	}
 	return &server{cfg: cfg, tmpl: tmpl}, nil
 }
 
@@ -87,7 +90,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("/static/", http.StripPrefix("/static/",
 		http.FileServer(http.Dir(s.cfg.staticDir))))
 
-	mux.HandleFunc("/", requireAuth(s.cfg, false, s.handleIndex))
+	mux.HandleFunc("/", requireAuth(s.cfg, true, s.withCSRF(s.handleLauncher)))
+	mux.HandleFunc("/launcher/apps", requireAuth(s.cfg, true, s.withCSRF(s.handleLauncherAddApp)))
+	mux.HandleFunc("/launcher/apps/", requireAuth(s.cfg, true, s.withCSRF(s.handleLauncherAppSub)))
+	mux.HandleFunc("/launcher/icons/", requireAuth(s.cfg, true, s.handleLauncherIcon))
 	mux.HandleFunc("/audit", requireAuth(s.cfg, true, s.handleAudit))
 
 	// Users
@@ -99,14 +105,6 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/peers/", requireAuth(s.cfg, true, s.withCSRF(s.handlePeerSub)))
 
 	return mux
-}
-
-func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	http.Redirect(w, r, "/users", http.StatusFound)
 }
 
 // ---------------------------------------------------------------------------
@@ -1134,4 +1132,221 @@ func (s *server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	entries := readAudit(filepath.Join(s.cfg.awgDir, "peers-audit.log"), 200)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(entries)
+}
+
+// ---------------------------------------------------------------------------
+// /  + /launcher/...
+
+type launcherTileData struct {
+	ID       string
+	Name     string
+	URL      string
+	IconURL  string
+	Initials string
+}
+
+type launcherData struct {
+	Title string
+	User  string
+	CSRF  string
+	Apps  []launcherTileData
+	Flash string
+}
+
+func (s *server) handleLauncher(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.renderLauncher(w, r, "")
+}
+
+func (s *server) renderLauncher(w http.ResponseWriter, r *http.Request, flash string) {
+	csrf := ensureCSRF(w, r)
+	apps, err := loadLauncher(s.cfg.launcherDir)
+	if err != nil {
+		http.Error(w, "load launcher: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tiles := make([]launcherTileData, 0, len(apps))
+	for _, a := range apps {
+		t := launcherTileData{
+			ID:       a.ID,
+			Name:     a.Name,
+			URL:      a.URL,
+			Initials: initialOf(a.Name),
+		}
+		switch {
+		case a.Icon == "":
+			t.IconURL = ""
+		case strings.HasPrefix(a.Icon, "icons/"):
+			t.IconURL = "/launcher/" + a.Icon
+		default:
+			log.Printf("launcher: app %q has unexpected icon path %q; using initials", a.ID, a.Icon)
+			t.IconURL = ""
+		}
+		tiles = append(tiles, t)
+	}
+	data := launcherData{
+		Title: "apps",
+		User:  r.Header.Get("X-Enrol-User"),
+		CSRF:  csrf,
+		Apps:  tiles,
+		Flash: flash,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.tmpl.ExecuteTemplate(w, "launcher.html", data); err != nil {
+		log.Printf("template launcher.html: %v", err)
+	}
+}
+
+func (s *server) handleLauncherAddApp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	actor := r.Header.Get("X-Enrol-User")
+	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(r.Form.Get("id"))
+	name := strings.TrimSpace(r.Form.Get("name"))
+	urlStr := strings.TrimSpace(r.Form.Get("url"))
+	iconURL := strings.TrimSpace(r.Form.Get("icon_url"))
+
+	if !validAppID(id) {
+		http.Error(w, "invalid app id (allowed: lowercase letter, then a-z0-9-, 1..32 chars)",
+			http.StatusBadRequest)
+		writeAudit(auditPath, auditEntry{Action: "launcher.app.add", Actor: actor,
+			Target: id, Result: "fail", Note: "invalid id"})
+		return
+	}
+	if name == "" || len(name) > 64 {
+		http.Error(w, "name required (1..64 chars)", http.StatusBadRequest)
+		return
+	}
+	if !validAppURL(urlStr) {
+		http.Error(w, "invalid url (must be http/https)", http.StatusBadRequest)
+		return
+	}
+
+	apps, err := loadLauncher(s.cfg.launcherDir)
+	if err != nil {
+		http.Error(w, "load launcher: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, a := range apps {
+		if a.ID == id {
+			http.Error(w, "app already exists: "+id, http.StatusConflict)
+			writeAudit(auditPath, auditEntry{Action: "launcher.app.add", Actor: actor,
+				Target: id, Result: "fail", Note: "duplicate"})
+			return
+		}
+	}
+
+	icon := ""
+	if iconURL != "" {
+		got, err := fetchIcon(s.cfg.launcherDir, id, iconURL)
+		if err != nil {
+			http.Error(w, "fetch icon: "+err.Error(), http.StatusBadRequest)
+			writeAudit(auditPath, auditEntry{Action: "launcher.app.add", Actor: actor,
+				Target: id, Result: "fail", Note: "icon: " + err.Error()})
+			return
+		}
+		icon = got
+	}
+	apps = append(apps, LauncherApp{ID: id, Name: name, URL: urlStr, Icon: icon})
+	if err := saveLauncher(s.cfg.launcherDir, apps); err != nil {
+		http.Error(w, "save launcher: "+err.Error(), http.StatusInternalServerError)
+		writeAudit(auditPath, auditEntry{Action: "launcher.app.add", Actor: actor,
+			Target: id, Result: "fail", Note: "save: " + err.Error()})
+		return
+	}
+	writeAudit(auditPath, auditEntry{Action: "launcher.app.add", Actor: actor,
+		Target: id, Result: "ok", Note: "url=" + urlStr})
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *server) handleLauncherAppSub(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/launcher/apps/")
+	if rest == "" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	parts := strings.SplitN(rest, "/", 2)
+	id := parts[0]
+	if !validAppID(id) {
+		http.Error(w, "invalid app id", http.StatusBadRequest)
+		return
+	}
+	action := ""
+	if len(parts) == 2 {
+		action = parts[1]
+	}
+	switch action {
+	case "delete":
+		s.handleLauncherAppDelete(w, r, id)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *server) handleLauncherAppDelete(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	actor := r.Header.Get("X-Enrol-User")
+	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
+
+	apps, err := loadLauncher(s.cfg.launcherDir)
+	if err != nil {
+		http.Error(w, "load launcher: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := apps[:0]
+	found := false
+	for _, a := range apps {
+		if a.ID == id {
+			found = true
+			continue
+		}
+		out = append(out, a)
+	}
+	if !found {
+		http.Error(w, "app not found", http.StatusNotFound)
+		return
+	}
+	if err := saveLauncher(s.cfg.launcherDir, out); err != nil {
+		http.Error(w, "save launcher: "+err.Error(), http.StatusInternalServerError)
+		writeAudit(auditPath, auditEntry{Action: "launcher.app.delete", Actor: actor,
+			Target: id, Result: "fail", Note: err.Error()})
+		return
+	}
+	if err := removeOldIcons(s.cfg.launcherDir, id); err != nil {
+		log.Printf("launcher: remove icons for %s: %v", id, err)
+	}
+	writeAudit(auditPath, auditEntry{Action: "launcher.app.delete", Actor: actor,
+		Target: id, Result: "ok"})
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *server) handleLauncherIcon(w http.ResponseWriter, r *http.Request) {
+	basename := strings.TrimPrefix(r.URL.Path, "/launcher/icons/")
+	if !reIconPath.MatchString(basename) {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, filepath.Join(s.cfg.launcherDir, "icons", basename))
 }

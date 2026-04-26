@@ -1,0 +1,63 @@
+{{template "head" .}}
+
+{{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+
+<section class="launcher">
+  <h2>apps</h2>
+  {{if .Apps}}
+  <div class="tile-grid">
+    {{range .Apps}}
+    <div class="tile-wrap">
+      <a class="tile" href="{{.URL}}" target="_top" rel="noopener noreferrer">
+        {{if .IconURL}}
+          <img class="tile-icon" src="{{.IconURL}}" alt="">
+        {{else}}
+          <span class="tile-initials">{{.Initials}}</span>
+        {{end}}
+        <span class="tile-name">{{.Name}}</span>
+      </a>
+      <form class="tile-delete" method="POST" action="/launcher/apps/{{.ID}}/delete"
+            onsubmit="return confirm('Remove {{.Name}} from the launcher?');">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <button type="submit" class="danger" title="remove">&times;</button>
+      </form>
+    </div>
+    {{end}}
+  </div>
+  {{else}}
+  <p class="muted">no apps yet.</p>
+  {{end}}
+</section>
+
+<section>
+  <h2>add app</h2>
+  <p class="hint">
+    Adds a tile to the launcher. The icon URL is optional — if blank,
+    the tile shows the first letter of the app name. If provided, the
+    image is fetched server-side (PNG, JPG, WEBP, or GIF only) and
+    cached locally; private and loopback addresses are refused.
+  </p>
+  <form method="POST" action="/launcher/apps">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label>id
+      <input type="text" name="id" required
+        pattern="[a-z][a-z0-9\-]{0,31}" maxlength="32"
+        placeholder="e.g. grafana">
+    </label>
+    <label>name
+      <input type="text" name="name" required
+        maxlength="64" placeholder="e.g. Grafana">
+    </label>
+    <label>url
+      <input type="text" name="url" required
+        placeholder="https://...">
+    </label>
+    <label>icon url (optional)
+      <input type="text" name="icon_url"
+        placeholder="https://example.com/icon.png">
+    </label>
+    <button type="submit">add</button>
+  </form>
+</section>
+
+{{template "tail" .}}

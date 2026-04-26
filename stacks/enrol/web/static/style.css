@@ -87,3 +87,72 @@ dl dd { margin-left: 0; margin-bottom: 0.3em; }
 .swatch-user   { background: var(--accent); }
 .swatch-locked { background: repeating-linear-gradient(45deg, var(--accent), var(--accent) 3px, #6b8bb5 3px, #6b8bb5 6px); }
 .swatch-free   { background: #fff; }
+
+/* launcher tile grid */
+.launcher .tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 1em;
+  margin: 1em 0;
+}
+.launcher .tile-wrap {
+  position: relative;
+}
+.launcher .tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6em;
+  padding: 1.2em 0.6em;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  text-decoration: none;
+  color: var(--fg);
+  min-height: 140px;
+  transition: border-color 0.1s, box-shadow 0.1s;
+}
+.launcher .tile:hover {
+  border-color: var(--accent);
+  box-shadow: 0 1px 4px rgba(44, 82, 130, 0.15);
+}
+.launcher .tile-icon {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+}
+.launcher .tile-initials {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 1.6em;
+  font-weight: 600;
+}
+.launcher .tile-name {
+  font-size: 0.95em;
+  text-align: center;
+  word-break: break-word;
+}
+.launcher .tile-delete {
+  position: absolute;
+  top: 0.3em;
+  right: 0.3em;
+  margin: 0;
+}
+.launcher .tile-delete button {
+  padding: 0.1em 0.45em;
+  font-size: 0.9em;
+  line-height: 1;
+  opacity: 0.0;
+  transition: opacity 0.1s;
+}
+.launcher .tile-wrap:hover .tile-delete button,
+.launcher .tile-delete button:focus {
+  opacity: 0.9;
+}
