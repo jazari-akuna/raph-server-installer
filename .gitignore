@@ -21,7 +21,7 @@ peers/
 # Authelia: rendered configuration.yml (from .template) + users db + state.
 # Only the .template, .example, and DESIGN.md are committed.
 stacks/authelia/configuration.yml
-stacks/authelia/users_database.yml
+stacks/authelia/users_db/users_database.yml
 stacks/authelia/data/*
 !stacks/authelia/data/.gitkeep
 stacks/authelia/secrets/*

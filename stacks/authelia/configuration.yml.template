@@ -69,7 +69,7 @@ authentication_backend:
     disable: true   # operator-managed at bootstrap
   refresh_interval: '5 minutes'
   file:
-    path: '/config/users_database.yml'
+    path: '/config/users_db/users_database.yml'
     watch: true
     search:
       email: false

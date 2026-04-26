@@ -146,7 +146,7 @@ services:
 
       # Authelia integration: the YAML file enrol writes (its own bind
       # mount path), and the docker-exec target for TOTP generation.
-      ENROL_USERS_DB: "/etc/authelia/users_database.yml"
+      ENROL_USERS_DB: "/etc/authelia/users_db/users_database.yml"
       ENROL_AUTHELIA_CONTAINER: "authelia"
 
       # LUKS storage layout. Match scripts/create-store-volume.sh.

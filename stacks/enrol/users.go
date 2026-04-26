@@ -160,13 +160,11 @@ func (db *UsersDB) remove(name string) error {
 	return fmt.Errorf("user %q not found", name)
 }
 
-// flush writes the YAML to disk *in place* (truncate + write). We do
-// NOT use tmpfile+rename here, even though it's the textbook atomic
-// pattern, because Authelia bind-mounts users_database.yml as a single
-// file: a rename onto that path replaces the inode, and the bind in
-// the Authelia container then points at the orphan, never seeing our
-// edits. Truncate+write keeps the inode stable so both enrol and
-// Authelia see the same content.
+// flush writes the YAML to disk *in place* (truncate + write). The
+// file lives inside Authelia's parent-dir bind-mount, so atomic
+// tmpfile+rename would also work — but truncate-in-place is simpler
+// and Authelia's fsnotify-on-the-parent-dir picks up IN_MODIFY just
+// fine.
 //
 // The trade-off: a partial write is briefly observable. We mitigate
 // by writing under our internal mutex (s.mu) and by serialising every

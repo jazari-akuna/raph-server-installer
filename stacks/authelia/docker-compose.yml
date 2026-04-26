@@ -30,9 +30,18 @@ services:
       # Main configuration. Read-only mount; container can't mutate it.
       - ./configuration.yml:/config/configuration.yml:ro
       # Users database (argon2id hashes + group membership). Mode 0600
-      # on host. Authelia rewrites this file when a user changes their
-      # password through the portal, so it must be RW.
-      - ./users_database.yml:/config/users_database.yml
+      # on host. enrol rewrites this file when an admin changes a
+      # password / email / role.
+      #
+      # Bind the *parent directory*, not the file. Authelia's fsnotify
+      # watcher (`watch: true` in configuration.yml) does NOT detect
+      # host-side writes to a single-file bind-mount; verified
+      # empirically — even `touch` on the host produced no event in
+      # the container. Watching a file *inside* a bind-mounted
+      # directory works because inotify falls back to the parent's
+      # directory watch for atomic-rename detection. So we put the
+      # YAML in its own subdir and mount the subdir.
+      - ./users_db:/config/users_db
       # Persistent storage: sqlite, totp secrets (encrypted at rest with
       # storage.encryption_key), session metadata.
       - ./data:/var/lib/authelia
