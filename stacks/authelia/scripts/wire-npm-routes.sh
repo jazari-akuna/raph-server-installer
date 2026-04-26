@@ -64,6 +64,20 @@ EOF
 # Empty advanced config for hosts that should NOT be gated.
 ADV_NONE=""
 
+# auth portal: when an already-logged-in visitor hits /, Authelia shows
+# its built-in "authenticated" placeholder instead of redirecting. We
+# rewrite a bare GET / into /?rd=enrol/, which makes Authelia auto-
+# forward authenticated users to the launcher AND drives unauthenticated
+# users through login → launcher.
+read -r -d '' ADV_AUTH_PORTAL <<'EOF' || true
+location = / {
+    if ($arg_rd = "") {
+        return 302 /?rd=https://enrol.antarctica-engineering.com/;
+    }
+    include conf.d/include/proxy.conf;
+}
+EOF
+
 # ----- helper: create or update a proxy host -------------------------
 # Args: domain forward_host forward_port forward_scheme advanced_config
 upsert_proxy_host() {
@@ -120,10 +134,13 @@ upsert_proxy_host() {
 
 # ----- the four hosts -------------------------------------------------
 # 1. auth — Authelia portal itself. NO forward-auth (would loop).
+#    Adv config rewrites bare GET / to /?rd=enrol/ so already-logged-in
+#    visitors land on the launcher instead of the "Authenticated"
+#    placeholder.
 upsert_proxy_host \
     "auth.antarctica-engineering.com" \
     "authelia" 9091 "http" \
-    "$ADV_NONE"
+    "$ADV_AUTH_PORTAL"
 
 # 2. enrol — peer manager. Forward-auth.
 upsert_proxy_host \
