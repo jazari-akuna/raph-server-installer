@@ -95,19 +95,19 @@ access_control:
     - domain: 'auth.antarctica-engineering.com'
       policy: 'bypass'
 
-    # Public file server: 2FA required for everyone, both admins.
+    # Public file server: password-only for both admins.
     - domain: 'cloud.antarctica-engineering.com'
-      policy: 'two_factor'
+      policy: 'one_factor'
 
-    # Peer-management UI: 2FA, admins-only group.
+    # Peer-management UI: password-only, admins-only group.
     - domain: 'enrol.antarctica-engineering.com'
-      policy: 'two_factor'
+      policy: 'one_factor'
       subject:
         - 'group:admins'
 
-    # Portainer: 2FA, admins-only group.
+    # Portainer: password-only, admins-only group.
     - domain: 'console.antarctica-engineering.com'
-      policy: 'two_factor'
+      policy: 'one_factor'
       subject:
         - 'group:admins'
 
@@ -189,7 +189,7 @@ identity_providers:
         #     authelia crypto hash generate pbkdf2 --variant sha512
         client_secret: '${AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH}'
         public: false
-        authorization_policy: 'two_factor'
+        authorization_policy: 'one_factor'
         require_pkce: false
         redirect_uris:
           - 'https://console.antarctica-engineering.com'

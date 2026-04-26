@@ -25,6 +25,11 @@ header {
   background: #fff;
   border-bottom: 1px solid var(--border);
 }
+header .logout {
+  color: var(--danger); text-decoration: none; font-size: 0.85em;
+  padding: 0.25em 0.7em; border: 1px solid var(--danger); border-radius: 3px;
+}
+header .logout:hover { background: var(--danger); color: #fff; }
 header h1 { margin: 0; font-size: 1.1em; letter-spacing: 0.02em; }
 header h1 a { color: var(--fg); text-decoration: none; }
 header nav { display: flex; gap: 1em; flex: 1; }
