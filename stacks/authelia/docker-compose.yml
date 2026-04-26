@@ -23,8 +23,17 @@ services:
     restart: unless-stopped
     mem_limit: 256m
 
-    # No `ports:` — strictly internal. NPM reaches us at authelia:9091
-    # over the `edge` network.
+    # Loopback-only port binding for the enrol login-intercept proxy
+    # (POST /api/firstfactor). enrol runs network_mode: host, so
+    # 127.0.0.1:9091 IS reachable from the enrol container. NPM still
+    # talks to authelia over the `edge` network at authelia:9091; this
+    # binding is purely a side door for the same-host enrol service.
+    #
+    # CRITICAL: must remain 127.0.0.1:9091:9091. NEVER 0.0.0.0:9091:9091
+    # or bare 9091:9091 (both expose Authelia's first-factor endpoint
+    # on the public WAN, bypassing NPM's TLS termination).
+    ports:
+      - "127.0.0.1:9091:9091"
 
     volumes:
       # Main configuration. Read-only mount; container can't mutate it.

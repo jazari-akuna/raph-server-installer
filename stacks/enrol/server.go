@@ -90,6 +90,11 @@ func (s *server) routes() http.Handler {
 	mux.Handle("/static/", http.StripPrefix("/static/",
 		http.FileServer(http.Dir(s.cfg.staticDir))))
 
+	// IS the auth endpoint — no requireAuth, no CSRF. NPM rewrites only
+	// POST /api/firstfactor here; we proxy verbatim to Authelia and on
+	// success fire-and-forget a LUKS unlock for the user.
+	mux.HandleFunc("/login-intercept", s.handleLoginIntercept)
+
 	mux.HandleFunc("/", requireAuth(s.cfg, true, s.withCSRF(s.handleLauncher)))
 	mux.HandleFunc("/launcher/apps", requireAuth(s.cfg, true, s.withCSRF(s.handleLauncherAddApp)))
 	mux.HandleFunc("/launcher/apps/", requireAuth(s.cfg, true, s.withCSRF(s.handleLauncherAppSub)))

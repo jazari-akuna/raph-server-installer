@@ -61,6 +61,71 @@ What this does NOT defend against:
 If `Remote-User` is missing, enrol returns 401 — that condition only
 happens if NPM is misconfigured.
 
+## Auto-unlock LUKS at login
+
+The first-factor POST is intercepted so enrol can unlock the user's
+LUKS volume with the same password they typed at login. They never
+have to visit `/users/<u>/luks/unlock` from the launcher.
+
+### How it works
+
+1. NPM's `auth.antarctica-engineering.com` site has a single extra
+   `location = /api/firstfactor` that proxies to the host-network
+   `enrol` service at `http://172.17.0.1:8080/login-intercept` (see
+   `wire-npm-routes.sh § ADV_AUTH_PORTAL`).
+2. enrol reads the JSON body, copies it, and proxies the request
+   verbatim to Authelia at `http://127.0.0.1:9091/api/firstfactor`.
+   Authelia's compose now binds 9091 to loopback for exactly this
+   purpose; there is no NPM-bypass — only enrol-on-the-host can reach
+   it. Other Authelia routes (`/api/verify`, second-factor, logout)
+   continue to flow through NPM → `authelia:9091` over the `edge`
+   network unchanged.
+3. enrol mirrors Authelia's response 1:1 — status code, every
+   `Set-Cookie` (so the SSO + remember-me cookies land), body bytes.
+4. On Authelia 200, enrol fires a goroutine that calls
+   `luksUnlock(cfg, user, password)` and zeros the password buffer in
+   defer. The login response is *already on its way to the browser*
+   when the unlock starts — login NEVER fails because LUKS failed.
+5. Outcome lands in `peers-audit.log` as `luks.auto-unlock`
+   (result `ok` or `fail`, with a sanitised error class).
+
+### One-time LUKS-sync setup
+
+The auto-unlock relies on the user's Authelia password matching their
+LUKS passphrase. This is **not enforced automatically** — operators
+must keep them in sync after any password change:
+
+1. After `POST /users/<u>/password` changes the Authelia password,
+   visit `/users/<u>/luks/passphrase` and rotate the LUKS passphrase
+   to the same new value.
+2. For users who pre-date this feature, the same `luks/passphrase`
+   form does the migration: enter the OLD LUKS passphrase + the NEW
+   passphrase (= the current Authelia password). enrol does
+   `luksAddKey` then `luksRemoveKey` so the volume is never without a
+   working keyslot.
+
+If the two ever drift, auto-unlock will simply log
+`result=fail note="wrong passphrase"` and the user can still unlock
+manually from the launcher.
+
+### Audit-log entries
+
+Each login produces (at most) one new audit entry:
+
+```jsonl
+{"action":"luks.auto-unlock","actor":"sagan","target":"sagan","result":"ok","note":"via login"}
+{"action":"luks.auto-unlock","actor":"alice","target":"alice","result":"fail","note":"wrong passphrase"}
+{"action":"luks.auto-unlock","actor":"bob","target":"bob","result":"fail","note":"no LUKS blob"}
+```
+
+Note classes: `via login` (success), `wrong passphrase`, `no LUKS blob`,
+`mount failed`, `cryptsetup open failed`, `unknown`. The raw
+cryptsetup stderr is intentionally NOT included — it can echo the
+passphrase prompt and we don't want secret material in the audit log.
+
+A failed first-factor login (Authelia returns 401) writes nothing —
+no LUKS work was attempted.
+
 ## Endpoints
 
 | Method | Path                              | Auth          | Purpose |
@@ -83,6 +148,7 @@ happens if NPM is misconfigured.
 | GET    | `/peers/<name>/qr.png`            | admins        | QR PNG |
 | GET    | `/audit`                          | admins        | last 200 audit entries (JSON) |
 | GET    | `/healthz`                        | none          | liveness probe |
+| POST   | `/login-intercept`                | none          | NPM-only: proxy to Authelia + auto-unlock LUKS on success |
 
 ## Storage / state on disk
 
@@ -113,6 +179,7 @@ stacks/enrol/
 ├── users.go             users_database.yml + argon2id
 ├── luks.go              cryptsetup / mkfs / mount / shred
 ├── totp.go              docker-exec into authelia for TOTP
+├── loginintercept.go    POST /api/firstfactor proxy + auto-unlock
 ├── web/static/style.css
 └── web/templates/
     ├── _layout.html
@@ -175,6 +242,7 @@ modifies it. There is no "import" step.
 | `ENROL_RELOAD_NSENTER`      | `false` | network_mode: host = no nsenter |
 | `ENROL_USERS_DB`            | `/etc/authelia/users_database.yml` | file inside container (bind from host) |
 | `ENROL_AUTHELIA_CONTAINER`  | `authelia` | docker exec target for TOTP |
+| `ENROL_AUTHELIA_URL`        | `http://127.0.0.1:9091` | upstream for `/login-intercept` proxy |
 | `ENROL_STORE_DATA_DIR`      | `/srv/store/data` | LUKS blobs |
 | `ENROL_STORE_MNT_DIR`       | `/srv/store/mnt` | mountpoints |
 | `ENROL_LUKS_SIZE_GB`        | `50` | new-volume size |

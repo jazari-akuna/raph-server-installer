@@ -69,12 +69,29 @@ ADV_NONE=""
 # rewrite a bare GET / into /?rd=enrol/, which makes Authelia auto-
 # forward authenticated users to the launcher AND drives unauthenticated
 # users through login → launcher.
+#
+# Additionally we route POST /api/firstfactor through enrol's
+# /login-intercept proxy so enrol can auto-unlock the user's LUKS volume
+# with the password they just typed. enrol forwards to Authelia verbatim
+# and copies the response, so end-user-visible behaviour is unchanged.
+# (172.17.0.1 is the docker0 bridge gateway — that's how the NPM ingress
+# container reaches the host-network-mode enrol service.)
 read -r -d '' ADV_AUTH_PORTAL <<'EOF' || true
 location = / {
     if ($arg_rd = "") {
         return 302 /?rd=https://enrol.antarctica-engineering.com/;
     }
     include conf.d/include/proxy.conf;
+}
+
+location = /api/firstfactor {
+    proxy_pass http://172.17.0.1:8080/login-intercept;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_http_version 1.1;
 }
 EOF
 

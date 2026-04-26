@@ -149,6 +149,12 @@ services:
       ENROL_USERS_DB: "/etc/authelia/users_db/users_database.yml"
       ENROL_AUTHELIA_CONTAINER: "authelia"
 
+      # Where to proxy /api/firstfactor for the auto-unlock-on-login path
+      # (see loginintercept.go). The Authelia compose binds 9091 to the
+      # host loopback for exactly this — never bind it to 0.0.0.0.
+      # network_mode: host means 127.0.0.1 here is the host loopback.
+      ENROL_AUTHELIA_URL: "http://127.0.0.1:9091"
+
       # LUKS storage layout. Match scripts/create-store-volume.sh.
       ENROL_STORE_DATA_DIR: "/srv/store/data"
       ENROL_STORE_MNT_DIR: "/srv/store/mnt"

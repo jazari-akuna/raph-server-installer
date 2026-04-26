@@ -50,6 +50,7 @@ type config struct {
 	// Users / Authelia integration.
 	usersDBPath       string // /etc/authelia/users_database.yml inside container
 	autheliaContainer string // "authelia"
+	autheliaURL       string // base URL for proxying /api/firstfactor (loopback)
 
 	// LUKS storage layout.
 	storeDataDir string // /srv/store/data
@@ -91,6 +92,7 @@ func loadConfig() config {
 		staticDir:         envOr("ENROL_STATIC", "/app/web/static"),
 		usersDBPath:       envOr("ENROL_USERS_DB", "/etc/authelia/users_database.yml"),
 		autheliaContainer: envOr("ENROL_AUTHELIA_CONTAINER", "authelia"),
+		autheliaURL:       envOr("ENROL_AUTHELIA_URL", "http://127.0.0.1:9091"),
 		storeDataDir:      envOr("ENROL_STORE_DATA_DIR", "/srv/store/data"),
 		storeMntDir:       envOr("ENROL_STORE_MNT_DIR", "/srv/store/mnt"),
 		luksSizeGB:        luksSize,
