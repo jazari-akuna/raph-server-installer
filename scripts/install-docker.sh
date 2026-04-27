@@ -14,14 +14,19 @@
 # camouflaged words (vpn/wireguard/amnezia/hysteria/tailscale/luks/vault/crypt)
 # into user-facing names. "docker" is a package/runtime name and is in scope.
 
-set -euo pipefail
+# Strict mode + structured failure reporting (shared lib).
+SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=lib/strict.sh
+. "$SCRIPT_DIR/lib/strict.sh"
+strict_enable
+STRICT_SCRIPT_NAME="install-docker.sh"
 
-# ---------- guards --------------------------------------------------------
-
-if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    echo "ERROR: must be run as root." >&2
-    exit 1
+# Preflight: only check what THIS script actually uses.
+require_root
+if [[ "${TEST_MODE:-0}" != "1" ]]; then
+  require_cmd apt-get install dpkg curl
 fi
+# ADMIN_USERS may be empty (the script tolerates it); don't preflight it.
 
 . /etc/os-release
 if [[ "${ID:-}" != "ubuntu" ]]; then
@@ -45,6 +50,7 @@ warn() { printf '[install-docker] WARNING: %s\n' "$*" >&2; }
 
 # ---------- 1. APT repo + GPG key ----------------------------------------
 
+strict_step "install Docker repo + packages"
 log "installing prerequisites (ca-certificates, curl)"
 export DEBIAN_FRONTEND=noninteractive
 if [[ "${TEST_MODE:-0}" == "1" ]]; then
@@ -173,6 +179,7 @@ fi
 
 # ---------- 5. edge network ----------------------------------------------
 
+strict_step "create edge docker network"
 if [[ "${TEST_MODE:-0}" == "1" ]]; then
     log "TEST_MODE: skipping docker network create '$EDGE_NET'"
 elif docker network inspect "$EDGE_NET" >/dev/null 2>&1; then

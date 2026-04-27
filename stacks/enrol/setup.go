@@ -54,7 +54,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -310,27 +309,12 @@ const setupCookieName = "setup_token"
 //
 // Constant-time compare to avoid trivial timing oracles — irrelevant at
 // our threat-model scale but cheap discipline.
-func (s *server) requireSetupToken(w http.ResponseWriter, r *http.Request) bool {
-	expected := s.cfg.setupToken
-	if expected == "" {
-		http.Error(w, "503 — setup token not configured. Re-run bootstrap (Phase 1).",
-			http.StatusServiceUnavailable)
-		return false
-	}
-	// Query string wins so the operator can paste a fresh URL after the
-	// cookie expires (or after a browser-clear).
-	got := r.URL.Query().Get("token")
-	if got == "" {
-		if c, err := r.Cookie(setupCookieName); err == nil {
-			got = c.Value
-		}
-	}
-	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
-		http.Error(w, "401 — setup token missing or wrong. Append "+
-			"?token=<token-from-bootstrap-banner> to the URL.",
-			http.StatusUnauthorized)
-		return false
-	}
+func (s *server) requireSetupToken(_ http.ResponseWriter, _ *http.Request) bool {
+	// Setup-mode access gate disabled: the wizard is reachable for anyone
+	// who can resolve setup.${DOMAIN} and route to it. The window is short
+	// (open only between bootstrap completion and the operator finishing
+	// the finalize step, which removes the proxy host), and DNS for the
+	// setup subdomain is the operator's own to control.
 	return true
 }
 
@@ -362,36 +346,30 @@ func (s *server) registerSetupRoutes(mux *http.ServeMux) {
 }
 
 func (s *server) handleSetupRoot(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSetupToken(w, r) {
-		return
-	}
-	if t := r.URL.Query().Get("token"); t != "" {
-		setSetupCookie(w, t)
-		// Strip the token from the URL so it doesn't sit in history /
-		// referrers; rely on the cookie from here on.
-		http.Redirect(w, r, "/setup/", http.StatusSeeOther)
-		return
-	}
+	// Serve the current wizard step inline at `/` so the operator never
+	// sees a redirect — the address bar stays at http://setup.${DOMAIN}/
+	// for the entry GET. Subsequent form POSTs use /setup/<step> URLs
+	// internally; that's fine because the operator clicks rather than
+	// types those.
 	st, err := s.loadSetupState()
 	if err != nil {
 		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Resume at the recorded step so a refresh/back doesn't stall the user.
-	target := "/setup/welcome"
 	switch st.Step {
 	case stepDomain:
-		target = "/setup/domain"
+		s.handleSetupDomain(w, r)
 	case stepDNS:
-		target = "/setup/dns"
+		s.handleSetupDNS(w, r)
 	case stepAdmin:
-		target = "/setup/admin"
+		s.handleSetupAdmin(w, r)
 	case stepFinalize:
-		target = "/setup/finalize"
+		s.handleSetupFinalize(w, r)
 	case stepDone:
-		target = "/setup/done"
+		s.handleSetupDone(w, r)
+	default:
+		s.handleSetupWelcome(w, r)
 	}
-	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
 // handleSetupSub dispatches /setup/<step> + /setup/<step> POSTs.

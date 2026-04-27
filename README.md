@@ -4,7 +4,7 @@ A turnkey installer that recreates a self-hosted private-cloud stack on
 a fresh Ubuntu 24.04 VPS. One pasted command into the cloud-init / user-
 data box of any major VPS provider, and the server brings itself up.
 Final configuration happens through a web wizard at
-`https://<your-domain>/setup` — no SSH required.
+`https://setup.<your-domain>/` — no SSH required.
 
 The stack delivers:
 
@@ -83,9 +83,12 @@ every config decision interactively and explains what each step does.
    on a 2 vCPU host (longer if a kernel reboot is needed for the
    AmneziaWG DKMS module).
 
-4. **Open the wizard** at `http://setup.<your-domain>` (or
-   `http://<vps-ip>/setup` if DNS is still propagating). The wizard
-   walks through six steps:
+4. **Open the wizard** at `https://setup.<your-domain>/` (or
+   `https://<vps-ip>/` with the `Host: setup.<your-domain>` header if DNS
+   is still propagating). The wizard ships behind a self-signed cert
+   until you finish the finalize step, so your browser will show a
+   "not secure" warning on first visit — click "Advanced → Proceed".
+   The wizard walks through six steps:
 
    1. Welcome / DNS propagation check
    2. First admin (username, password, email)
@@ -95,8 +98,9 @@ every config decision interactively and explains what each step does.
    6. Done — redirect to login
 
    At completion the server is fully configured. The wizard closes
-   itself (subsequent requests to `/setup` return 410 Gone) and the
-   operator is dropped into the Authelia login portal.
+   itself (the `setup.<your-domain>` host is removed and any residual
+   `/setup` request returns 404) and the operator is dropped into the
+   Authelia login portal.
 
 ---
 

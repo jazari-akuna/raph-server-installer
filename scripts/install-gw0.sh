@@ -9,7 +9,12 @@
 #   - Generating peer configs (handled by scripts/provision-peer.sh in Step 9).
 #   - Enabling ufw itself (deferred to Step 3 / ufw-docker integration).
 
-set -euo pipefail
+# Strict mode + structured failure reporting (shared lib).
+SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=lib/strict.sh
+. "$SCRIPT_DIR/lib/strict.sh"
+strict_enable
+STRICT_SCRIPT_NAME="install-gw0.sh"
 
 # Wave 2A: regional-split + qedge are opt-in (blueprint § G1). The default
 # turnkey installer flow does NOT need gw0; the wizard turns it on later
@@ -20,10 +25,9 @@ if [[ "${SKIP_GW0:-1}" == "1" ]]; then
   exit 0
 fi
 
-if [[ $EUID -ne 0 ]]; then
-  echo "must run as root" >&2
-  exit 1
-fi
+# Preflight: only checks for the gw0=ON path.
+require_root
+require_cmd apt-get add-apt-repository dkms install awk sed od ip systemctl modinfo
 
 REPO_HOST_DIR="/root/host"
 # amneziawg-tools ships its config under /etc/amnezia/amneziawg/, not
@@ -41,6 +45,7 @@ UFW_BEFORE="/etc/ufw/before.rules"
 # detection independent of any other comment a sysadmin may have added.
 UFW_MARKER="# BEGIN gw0-nat"
 
+strict_step "amneziawg PPA + DKMS install"
 echo "==> adding upstream PPA (ppa:amnezia/ppa)"
 # add-apt-repository is idempotent; -y suppresses the interactive prompt.
 # software-properties-common provides add-apt-repository on minimal Ubuntu.
@@ -193,6 +198,7 @@ if dkms status 2>/dev/null | grep -qi 'reboot'; then
   echo "    NOTICE: dkms status indicates a reboot is required to load the new module" >&2
 fi
 
+strict_step "render gw0 conf + ufw splice"
 echo "==> ensuring ${AWG_CONF_DIR} (mode 0700)"
 install -d -m 0700 "$AWG_CONF_DIR"
 

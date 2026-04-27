@@ -54,6 +54,13 @@ stacks/enrol/data/
 stacks/cloud/data/
 stacks/console/data/
 
+# ingress (Nginx Proxy Manager): SQLite DB with hashed admin creds, issued
+# certs, and per-host nginx fragments. All produced at runtime by the
+# container. NEVER commit — leaks secrets and would diverge from a fresh
+# `compose up`.
+stacks/ingress/data/
+stacks/ingress/letsencrypt/
+
 # Working-notes journals — wave-1a, wave-1b, etc. Local to the operator
 # running the wave; not meant to be shared.
 .journals/

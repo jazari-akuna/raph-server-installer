@@ -9,6 +9,8 @@
 #   - Bring up the Docker stacks in dependency order.
 #   - Wait for enrol /healthz.
 #   - Open port 80 long enough for the wizard to be reachable.
+#   - Seed the `setup.${DOMAIN}` proxy host in NPM so the wizard answers
+#     at `http://setup.${DOMAIN}/` (subdomain root, NOT apex `/setup`).
 #   - Touch /srv/store/.bootstrap-phase2-complete.
 #   - Disable bootstrap-continue.service so it doesn't re-fire.
 #
@@ -17,7 +19,15 @@
 #
 # Logs: tee'd to /var/log/raph-installer/phase2.log + stdout.
 
-set -euo pipefail
+# ──────────────────────────────────────────────────────────────────────────
+# Strict mode + structured failure reporting (shared lib)
+# ──────────────────────────────────────────────────────────────────────────
+
+# shellcheck source=lib/strict.sh
+SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+. "$SCRIPT_DIR/lib/strict.sh"
+strict_enable
+STRICT_SCRIPT_NAME="bootstrap-phase2.sh"
 
 # ──────────────────────────────────────────────────────────────────────────
 # Constants
@@ -27,6 +37,7 @@ REPO_DIR="${REPO_DIR:-/opt/raph-server-installer}"
 STACKS_DIR="${STACKS_DIR:-/opt/stacks}"
 ENV_FILE="${ENV_FILE:-${STACKS_DIR}/.env}"
 STATE_DIR="/srv/store"
+PHASE1_DONE="${STATE_DIR}/.bootstrap-phase1-complete"
 PHASE2_DONE="${STATE_DIR}/.bootstrap-phase2-complete"
 LOG_DIR="/var/log/raph-installer"
 LOG_FILE="${LOG_DIR}/phase2.log"
@@ -38,10 +49,11 @@ CONTINUE_UNIT="bootstrap-continue.service"
 # ──────────────────────────────────────────────────────────────────────────
 
 if [[ -z "${RAPH_PHASE2_LOG_INITIALIZED:-}" ]]; then
-  install -d -m 0755 "$LOG_DIR"
+  install -d -m 0755 "$LOG_DIR"   # why: log dir must exist before tee
   export RAPH_PHASE2_LOG_INITIALIZED=1
   exec > >(tee -a "$LOG_FILE") 2>&1
 fi
+strict_set_log "$LOG_FILE"
 
 ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 log()  { printf '[phase2 %s] %s\n' "$(ts)" "$*"; }
@@ -56,21 +68,37 @@ fi
 # Preflight
 # ──────────────────────────────────────────────────────────────────────────
 
-[[ ${EUID:-$(id -u)} -eq 0 ]] || fail "must run as root"
+strict_step "preflight"
+require_root
+
+# External commands the script actually invokes below.
+require_cmd docker curl jq install systemctl tee tail openssl
+# In TEST_MODE the iptables/ufw probes are skipped; only require them outside.
+if [[ "${TEST_MODE:-0}" != "1" ]]; then
+  require_cmd iptables
+fi
+
+# Phase 1 sentinel must exist AND be non-empty (a zero-byte one is left
+# behind by an interrupted phase 1 — refuse to honour it).
+require_sentinel "$PHASE1_DONE"
+require_file "$PHASE1_DONE"
+
+# /opt/stacks symlink and .env file: phase 1 wrote them.
+require_dir "$STACKS_DIR"
+require_file "$ENV_FILE"
 
 # Source .env so DOMAIN etc. are available.
-if [[ -f "$ENV_FILE" ]]; then
-  # shellcheck disable=SC1090
-  set -a; . "$ENV_FILE"; set +a
-else
-  fail "$ENV_FILE missing — Phase 1 didn't complete"
-fi
-[[ -n "${DOMAIN:-}" ]] || fail "DOMAIN unset in $ENV_FILE"
+strict_step "source $ENV_FILE"
+# shellcheck disable=SC1090
+set -a; . "$ENV_FILE"; set +a
+require_env DOMAIN
 
-# Idempotent short-circuit.
-if [[ -f "$PHASE2_DONE" ]]; then
+# Idempotent short-circuit. Reject zero-byte sentinel leftover from a crash.
+require_sentinel "$PHASE2_DONE"
+if [[ -s "$PHASE2_DONE" ]]; then
   log "Phase 2 sentinel present ($PHASE2_DONE) — nothing to do"
   if command -v systemctl >/dev/null 2>&1; then
+    # why: continue unit is one-shot; disable so it doesn't re-arm on next boot.
     systemctl disable "${CONTINUE_UNIT}" >/dev/null 2>&1 || true
   fi
   exit 0
@@ -86,6 +114,7 @@ fi
 SKIP_GW0="${SKIP_GW0:-1}"
 
 if [[ "$SKIP_GW0" != "1" ]]; then
+  strict_step "verify amneziawg kernel module"
   log "==> verifying amneziawg kernel module"
   if [[ "${TEST_MODE:-0}" == "1" ]]; then
     log "    TEST_MODE: skipping modinfo/modprobe amneziawg (DKMS not built in container)"
@@ -117,8 +146,9 @@ fi
 if [[ "$SKIP_GW0" == "1" ]]; then
   log "==> SKIP_GW0=1 — skipping install-gw0.sh (regional-split is opt-in)"
 else
+  strict_step "install-gw0.sh"
   log "==> running scripts/install-gw0.sh (SKIP_GW0=0)"
-  bash "$REPO_DIR/scripts/install-gw0.sh"
+  run_subscript "$REPO_DIR/scripts/install-gw0.sh"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -133,28 +163,57 @@ SHARED_SCRIPT="$REPO_DIR/scripts/create-shared-volume.sh"
 SHARED_UNIT_SRC="$REPO_DIR/host/systemd/shared-store.service"
 SHARED_UNIT_DST="/etc/systemd/system/shared-store.service"
 if [[ -x "$SHARED_SCRIPT" ]]; then
+  strict_step "create shared volume"
   log "==> creating shared volume via $SHARED_SCRIPT"
-  if ! bash "$SHARED_SCRIPT"; then
-    log "    WARNING: $SHARED_SCRIPT exited non-zero; cloud may start \
-without /shared. Investigate before announcing setup-ready."
+  # We deliberately do NOT abort phase 2 if the shared volume fails:
+  # cloud (copyparty) starts fine without /shared, the wizard finalises
+  # the volume later. We DO surface the rc clearly.
+  set +e
+  bash "$SHARED_SCRIPT"
+  shared_rc=$?
+  set -e
+  if (( shared_rc != 0 )); then
+    log "    WARNING: $SHARED_SCRIPT exited rc=$shared_rc; cloud will start"
+    log "             without /shared. Investigate before announcing setup-ready"
+    log "             (see 'docker logs cloud' and 'cryptsetup status store_shared')."
   fi
   # Install + enable the boot-time auto-mount unit so /shared comes back
   # after every reboot. We do NOT --now: the create script already left
   # the volume mounted in this boot; `start` would fail because the
   # mapper is open. The unit fires cleanly on next reboot.
   if [[ -f "$SHARED_UNIT_SRC" ]]; then
-    install -d -m 0755 /etc/systemd/system
+    install -d -m 0755 /etc/systemd/system   # why: standard systemd dir, idempotent
     install -m 0644 "$SHARED_UNIT_SRC" "$SHARED_UNIT_DST"
     if [[ "${TEST_MODE:-0}" == "1" ]] && ! command -v systemctl >/dev/null 2>&1; then
       log "    TEST_MODE: skipping systemctl daemon-reload + enable shared-store.service"
     else
       systemctl daemon-reload
-      systemctl enable shared-store.service >/dev/null 2>&1 || \
+      if ! systemctl enable shared-store.service >/dev/null 2>&1; then
         log "    WARNING: enable shared-store.service failed; volume won't auto-mount on reboot"
+      fi
     fi
   fi
 else
   log "==> $SHARED_SCRIPT not present (Parcel 2B); skipping shared volume"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────
+# Step 3.5 — generate Authelia secrets BEFORE compose-up authelia.
+# ──────────────────────────────────────────────────────────────────────────
+#
+# stacks/authelia/docker-compose.yml has top-level `secrets:` blocks
+# whose `file:` keys reference ./secrets/{jwt,session,storage,oidc}-secret
+# and a bind-mount of ./secrets/oidc-key.pem. Compose v2 refuses to start
+# the stack at all if any of those bind sources is missing. We generate
+# them once, idempotently (re-runs leave existing secrets in place); the
+# wizard never rotates them.
+
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  log "==> TEST_MODE: skipping Authelia secrets generation"
+else
+  strict_step "generate Authelia secrets"
+  log "==> generating Authelia secret bundle (idempotent)"
+  run_subscript "$REPO_DIR/scripts/generate-authelia-secrets.sh"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -175,6 +234,7 @@ compose_up() {
     log "    skipping '$stack' — $file not present"
     return 0
   fi
+  strict_step "compose up $stack"
   log "==> docker compose up -d ($stack)"
   if [[ "${TEST_MODE:-0}" == "1" ]]; then
     # In test mode, log what would have run (the harness assertion library
@@ -187,9 +247,32 @@ compose_up() {
   fi
   # --remove-orphans cleans up containers from a previous compose layout.
   # Run inside the stack dir so any relative bind mounts resolve correctly.
+  # Capture rc explicitly so a compose failure surfaces as a clear block
+  # via fail() (the cd-and-compose sub-shell would otherwise just exit
+  # silently and the strict ERR trap would point at the closing `)`,
+  # not the failing compose-up).
+  local rc=0
+  set +e
   ( cd "$STACKS_DIR/$stack" && \
     docker compose --env-file "$ENV_FILE" -f "$file" up -d --remove-orphans )
+  rc=$?
+  set -e
+  if (( rc != 0 )); then
+    fail "docker compose up failed for stack '$stack' (rc=$rc). Check: docker compose --env-file $ENV_FILE -f $file config; docker logs $stack"
+  fi
 }
+
+# Generate the NPM (ingress) initial admin password BEFORE bringing up
+# ingress. NPM 2.14 only auto-creates an admin if INITIAL_ADMIN_EMAIL +
+# INITIAL_ADMIN_PASSWORD are present in the container env at first boot;
+# without them the user table stays empty and the bootstrap-npm-setup-route
+# seeder has no way to authenticate. The script writes both to /opt/stacks/.env
+# (idempotent) so compose substitutes them in.
+if [[ "${TEST_MODE:-0}" != "1" ]]; then
+  strict_step "generate NPM admin"
+  log "==> generating NPM admin password (idempotent)"
+  run_subscript "$REPO_DIR/scripts/generate-npm-admin.sh"
+fi
 
 compose_up ingress
 compose_up authelia
@@ -208,19 +291,21 @@ fi
 # ──────────────────────────────────────────────────────────────────────────
 
 # enrol runs in network_mode: host (per Wave 1A scrub). Health endpoint
-# binds to 172.17.0.1:8080 in normal mode; in setup mode it's on :80
-# directly. Try both endpoints so we don't depend on which mode it's in
-# right now (the wizard finalisation flips the mode). 30s budget.
+# binds to 172.17.0.1:8080 always; the public wizard URL is fronted by an
+# NPM proxy host on `setup.${DOMAIN}` that forwards `/` to that endpoint
+# (see "Step 6.5" below). Try a few common loopback variants so a
+# misconfigured listen address still surfaces health. 30s budget.
 if [[ "${TEST_MODE:-0}" == "1" ]]; then
   log "==> TEST_MODE: skipping enrol /healthz wait (no real containers running)"
 else
+  strict_step "wait for enrol /healthz"
   log "==> waiting for enrol /healthz (timeout 30s)"
   ENROL_OK=0
   for i in $(seq 1 30); do
     for url in \
-      "http://127.0.0.1/healthz" \
       "http://172.17.0.1:8080/healthz" \
-      "http://127.0.0.1:8080/healthz"; do
+      "http://127.0.0.1:8080/healthz" \
+      "http://127.0.0.1/healthz"; do
       if curl -fsS -o /dev/null --max-time 2 "$url" 2>/dev/null; then
         log "    enrol healthy at $url (after ${i}s)"
         ENROL_OK=1
@@ -230,9 +315,9 @@ else
     sleep 1
   done
   if [[ $ENROL_OK -eq 0 ]]; then
-    log "    WARNING: enrol /healthz did not respond within 30s — wizard \
-may not be reachable yet. Check 'docker compose -f \
-$STACKS_DIR/enrol/docker-compose.yml logs'."
+    log "    WARNING: enrol /healthz did not respond within 30s — wizard"
+    log "             may not be reachable yet. Check 'docker logs enrol'"
+    log "             and 'docker compose -f $STACKS_DIR/enrol/docker-compose.yml ps'."
   fi
 fi
 
@@ -251,7 +336,10 @@ log "==> opening port 80 for setup wizard"
 if [[ "${TEST_MODE:-0}" == "1" ]]; then
   log "    TEST_MODE: skipping ufw allow 80/tcp + iptables INPUT ACCEPT for tcp/80"
 else
-  ufw allow 80/tcp >/dev/null 2>&1 || true
+  strict_step "open port 80"
+  # ufw may be inactive (default in this installer until step 3); the rule
+  # is staged for later activation, so a non-zero rc here is informational.
+  ufw allow 80/tcp >/dev/null 2>&1 || true   # why: ufw may not be active yet; staging is fine
   if command -v iptables >/dev/null 2>&1; then
     if ! iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null; then
       iptables -I INPUT -p tcp --dport 80 -j ACCEPT
@@ -265,20 +353,53 @@ fi
 # port 80 once the wildcard cert is issued and NPM is fronting :443.
 
 # ──────────────────────────────────────────────────────────────────────────
+# Step 6.5 — seed the wizard's `setup.${DOMAIN}` proxy host in NPM.
+# ──────────────────────────────────────────────────────────────────────────
+
+# The wizard URL is `http://setup.${DOMAIN}/` (subdomain + root path), NOT
+# `http://${DOMAIN}/setup` (apex + path prefix). NPM is already up (Step 4),
+# but it ships with no proxy hosts configured, so without this step the
+# operator's browser would land on NPM's "Congratulations" fallback page.
+#
+# bootstrap-npm-setup-route.sh logs in to NPM with its hard-coded default
+# admin credentials (admin@example.com / changeme), rotates them to a
+# bootstrap-only set (stashed at /etc/raph-installer/npm-bootstrap.pass),
+# and upserts a single proxy host for `setup.${DOMAIN}` that forwards to
+# enrol on the docker0 bridge. The wizard's finalize step
+# (stacks/enrol/npm_client.go § Bootstrap) replaces both the bootstrap
+# admin and that proxy host with operator-supplied credentials and the
+# four steady-state hosts (auth, enrol, cloud, console) over HTTPS.
+SETUP_ROUTE_SCRIPT="$REPO_DIR/scripts/bootstrap-npm-setup-route.sh"
+log "==> wiring NPM proxy host for setup.${DOMAIN}"
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  log "    TEST_MODE: skipping bootstrap-npm-setup-route.sh"
+elif [[ ! -x "$SETUP_ROUTE_SCRIPT" ]]; then
+  log "    WARNING: $SETUP_ROUTE_SCRIPT missing or not executable; the wizard"
+  log "             will be unreachable until you create the proxy host"
+  log "             manually via NPM's UI at http://<vps>:81 (forward to"
+  log "             http://host.docker.internal:8080)"
+else
+  strict_step "bootstrap NPM setup proxy host"
+  run_subscript "$SETUP_ROUTE_SCRIPT"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────
 # Step 7 — finalise + announce.
 # ──────────────────────────────────────────────────────────────────────────
 
+strict_step "finalise"
 date -u '+%Y-%m-%dT%H:%M:%SZ' > "$PHASE2_DONE"
+chmod 0644 "$PHASE2_DONE"
 log "Phase 2 sentinel: $PHASE2_DONE"
 
 # Belt-and-suspenders: also disable the continue unit ourselves.
 if command -v systemctl >/dev/null 2>&1; then
+  # why: continue unit is single-shot; remove from boot to prevent re-fire.
   systemctl disable "${CONTINUE_UNIT}" >/dev/null 2>&1 || true
 fi
 
 VPS_IP="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null \
   || ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')"
-TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null || echo '<token-missing>')"
 
 cat <<EOF
 
@@ -286,18 +407,18 @@ cat <<EOF
 Phase 2 complete. The setup wizard is now live.
 ================================================================
 
-  URL  (preferred): http://${DOMAIN}/setup
-  URL  (fallback):  http://${VPS_IP:-<vps-ip>}/setup
+  URL: https://setup.${DOMAIN}/
 
-  Setup token:      ${TOKEN}
-  Token saved at:   ${TOKEN_FILE}
+The wizard is fronted by a self-signed certificate until you
+complete the finalize step (wildcard cert issuance via DNS-01).
+Your browser will show a "not secure" / "your connection is not
+private" warning on first visit — click "Advanced → Proceed".
 
-  Phase 2 log:      ${LOG_FILE}
+If DNS hasn't propagated for setup.${DOMAIN} yet, you can reach
+it directly at https://${VPS_IP:-<vps-ip>}/ provided you send
+Host: setup.${DOMAIN} (e.g. via /etc/hosts or curl --resolve).
+HTTP traffic on port 80 is permanently 301-redirected to HTTPS.
 
-The wizard runs over plaintext HTTP until you finish step 3
-(wildcard cert issuance). The setup token is the out-of-band
-proof that you are the operator who pasted the bootstrap
-command. After finalisation the wizard switches to HTTPS and
-closes port 80.
+  Phase 2 log: ${LOG_FILE}
 ================================================================
 EOF

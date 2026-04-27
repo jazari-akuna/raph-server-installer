@@ -210,7 +210,7 @@ Setup-time and steady-state subdomains created/used by the installer:
 
 | Subdomain | Behind | When |
 |---|---|---|
-| `setup.<your-domain>` | `enrol` on :80 | setup phase only — `enrol` returns 410 once the wizard is done |
+| `setup.<your-domain>` | NPM proxy host → `enrol` on `172.17.0.1:8080` | setup phase only — proxy host removed and `enrol` returns 404 on `/setup*` once the wizard is done |
 | `auth.<your-domain>` | `authelia` | SSO login portal + OIDC issuer |
 | `cloud.<your-domain>` | `cloud` (copyparty) | public, gated by Authelia forward-auth |
 | `enrol.<your-domain>` | `enrol` | admin UI for user / peer / volume management |
@@ -256,7 +256,7 @@ No path on this filesystem contains the words `luks`, `vault`, `vpn`, `wireguard
 The installer executes the steps below as two phases: **phase 1**
 (unattended, driven by `bootstrap.sh` from cloud-init) and **phase 2**
 (interactive, driven by the operator through the `enrol` setup wizard at
-`http://setup.<your-domain>`). The split is bookkeeping for which
+`https://setup.<your-domain>`). The split is bookkeeping for which
 secrets the operator must supply, not a hard ordering constraint —
 phase 2 strictly depends on phase 1 finishing.
 
@@ -289,17 +289,19 @@ command; everything else is computed.
    if DKMS fails entirely.
 5. **`/srv/store` skeleton** — create `data/` and `mnt/` directories,
    install `store-mount@.service` systemd template.
-6. **Bring up enrol + dependencies in setup mode** —
-   `docker compose up -d` for `console`, `cloud`, `authelia`, `enrol`.
-   `enrol` is started with `ENROL_SETUP_MODE=1` and binds directly to
-   `:80` on the host. **`ingress` (NPM) is NOT started yet** — it would
-   conflict with enrol on :80. The wizard starts NPM as part of step 4
-   below.
+6. **Bring up the Docker stacks in setup mode** —
+   `docker compose up -d` for `ingress`, `authelia`, `cloud`, `console`,
+   `enrol`. `enrol` keeps its host-mode listener on `172.17.0.1:8080`;
+   `ingress` (NPM) owns `:80` / `:443`. `bootstrap-npm-setup-route.sh`
+   then upserts a single proxy host — `setup.<your-domain>` → enrol —
+   so the wizard answers at the subdomain root. The wizard's setup-mode
+   gate dispatches `/` to the wizard root handler and keeps the internal
+   `/setup/<step>` paths for the step pages.
 7. **Print the wizard URL** to the cloud-init console:
-   `http://setup.<your-domain>` (or `http://<vps-ip>/setup` if DNS is
-   still propagating).
+   `https://setup.<your-domain>/` (or `http://<vps-ip>/` with the
+   `Host: setup.<your-domain>` header if DNS is still propagating).
 
-### Phase 2 — wizard at `http://setup.<your-domain>` (interactive)
+### Phase 2 — wizard at `https://setup.<your-domain>/` (interactive)
 
 Six steps, served by `enrol` against an in-memory state machine. Each
 step is idempotent: refreshing or going back does not corrupt state.
@@ -316,20 +318,22 @@ step is idempotent: refreshing or going back does not corrupt state.
    and pastes the relevant token / API key. The wizard writes the
    provider-specific credentials INI file into NPM's data directory at
    the path `certbot-dns-<provider>` expects.
-4. **Cert issuance + ingress wireup** — `enrol` starts the `ingress`
-   (NPM) stack, talks to NPM's REST API to create the wildcard cert
-   request and the four standard proxy hosts (`auth`, `cloud`,
-   `enrol`, `console`). Once the cert is live, enrol relinquishes :80
-   and rebinds to `enrol.<your-domain>` via NPM.
+4. **Cert issuance + ingress wireup** — `enrol` talks to NPM's REST API
+   to issue the wildcard cert (DNS-01 via the operator's chosen provider)
+   and upsert the four steady-state proxy hosts (`auth`, `cloud`,
+   `enrol`, `console`) on HTTPS. The bootstrap `setup.<your-domain>`
+   proxy host is removed. From here on the operator reaches the admin
+   surface at `enrol.<your-domain>` (HTTPS, behind Authelia).
 5. **Storage** — create the admin's LUKS volume and the shared LUKS
    volume (`_shared.img`). The admin chooses passphrases here; they
    are never written to disk on the server. The shared volume's
    keyfile lives at `/etc/luks/_shared.key` (`mode 0600`, root-owned)
    so it survives reboots without prompting.
 6. **Done** — write `/srv/store/.setup-complete`, redirect to the
-   Authelia login portal. From this point `enrol` returns 410 Gone
-   on every `/setup*` route; the operator manages users, peers, and
-   volumes through the regular admin UI at `enrol.<your-domain>`.
+   Authelia login portal. From this point the `setup.<your-domain>`
+   proxy host is gone and `enrol` returns 404 on every `/setup*` route;
+   the operator manages users, peers, and volumes through the regular
+   admin UI at `enrol.<your-domain>`.
 
 ### Optional post-install steps
 

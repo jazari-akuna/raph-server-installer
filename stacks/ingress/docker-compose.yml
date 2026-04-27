@@ -12,6 +12,14 @@ services:
     image: jc21/nginx-proxy-manager:2.14.0
     container_name: ingress
     restart: unless-stopped
+    # NPM 2.14 dropped the legacy admin@example.com/changeme default; an
+    # initial admin is only auto-created when these env vars are set, otherwise
+    # the user table stays empty and the bootstrap-npm-setup-route.sh seeder
+    # has no way in. Compose substitutes ${NPM_INITIAL_ADMIN_*} from .env;
+    # bootstrap-phase2.sh writes them there before bringing this stack up.
+    environment:
+      INITIAL_ADMIN_EMAIL: "${NPM_INITIAL_ADMIN_EMAIL:-bootstrap@local}"
+      INITIAL_ADMIN_PASSWORD: "${NPM_INITIAL_ADMIN_PASSWORD:-changeme}"
     ports:
       # Public HTTP/HTTPS ingress.
       - "80:80"

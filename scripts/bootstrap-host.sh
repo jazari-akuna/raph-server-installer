@@ -13,12 +13,21 @@
 #   - ufw enable (waits until Docker / ufw-docker rules are in place)
 #   - Docker, gw0, store volumes, stacks
 
-set -euo pipefail
+# Strict mode + structured failure reporting (shared lib).
+SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=lib/strict.sh
+. "$SCRIPT_DIR/lib/strict.sh"
+strict_enable
+STRICT_SCRIPT_NAME="bootstrap-host.sh"
 
-if [[ $EUID -ne 0 ]]; then
-  echo "must run as root" >&2
-  exit 1
+# Preflight: only check what THIS script actually uses BEFORE installing
+# anything. ufw/fail2ban are installed by this same script — don't preflight
+# them. The base coreutils (install, dd, mkswap) are guaranteed.
+require_root
+if [[ "${TEST_MODE:-0}" != "1" ]]; then
+  require_cmd apt-get useradd usermod passwd visudo systemctl install dd mkswap swapon
 fi
+require_env ADMIN_USERS
 
 # Persist DOMAIN to /etc/server-domain so downstream scripts that derive
 # values from it (provision-peer.sh, cert-renewal-hook.sh) Just Work even
@@ -44,6 +53,7 @@ if [[ ${#ADMINS[@]} -eq 0 ]]; then
   exit 1
 fi
 
+strict_step "apt full-upgrade"
 echo "==> apt update + full-upgrade"
 export DEBIAN_FRONTEND=noninteractive
 if [[ "${TEST_MODE:-0}" == "1" ]]; then
@@ -53,6 +63,7 @@ else
   apt-get -y full-upgrade
 fi
 
+strict_step "install base packages"
 echo "==> installing base packages"
 if [[ "${TEST_MODE:-0}" == "1" ]]; then
   echo "    TEST_MODE: skipping apt-get install (ufw fail2ban unattended-upgrades curl ca-certificates gnupg rsync)"
@@ -67,6 +78,7 @@ else
     rsync
 fi
 
+strict_step "ensure admin users"
 echo "==> ensuring admin users"
 for u in "${ADMINS[@]}"; do
   if id "$u" &>/dev/null; then
@@ -111,6 +123,7 @@ for u in "${ADMINS[@]}"; do
   fi
 done
 
+strict_step "install sudoers drop-in"
 echo "==> NOPASSWD sudo for sudo group"
 # WHY: key-only SSH + locked passwords means sudo otherwise can't authenticate.
 SUDOERS_DROPIN="/etc/sudoers.d/90-admins-nopasswd"
@@ -125,13 +138,20 @@ if [[ "${TEST_MODE:-0}" == "1" ]] && ! command -v visudo >/dev/null 2>&1; then
 elif visudo -cf "$TMP_SUDOERS" >/dev/null; then
   install -m 0440 -o root -g root "$TMP_SUDOERS" "$SUDOERS_DROPIN"
   rm -f "$TMP_SUDOERS"
-  echo "    installed $SUDOERS_DROPIN"
+  # Verify perms — a wrong mode here is a CVE-grade footgun.
+  got_mode="$(stat -c %a "$SUDOERS_DROPIN")"
+  if [[ "$got_mode" != "440" ]]; then
+    echo "    ERROR: $SUDOERS_DROPIN mode is $got_mode, expected 440" >&2
+    exit 1
+  fi
+  echo "    installed $SUDOERS_DROPIN (mode 0440)"
 else
   rm -f "$TMP_SUDOERS"
   echo "    ERROR: visudo validation failed for sudoers drop-in" >&2
   exit 1
 fi
 
+strict_step "swapfile"
 echo "==> swapfile"
 SWAPFILE="/swapfile"
 if [[ "${TEST_MODE:-0}" == "1" ]]; then
@@ -198,6 +218,7 @@ Unattended-Upgrade::Allowed-Origins {
 Unattended-Upgrade::Automatic-Reboot "false";
 EOF
 
+strict_step "ufw rules (staged, not enabled)"
 echo "==> ufw rules (NOT enabling yet)"
 if [[ "${TEST_MODE:-0}" == "1" ]] && ! command -v ufw >/dev/null 2>&1; then
   echo "    TEST_MODE: skipping ufw rule staging (ufw not installed)"

@@ -157,34 +157,55 @@ func (s *server) routes() http.Handler {
 // setupRouteGate enforces the wizard-mode invariant:
 //
 //   - While /srv/store/.setup-complete is ABSENT, /healthz and /static/*
-//     pass through; everything else that isn't already a /setup/* route
-//     302s to /setup. This guarantees the operator can't accidentally
-//     poke at /users (which would 401 anyway, since Authelia isn't yet
-//     wired) and also keeps a half-open browser tab from a previous
-//     install from leaking error pages instead of bringing the operator
-//     to the wizard.
+//     pass through; the bare root path `/` is dispatched to the wizard
+//     root handler (so the operator hits `http://setup.${DOMAIN}/`);
+//     `/setup` and `/setup/*` continue to work as the wizard's internal
+//     step paths (templates link to `/setup/welcome`, `/setup/dns`, etc.,
+//     so the prefix is preserved internally even though the entry URL is
+//     just the subdomain root); everything else 302s to `/` so the
+//     operator can't accidentally poke at /users (which would 401 anyway,
+//     since Authelia isn't yet wired) and a half-open browser tab from a
+//     previous install lands them back on the wizard rather than on an
+//     error page.
 //
 //   - Once the sentinel exists, /setup/* returns 404 (not 410 — we don't
 //     want to leak that the wizard ever existed at this URL). This is
 //     belt-and-braces: the wizard's token-check would 401 anyway since
 //     setupToken is wiped from the env after finalize, but defence in
-//     depth is cheap.
+//     depth is cheap. The bare `/` falls through to the launcher.
 //
 // The /login-intercept and /healthz endpoints bypass the gate entirely
 // in both directions.
+//
+// The public URL of the wizard is `http://setup.${DOMAIN}/` — fronted by
+// an NPM proxy host whose host header matches `setup.${DOMAIN}` and which
+// forwards `/` to enrol's host endpoint. The wizard's path prefix on the
+// underlying enrol service is still `/setup/<step>` for the step pages,
+// but operators only ever see the subdomain root URL.
 func (s *server) setupRouteGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		isSetup := path == "/setup" || strings.HasPrefix(path, "/setup/")
 		isStatic := strings.HasPrefix(path, "/static/")
 		isHealth := path == "/healthz"
+		isRoot := path == "/"
 		// /login-intercept always passes through (in setup mode it just
 		// fails because Authelia isn't routable yet, but that's fine).
 
 		if s.setupModeActive() {
-			// Wizard mode: hide the day-2 surface entirely.
+			// Wizard mode: serve the wizard at `/` (the subdomain root) by
+			// dispatching to handleSetupRoot, which 303s to the step the
+			// operator left off at. The internal `/setup/*` paths are kept
+			// intact so the existing template/form action links keep working
+			// without a sweeping rewrite.
+			if isRoot {
+				s.handleSetupRoot(w, r)
+				return
+			}
+			// Hide the day-2 surface entirely; bounce stragglers back to the
+			// wizard root.
 			if !isSetup && !isStatic && !isHealth {
-				http.Redirect(w, r, "/setup", http.StatusSeeOther)
+				http.Redirect(w, r, "/", http.StatusSeeOther)
 				return
 			}
 		} else {

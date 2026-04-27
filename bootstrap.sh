@@ -16,7 +16,7 @@
 #
 # Phase 2 is in scripts/bootstrap-phase2.sh — it runs once after the reboot
 # (DKMS-loaded kernel) and brings the Docker stacks up so the operator's
-# browser can reach <domain>/setup.
+# browser can reach the wizard at http://setup.<domain>/.
 #
 # Idempotent: if /srv/store/.bootstrap-phase1-complete exists, skip the
 # heavy steps and just (re-)arm the continue unit + reboot.
@@ -24,7 +24,36 @@
 # Logs: tee'd to stdout (LayerStack console) AND
 # /var/log/raph-installer/phase1.log so the operator can inspect after reboot.
 
+# ──────────────────────────────────────────────────────────────────────────
+# Strict mode + structured failure reporting (shared lib)
+# ──────────────────────────────────────────────────────────────────────────
+#
+# bootstrap.sh is unique: it can be piped from `curl | bash` on a fresh
+# host where the repo isn't on disk yet, so the lib may not exist on the
+# very first invocation. We try to source it from a few likely locations.
+# Until the lib is loaded we use plain `set -euo pipefail` and a minimal
+# inline ERR trap so even early failures surface clearly. After Phase 1b
+# (clone) we re-source the lib from the cloned tree.
+
 set -euo pipefail
+trap 'rc=$?; printf "\nFATAL: bootstrap.sh line %s: %s (rc=%s)\n" "${BASH_LINENO[0]}" "${BASH_COMMAND}" "$rc" >&2; exit "$rc"' ERR
+
+_strict_lib=""
+for _candidate in \
+    "$(dirname -- "${BASH_SOURCE[0]:-$0}" 2>/dev/null)/scripts/lib/strict.sh" \
+    "/opt/raph-server-installer/scripts/lib/strict.sh"; do
+  if [[ -r "$_candidate" ]]; then
+    _strict_lib="$_candidate"
+    break
+  fi
+done
+if [[ -n "$_strict_lib" ]]; then
+  # shellcheck source=scripts/lib/strict.sh
+  . "$_strict_lib"
+  strict_enable
+  STRICT_SCRIPT_NAME="bootstrap.sh"
+fi
+unset _strict_lib _candidate
 
 # ──────────────────────────────────────────────────────────────────────────
 # Constants
@@ -56,6 +85,12 @@ if [[ -z "${RAPH_BOOTSTRAP_LOG_INITIALIZED:-}" ]]; then
   export RAPH_BOOTSTRAP_LOG_INITIALIZED=1
   # Append (don't truncate) so a re-run preserves the prior log.
   exec > >(tee -a "$LOG_FILE") 2>&1
+fi
+
+# Tell the strict-lib trap (if loaded) where our log lives so failures
+# print the last 20 lines of context. No-op when lib isn't sourced yet.
+if declare -F strict_set_log >/dev/null 2>&1; then
+  strict_set_log "$LOG_FILE"
 fi
 
 ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
@@ -120,7 +155,8 @@ export AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH="${AUTHELIA_OIDC_CONSOLE_CLIENT_
 
 # Setup token: persistent random secret printed to console at end of
 # Phase 2; the wizard requires it as an out-of-band check that whoever's
-# at /setup is the operator who pasted the bootstrap command.
+# at http://setup.${DOMAIN}/ is the operator who pasted the bootstrap
+# command.
 install -d -m 0700 "$TOKEN_DIR"
 if [[ -n "${SETUP_TOKEN:-}" ]]; then
   printf '%s\n' "$SETUP_TOKEN" > "$TOKEN_FILE"
@@ -245,6 +281,17 @@ ln -sfn "$REPO_DIR/scripts" /root/scripts
 install -d -m 0755 /opt
 ln -sfn "$REPO_DIR/stacks" "$STACKS_DIR"
 
+# Re-source the strict lib now that the repo exists on disk. The early
+# inline trap above is replaced by the richer structured one. No-op if
+# the lib was already loaded (it guards against double-source).
+if [[ -z "${RAPH_STRICT_LIB_LOADED:-}" && -r "$REPO_DIR/scripts/lib/strict.sh" ]]; then
+  # shellcheck source=scripts/lib/strict.sh
+  . "$REPO_DIR/scripts/lib/strict.sh"
+  strict_enable
+  STRICT_SCRIPT_NAME="bootstrap.sh"
+  strict_set_log "$LOG_FILE"
+fi
+
 # ──────────────────────────────────────────────────────────────────────────
 # Phase 1c — render /opt/stacks/.env from .env.example + collected vars.
 # ──────────────────────────────────────────────────────────────────────────
@@ -292,16 +339,28 @@ log "==> rendering templates"
 # ──────────────────────────────────────────────────────────────────────────
 
 log "==> running scripts/bootstrap-host.sh"
-ADMIN_USERS="$ADMIN_USERS" \
-  bash "$REPO_DIR/scripts/bootstrap-host.sh"
+if declare -F strict_step >/dev/null 2>&1; then strict_step "bootstrap-host.sh"; fi
+if declare -F run_subscript >/dev/null 2>&1; then
+  ADMIN_USERS="$ADMIN_USERS" \
+    run_subscript "$REPO_DIR/scripts/bootstrap-host.sh"
+else
+  ADMIN_USERS="$ADMIN_USERS" \
+    bash "$REPO_DIR/scripts/bootstrap-host.sh"
+fi
 
 # ──────────────────────────────────────────────────────────────────────────
 # Phase 1f — Docker.
 # ──────────────────────────────────────────────────────────────────────────
 
 log "==> running scripts/install-docker.sh"
-ADMIN_USERS="$ADMIN_USERS" \
-  bash "$REPO_DIR/scripts/install-docker.sh"
+if declare -F strict_step >/dev/null 2>&1; then strict_step "install-docker.sh"; fi
+if declare -F run_subscript >/dev/null 2>&1; then
+  ADMIN_USERS="$ADMIN_USERS" \
+    run_subscript "$REPO_DIR/scripts/install-docker.sh"
+else
+  ADMIN_USERS="$ADMIN_USERS" \
+    bash "$REPO_DIR/scripts/install-docker.sh"
+fi
 
 # ──────────────────────────────────────────────────────────────────────────
 # Phase 1g — install bootstrap-continue.service (Phase 2 trigger).
@@ -324,6 +383,7 @@ fi
 # ──────────────────────────────────────────────────────────────────────────
 
 date -u '+%Y-%m-%dT%H:%M:%SZ' > "$PHASE1_DONE"
+chmod 0644 "$PHASE1_DONE"   # why: sentinel is parsed by phase 2 preflight; world-readable mtime is fine
 log "Phase 1 sentinel: $PHASE1_DONE"
 
 cat <<EOF
@@ -334,11 +394,12 @@ Phase 1 complete. Rebooting in 10 seconds.
 After reboot, ${CONTINUE_UNIT} runs scripts/bootstrap-phase2.sh
 which brings up the Docker stacks and opens the setup wizard at:
 
-    http://${DOMAIN}/setup
-    (or http://<vps-ip>/setup if DNS hasn't propagated)
+    https://setup.${DOMAIN}/
 
-Setup token (saved at $TOKEN_FILE):
-    ${SETUP_TOKEN}
+The wizard ships behind a self-signed cert until you finish the
+finalize step, so your browser will show a "not secure" warning on
+first visit — click through ("Advanced → Proceed"). The wizard's
+finalize step issues a real wildcard cert via DNS-01 and replaces it.
 
 Phase 1 log: $LOG_FILE
 Phase 2 log will be: ${LOG_DIR}/phase2.log
