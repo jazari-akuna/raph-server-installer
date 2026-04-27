@@ -72,7 +72,14 @@ for u in "${ADMINS[@]}"; do
   if id "$u" &>/dev/null; then
     echo "    user $u exists"
   else
-    useradd -m -s /bin/bash -G sudo "$u"
+    # A group with the same name may already exist (notably Ubuntu's default
+    # `admin` group at GID 110); useradd's implicit user-private-group create
+    # would fail. Reuse it as the primary group when present.
+    if getent group "$u" >/dev/null; then
+      useradd -m -s /bin/bash -G sudo -g "$u" "$u"
+    else
+      useradd -m -s /bin/bash -G sudo "$u"
+    fi
     echo "    created user $u"
   fi
   # Lock the password so only key auth works. -l is idempotent.
