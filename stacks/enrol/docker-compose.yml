@@ -148,6 +148,17 @@ services:
       - /opt/raph-server-installer:/opt/raph-server-installer:rw
       - /opt/stacks:/opt/stacks:rw
 
+      # DNS-01 credentials hand-off. enrol writes the operator-supplied
+      # provider creds to /run/raph-certbot/<provider>.ini at finalize
+      # time; certbot is then `docker compose run --rm` from the ingress
+      # stack with /run/raph-certbot bind-mounted at /tmp/certbot-creds.
+      # Without binding the host's /run/raph-certbot in here, enrol writes
+      # to its OWN container tmpfs at /run, the host directory stays
+      # empty, and certbot fails with "File not found:
+      # /tmp/certbot-creds/<provider>.ini". The host directory is created
+      # by bootstrap-phase2.sh before this stack comes up.
+      - /run/raph-certbot:/run/raph-certbot:rw
+
     environment:
       # Bind to the docker0 bridge gateway IP, which is what NPM's
       # ingress container sees as `host.docker.internal`. This excludes

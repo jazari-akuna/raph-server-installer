@@ -267,6 +267,16 @@ if [[ "${TEST_MODE:-0}" != "1" ]]; then
   run_subscript "$REPO_DIR/scripts/generate-npm-admin.sh"
 fi
 
+# DNS-01 cert credentials hand-off directory. enrol writes the operator-
+# supplied provider creds to /run/raph-certbot/<provider>.ini during
+# finalize; certbot's compose `run --rm` (from the ingress stack) bind-
+# mounts this exact host path at /tmp/certbot-creds. Pre-create with
+# strict perms so enrol's bind-mount has a target on the host's tmpfs
+# (Ubuntu's /run is tmpfs by default → secrets never touch persistent
+# storage). Idempotent.
+strict_step "ensure certbot creds tmpfs dir"
+install -d -m 0700 -o root -g root /run/raph-certbot
+
 compose_up ingress
 compose_up authelia
 compose_up cloud
