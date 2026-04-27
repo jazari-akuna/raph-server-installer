@@ -233,9 +233,12 @@ func TestUpsertCertificateIdempotent(t *testing.T) {
 		})
 	})
 	c.token = "test-token"
+	// Empty PEM paths skip the upload step (which would need a separate
+	// mock POST handler). Idempotent path: the cert already exists, so
+	// only a GET runs.
 	id, err := c.UpsertCertificate(context.Background(), Certificate{
 		NiceName: "wildcard-example.com",
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("UpsertCertificate: %v", err)
 	}
@@ -262,8 +265,11 @@ func TestTestModeShortCircuits(t *testing.T) {
 	}); err != nil {
 		t.Errorf("UpsertProxyHost (TEST_MODE): %v", err)
 	}
-	if _, err := c.UpsertCertificate(context.Background(), Certificate{NiceName: "wildcard-example.com"}); err != nil {
+	if _, err := c.UpsertCertificate(context.Background(), Certificate{NiceName: "wildcard-example.com"}, "", ""); err != nil {
 		t.Errorf("UpsertCertificate (TEST_MODE): %v", err)
+	}
+	if err := c.UploadCertificate(context.Background(), 3, "/dev/null", "/dev/null"); err != nil {
+		t.Errorf("UploadCertificate (TEST_MODE): %v", err)
 	}
 }
 

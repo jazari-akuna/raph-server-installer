@@ -39,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -535,13 +536,22 @@ type certificateListEntry struct {
 }
 
 // UpsertCertificate registers (or updates) an "other"-provider certificate
-// in NPM. The wizard issues the cert via certbot directly (not via NPM's
-// LE flow) and points NPM at the on-disk paths via the certificate
-// metadata; NPM serves it from there.
+// in NPM and uploads the PEM bytes. NPM does NOT auto-discover PEM files
+// from /etc/letsencrypt for "other"-provider certs; the bytes must be
+// POSTed to /api/nginx/certificates/<id>/upload as a multipart form. Until
+// that POST lands, the cert row exists in NPM's DB but the renderer
+// silently refuses to emit nginx server blocks for any proxy_host that
+// references it (resulting in a 404 on every protected host). See
+// scripts/bootstrap-npm-setup-route.sh for the canonical curl invocation.
 //
 // Match key: NiceName. The wizard uses a stable name like "wildcard-<domain>"
-// so re-runs upsert cleanly.
-func (c *NPMClient) UpsertCertificate(ctx context.Context, cert Certificate) (int, error) {
+// so re-runs upsert cleanly. We always (re-)upload the PEM bytes when paths
+// are supplied — NPM accepts overwrites and a redundant write costs less
+// than a half-rendered cert sitting around forever.
+//
+// fullchainPath / privkeyPath may be empty (e.g. in TEST_MODE or when the
+// caller wants to register-only); in that case we skip the upload step.
+func (c *NPMClient) UpsertCertificate(ctx context.Context, cert Certificate, fullchainPath, privkeyPath string) (int, error) {
 	if testModeEnabled() {
 		fmt.Fprintf(os.Stderr, "TEST_MODE: skipping NPM UpsertCertificate %s\n", cert.NiceName)
 		return 0, nil
@@ -559,19 +569,86 @@ func (c *NPMClient) UpsertCertificate(ctx context.Context, cert Certificate) (in
 	if err := c.do(ctx, http.MethodGet, "/api/nginx/certificates", nil, &existing); err != nil {
 		return 0, err
 	}
+	var id int
 	for _, e := range existing {
 		if e.NiceName == cert.NiceName {
-			// Already present; no PUT needed because the cert's actual
-			// contents (PEM files on disk) live in /etc/letsencrypt and
-			// we only register the existence here.
-			return e.ID, nil
+			id = e.ID
+			break
 		}
 	}
-	var resp struct {
-		ID int `json:"id"`
+	if id == 0 {
+		var resp struct {
+			ID int `json:"id"`
+		}
+		if err := c.do(ctx, http.MethodPost, "/api/nginx/certificates", cert, &resp); err != nil {
+			return 0, err
+		}
+		id = resp.ID
 	}
-	if err := c.do(ctx, http.MethodPost, "/api/nginx/certificates", cert, &resp); err != nil {
-		return 0, err
+	if fullchainPath != "" && privkeyPath != "" {
+		if err := c.UploadCertificate(ctx, id, fullchainPath, privkeyPath); err != nil {
+			return id, fmt.Errorf("upload pem: %w", err)
+		}
 	}
-	return resp.ID, nil
+	return id, nil
+}
+
+// UploadCertificate POSTs the fullchain + privkey PEMs to
+// /api/nginx/certificates/<id>/upload as a multipart form. NPM uses these
+// to populate /data/custom_ssl/npm-<id>/{fullchain.pem,privkey.pem}, which
+// the proxy_host renderer reads when emitting `ssl_certificate` lines.
+// Without this call the cert row exists in the DB but no nginx conf gets
+// rendered for any proxy_host using it. NPM accepts re-uploads idempotently.
+func (c *NPMClient) UploadCertificate(ctx context.Context, certID int, fullchainPath, privkeyPath string) error {
+	if testModeEnabled() {
+		fmt.Fprintf(os.Stderr, "TEST_MODE: skipping NPM UploadCertificate id=%d\n", certID)
+		return nil
+	}
+	if c.token == "" {
+		return errors.New("npm: not logged in")
+	}
+	if certID == 0 {
+		return errors.New("npm: cert id required")
+	}
+	cert, err := os.ReadFile(fullchainPath)
+	if err != nil {
+		return fmt.Errorf("read fullchain %s: %w", fullchainPath, err)
+	}
+	key, err := os.ReadFile(privkeyPath)
+	if err != nil {
+		return fmt.Errorf("read privkey %s: %w", privkeyPath, err)
+	}
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if part, err := mw.CreateFormFile("certificate", "fullchain.pem"); err != nil {
+		return err
+	} else if _, err := part.Write(cert); err != nil {
+		return err
+	}
+	if part, err := mw.CreateFormFile("certificate_key", "privkey.pem"); err != nil {
+		return err
+	} else if _, err := part.Write(key); err != nil {
+		return err
+	}
+	if err := mw.Close(); err != nil {
+		return err
+	}
+	url := fmt.Sprintf("%s/api/nginx/certificates/%d/upload", c.baseURL, certID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
+	if err != nil {
+		return fmt.Errorf("npm: build upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("npm: POST upload: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("npm: upload status %d: %s",
+			resp.StatusCode, readBoundedString(resp.Body, 4*1024))
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }

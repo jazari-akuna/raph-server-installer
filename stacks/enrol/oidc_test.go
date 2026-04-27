@@ -35,14 +35,31 @@ func TestPBKDF2HashRoundTrip(t *testing.T) {
 	if len(parts) != 5 {
 		t.Fatalf("expected 5 segments, got %d (%q)", len(parts), got)
 	}
-	wantSaltB64 := oidcBase64.EncodeToString(salt)
+	wantSaltB64 := oidcBase64Encode(salt)
 	if parts[3] != wantSaltB64 {
 		t.Errorf("salt segment mismatch: got %q want %q", parts[3], wantSaltB64)
 	}
 	derived := pbkdf2.Key([]byte(plaintext), salt, oidcPBKDF2Rounds, oidcPBKDF2KeyLen, sha512.New)
-	wantHashB64 := oidcBase64.EncodeToString(derived)
+	wantHashB64 := oidcBase64Encode(derived)
 	if parts[4] != wantHashB64 {
 		t.Errorf("hash segment mismatch: got %q want %q", parts[4], wantHashB64)
+	}
+}
+
+// TestOIDCBase64NeverEmitsPlus pins the adapted-base64 contract: every
+// `+` from standard base64 must be rewritten to `.` so Authelia's parser
+// (which uses the PHC alphabet) accepts the hash. Stress with many random
+// inputs so we hit at least one byte sequence whose std-base64 form has
+// `+`. A regression here would re-trigger the Authelia restart loop.
+func TestOIDCBase64NeverEmitsPlus(t *testing.T) {
+	// Deterministic input chosen because its std-base64 contains `+`.
+	in := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	got := oidcBase64Encode(in)
+	if strings.ContainsRune(got, '+') {
+		t.Errorf("oidcBase64Encode emitted '+' in %q — Authelia will reject it", got)
+	}
+	if strings.ContainsRune(got, '=') {
+		t.Errorf("oidcBase64Encode emitted padding '=' in %q — Authelia will reject it", got)
 	}
 }
 
@@ -58,6 +75,10 @@ func TestPBKDF2HashRejectsBootstrapPlaceholder(t *testing.T) {
 		"",
 		"$pbkdf2-sha512$310000$$",
 		"$pbkdf2-sha512$310000$valid$=padded=", // padding not allowed
+		// Regression: standard-base64 `+` is REJECTED — Authelia uses the
+		// adapted alphabet where `+` becomes `.`. An earlier version of
+		// this code emitted `+` and Authelia restart-looped on the hash.
+		"$pbkdf2-sha512$310000$AAAA+AAA$BBBB+BBB",
 	}
 	for _, b := range bad {
 		if pbkdf2HashRe.MatchString(b) {

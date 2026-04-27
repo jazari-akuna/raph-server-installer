@@ -1057,7 +1057,12 @@ func (s *server) handleSetupEvents(w http.ResponseWriter, r *http.Request) {
 		emitError(err.Step, err.Message)
 		return
 	}
-	emit("done", fmt.Sprintf(`{"redirect":"https://%s/"}`, s.cfg.domain))
+	// Land on the enrol UI: it's gated by Authelia forward-auth, so the
+	// browser bounces through auth.${DOMAIN} to log in (using the admin
+	// creds the operator just set on /setup/admin) and then back to enrol.
+	// The bare apex (https://${DOMAIN}/) has no NPM proxy host wired, so
+	// redirecting there would 404.
+	emit("done", fmt.Sprintf(`{"redirect":"https://enrol.%s/"}`, s.cfg.domain))
 }
 
 // ---------------------------------------------------------------------------
@@ -1591,14 +1596,21 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 	}
 	logLine("npm: admin authenticated")
 
-	// Upsert the wildcard cert as a known "other"-provider entry so the
-	// proxy hosts can reference it by ID. Currently NPM auto-discovers
-	// custom-provider certs that match a domain; we still upsert to make
-	// the dependency explicit.
+	// Upsert the wildcard cert as a known "other"-provider entry AND
+	// upload the PEM bytes. NPM does NOT auto-discover certs from
+	// /etc/letsencrypt — without the multipart upload the cert row sits
+	// in the DB but the proxy_host renderer silently skips every host
+	// referencing it, leaving every protected subdomain returning 500.
+	// Paths point at the certbot output (the wizard's cert step bind-
+	// mounted /etc/letsencrypt out to /opt/stacks/ingress/letsencrypt;
+	// the same dir is mounted into enrol via /opt/stacks).
+	leDir := filepath.Join(s.cfg.stacksDir, "ingress", "letsencrypt", "live", st.Domain)
+	fullchain := filepath.Join(leDir, "fullchain.pem")
+	privkey := filepath.Join(leDir, "privkey.pem")
 	certID, err := npm.UpsertCertificate(ctx, Certificate{
 		NiceName: "wildcard-" + st.Domain,
 		Provider: "other",
-	})
+	}, fullchain, privkey)
 	if err != nil {
 		return fmt.Errorf("upsert certificate: %w", err)
 	}
@@ -1608,7 +1620,7 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 		// which is the typical id when only the wildcard exists.
 		certID = 3
 	}
-	logLine(fmt.Sprintf("npm: certificate id=%d", certID))
+	logLine(fmt.Sprintf("npm: certificate id=%d (PEM uploaded)", certID))
 
 	// The four proxy hosts. Order matches wire-npm-routes.sh; the
 	// advanced_config strings are byte-for-byte identical so cookies and

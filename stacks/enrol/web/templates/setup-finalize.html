@@ -119,10 +119,16 @@
         try {
           var d = JSON.parse(ev.data);
           markStep('sentinel', 'done', 'complete');
+          // Use the server-supplied redirect (https://enrol.<domain>/) — the
+          // route gate flips into day-2 mode the instant the sentinel lands,
+          // so /setup/done would 404. enrol.<domain> bounces through Authelia
+          // for sign-in then lands on the admin panel.
+          var target = (d && d.redirect) ? d.redirect : '/';
           footEl.innerHTML =
-            '<div class="setup-flash">Setup complete. Redirecting…</div>';
+            '<div class="setup-flash">Setup complete. Redirecting to ' +
+            target + '…</div>';
           es.close();
-          setTimeout(function() { window.location.href = '/setup/done'; }, 1500);
+          setTimeout(function() { window.location.href = target; }, 1500);
         } catch (e) { appendLog('[done] ' + ev.data); }
       });
     });
