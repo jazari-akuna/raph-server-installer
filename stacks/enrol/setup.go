@@ -139,8 +139,21 @@ var supportedDNSProviders = []dnsProviderSpec{
 		// directly at the canonical EU URL; operators on the CA/US regions
 		// follow the corresponding auth.<region>.ovhcloud.com host (see
 		// stacks/ingress/README.md §2).
-		HelpURL:  "https://auth.eu.ovhcloud.com/api/createToken",
-		HelpText: "Three values; scope tightly to the single zone (CA: auth.ca.ovhcloud.com; US: api.us.ovhcloud.com/createToken/).",
+		//
+		// The query string pre-fills OVH's rights matrix with exactly the
+		// four scopes certbot-dns-ovh needs to satisfy the dns-01
+		// challenge (per https://certbot-dns-ovh.readthedocs.io/en/stable/):
+		//   GET    /domain/zone/      (list zones)
+		//   GET    /domain/zone/*     (read records)
+		//   POST   /domain/zone/*     (create the _acme-challenge TXT)
+		//   PUT    /domain/zone/*     (refresh the zone)
+		//   DELETE /domain/zone/*     (clean up after challenge)
+		// The format `?GET=/path&POST=/path...` is the same one OVH's own
+		// python-ovh SDK README uses (`?GET=/me`); OVH's signin flow
+		// preserves the entire query string through `onsuccess=` so the
+		// form lands fully populated after login.
+		HelpURL:  "https://auth.eu.ovhcloud.com/api/createToken?GET=/domain/zone/&GET=/domain/zone/*&POST=/domain/zone/*&PUT=/domain/zone/*&DELETE=/domain/zone/*&name=certbot-dns-ovh",
+		HelpText: "Pick \"Unlimited\" validity (cert renewals run forever; shorter validity will break renewal in ~60 days). Confirm the rights matrix shows exactly GET/POST/PUT/DELETE on /domain/zone/* plus GET on /domain/zone/ — no extra scopes. Non-EU regions: swap the host for auth.ca.ovhcloud.com or api.us.ovhcloud.com/createToken/ and append the same query string.",
 		Fields: []dnsField{
 			{Name: "dns_ovh_endpoint", Label: "Endpoint", Help: "ovh-eu / ovh-ca / ovh-us"},
 			{Name: "dns_ovh_application_key", Label: "Application Key"},
