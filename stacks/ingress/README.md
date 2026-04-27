@@ -52,8 +52,9 @@ All four must return the VPS public IP.
 Create an OVH application token scoped to **only** this single zone.
 
 1. Visit the OVH token creator for your region:
-   - **Europe / .com domains:** <https://eu.api.ovh.com/createToken/>
-   - **NA / .ca / .us domains:** <https://api.ovh.com/createToken/>
+   - **Europe / .com domains:** <https://auth.eu.ovhcloud.com/api/createToken>
+   - **Canada / .ca domains:** <https://auth.ca.ovhcloud.com/api/createToken>
+   - **US domains:** <https://api.us.ovhcloud.com/createToken/>
 2. Fill in:
    - **Application name:** `<your-domain> DNS-01` (anything
      descriptive — visible only in your OVH manager).

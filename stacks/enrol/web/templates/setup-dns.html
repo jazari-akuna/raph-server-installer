@@ -29,7 +29,13 @@
     <fieldset class="dns-creds" data-provider="{{.ID}}"
       {{if ne $state.DNSProvider .ID}}style="display:none"{{end}}>
       <legend>{{.Label}} credentials</legend>
-      <p class="hint">{{.Help}}</p>
+      <p class="hint">
+        {{- if .HelpURL -}}
+          <a href="{{.HelpURL}}" target="_blank" rel="noopener">{{.HelpURL}}</a> &mdash;
+          {{- " "}}
+        {{- end -}}
+        {{- .HelpText -}}
+      </p>
       {{$prov := .ID}}
       {{range .Fields}}
       <label>

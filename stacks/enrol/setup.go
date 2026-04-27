@@ -125,14 +125,22 @@ type setupState struct {
 var supportedDNSProviders = []dnsProviderSpec{
 	{
 		ID: "cloudflare", Label: "Cloudflare",
-		Help: "https://dash.cloudflare.com/profile/api-tokens — token with Zone:DNS:Edit on the apex zone.",
+		HelpURL:  "https://dash.cloudflare.com/profile/api-tokens",
+		HelpText: "Token with Zone:DNS:Edit on the apex zone.",
 		Fields: []dnsField{
 			{Name: "dns_cloudflare_api_token", Label: "API Token", Help: "Zone DNS Edit token."},
 		},
 	},
 	{
 		ID: "ovh", Label: "OVH",
-		Help: "https://eu.api.ovh.com/createApp/ — three values; scope to the single zone.",
+		// OVH retired the legacy /createApp/ + /createToken/ endpoints on
+		// the api.* hostnames in 2025; both now 302 → www.ovh.com/auth/api/
+		// → 307 → auth.<region>.ovhcloud.com/api/createToken. We point
+		// directly at the canonical EU URL; operators on the CA/US regions
+		// follow the corresponding auth.<region>.ovhcloud.com host (see
+		// stacks/ingress/README.md §2).
+		HelpURL:  "https://auth.eu.ovhcloud.com/api/createToken",
+		HelpText: "Three values; scope tightly to the single zone (CA: auth.ca.ovhcloud.com; US: api.us.ovhcloud.com/createToken/).",
 		Fields: []dnsField{
 			{Name: "dns_ovh_endpoint", Label: "Endpoint", Help: "ovh-eu / ovh-ca / ovh-us"},
 			{Name: "dns_ovh_application_key", Label: "Application Key"},
@@ -142,7 +150,7 @@ var supportedDNSProviders = []dnsProviderSpec{
 	},
 	{
 		ID: "route53", Label: "Route53 (AWS)",
-		Help: "IAM user with route53:ChangeResourceRecordSets on the hosted zone.",
+		HelpText: "IAM user with route53:ChangeResourceRecordSets on the hosted zone.",
 		Fields: []dnsField{
 			{Name: "aws_access_key_id", Label: "AWS Access Key ID"},
 			{Name: "aws_secret_access_key", Label: "AWS Secret Access Key"},
@@ -150,14 +158,15 @@ var supportedDNSProviders = []dnsProviderSpec{
 	},
 	{
 		ID: "digitalocean", Label: "DigitalOcean",
-		Help: "https://cloud.digitalocean.com/account/api/tokens — Personal Access Token (write).",
+		HelpURL:  "https://cloud.digitalocean.com/account/api/tokens",
+		HelpText: "Personal Access Token (write).",
 		Fields: []dnsField{
 			{Name: "dns_digitalocean_token", Label: "API Token"},
 		},
 	},
 	{
 		ID: "google", Label: "Google Cloud DNS",
-		Help: "Service account JSON key with roles/dns.admin on the project.",
+		HelpText: "Service account JSON key with roles/dns.admin on the project.",
 		Fields: []dnsField{
 			// Special: this is a JSON blob, rendered into a key file at
 			// finalize time rather than an INI line. Render the field as
@@ -167,7 +176,8 @@ var supportedDNSProviders = []dnsProviderSpec{
 	},
 	{
 		ID: "linode", Label: "Linode",
-		Help: "https://cloud.linode.com/profile/tokens — Personal Access Token with Domains:Read/Write.",
+		HelpURL:  "https://cloud.linode.com/profile/tokens",
+		HelpText: "Personal Access Token with Domains:Read/Write.",
 		Fields: []dnsField{
 			{Name: "dns_linode_key", Label: "API Key"},
 			{Name: "dns_linode_version", Label: "API Version", Help: "Default 4."},
@@ -175,7 +185,7 @@ var supportedDNSProviders = []dnsProviderSpec{
 	},
 	{
 		ID: "rfc2136", Label: "RFC 2136 (BIND / dynamic DNS)",
-		Help: "Use when you run your own authoritative nameserver supporting TSIG dynamic updates.",
+		HelpText: "Use when you run your own authoritative nameserver supporting TSIG dynamic updates.",
 		Fields: []dnsField{
 			{Name: "dns_rfc2136_server", Label: "Server"},
 			{Name: "dns_rfc2136_port", Label: "Port", Help: "Default 53."},
@@ -186,11 +196,17 @@ var supportedDNSProviders = []dnsProviderSpec{
 	},
 }
 
+// dnsProviderSpec splits the provider hint into a clickable URL (HelpURL,
+// optional) and a descriptive sentence (HelpText). Splitting them lets the
+// template render the URL as an actual <a> tag rather than inert text.
+// Providers without an actionable link (route53, google, rfc2136) leave
+// HelpURL empty and the template renders only HelpText.
 type dnsProviderSpec struct {
-	ID     string
-	Label  string
-	Help   string
-	Fields []dnsField
+	ID       string
+	Label    string
+	HelpURL  string
+	HelpText string
+	Fields   []dnsField
 }
 
 type dnsField struct {
