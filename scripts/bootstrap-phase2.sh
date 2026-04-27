@@ -111,7 +111,12 @@ fi
 # would always fail and abort phase 2 before any docker stack came up.
 # ──────────────────────────────────────────────────────────────────────────
 
-SKIP_GW0="${SKIP_GW0:-1}"
+# Default ENABLED. AmneziaWG (gw0) is the per-user device-enrolment
+# backbone exposed via the enrol UI's /peers page; without it every
+# user's "devices" surface is just an empty-state with an install nag.
+# Operators who genuinely don't want a tunnel server can opt out with
+# SKIP_GW0=1 before running bootstrap.sh.
+SKIP_GW0="${SKIP_GW0:-0}"
 
 if [[ "$SKIP_GW0" != "1" ]]; then
   strict_step "verify amneziawg kernel module"

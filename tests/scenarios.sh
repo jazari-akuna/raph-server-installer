@@ -312,7 +312,8 @@ test_phase2_skip_gw0_default() {
     fi
   fi
 
-  # Run install-gw0.sh directly with SKIP_GW0=1 (the phase2 default) and
+  # Run install-gw0.sh directly with SKIP_GW0=1 (the explicit opt-out path
+  # — the phase2 default is now SKIP_GW0=0 so gw0 ships enabled) and
   # confirm it logs the skip line and exits 0.
   local out
   out="$(SKIP_GW0=1 bash /opt/raph-server-installer/scripts/install-gw0.sh 2>&1)" \
