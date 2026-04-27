@@ -56,7 +56,7 @@ func newServer(cfg config) (*server, error) {
 		// progress indicator to render past-step ticks. Accepts the
 		// strongly-typed setupStepName as well as plain strings.
 		"setupStepDone": func(cur any, target string) bool {
-			order := []string{"welcome", "domain", "dns", "admin", "finalize", "done"}
+			order := []string{"welcome", "domain", "dns", "admin", "storage", "finalize", "done"}
 			c := fmt.Sprintf("%v", cur)
 			ci, ti := -1, -1
 			for i, s := range order {

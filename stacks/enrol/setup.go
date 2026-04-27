@@ -65,13 +65,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 // ---------------------------------------------------------------------------
 // state file
 
-// setupStepName is one of: welcome, domain, dns, admin, finalize, done.
+// setupStepName is one of: welcome, domain, dns, admin, storage, finalize, done.
 // Persisted in state.json; drives default redirects on bare GET /setup.
 type setupStepName string
 
@@ -80,6 +81,7 @@ const (
 	stepDomain   setupStepName = "domain"
 	stepDNS      setupStepName = "dns"
 	stepAdmin    setupStepName = "admin"
+	stepStorage  setupStepName = "storage"
 	stepFinalize setupStepName = "finalize"
 	stepDone     setupStepName = "done"
 )
@@ -88,7 +90,7 @@ const (
 // a mid-stream failure resumes where it left off.
 type setupCompletedSteps struct {
 	UsersDBWritten   bool `json:"users_db_written,omitempty"`
-	SharedKeyVerify  bool `json:"shared_key_verified,omitempty"`
+	SharedVolReady   bool `json:"shared_volume_ready,omitempty"`
 	TemplatesRender  bool `json:"templates_rendered,omitempty"`
 	CertIssued       bool `json:"cert_issued,omitempty"`
 	NPMRoutesWired   bool `json:"npm_routes_wired,omitempty"`
@@ -105,6 +107,20 @@ type setupState struct {
 	AdminEmail       string              `json:"admin_email,omitempty"`
 	AdminPasswordHash string             `json:"admin_password_hash,omitempty"`
 	EnableTOTP       bool                `json:"enable_totp,omitempty"`
+
+	// Operator-chosen LUKS volume sizes, in raw bytes. PersonalLUKSSize
+	// is the per-user encrypted volume's size (applied to every user
+	// created post-setup as well — there's no per-user override yet).
+	// SharedLUKSSize is the size of the system-wide /shared volume that
+	// copyparty bind-mounts. Both are collected on the storage wizard
+	// step (between admin and finalize) and consumed at finalize time:
+	// PERSONAL_LUKS_SIZE_BYTES + SHARED_LUKS_SIZE_BYTES are exported as
+	// env vars when shelling out to the volume scripts, and
+	// PersonalLUKSSize is also reflected back into the runtime
+	// cfg.luksSizeGB so subsequent user creations from /users use it.
+	PersonalLUKSSize int64 `json:"personal_luks_size,omitempty"`
+	SharedLUKSSize   int64 `json:"shared_luks_size,omitempty"`
+
 	StartedAt        time.Time           `json:"started_at,omitempty"`
 	UpdatedAt        time.Time           `json:"updated_at,omitempty"`
 	CompletedSteps   setupCompletedSteps `json:"completed_steps,omitempty"`
@@ -392,6 +408,8 @@ func (s *server) handleSetupRoot(w http.ResponseWriter, r *http.Request) {
 		s.handleSetupDNS(w, r)
 	case stepAdmin:
 		s.handleSetupAdmin(w, r)
+	case stepStorage:
+		s.handleSetupStorage(w, r)
 	case stepFinalize:
 		s.handleSetupFinalize(w, r)
 	case stepDone:
@@ -420,6 +438,8 @@ func (s *server) handleSetupSub(w http.ResponseWriter, r *http.Request) {
 		s.handleSetupDNS(w, r)
 	case "admin":
 		s.handleSetupAdmin(w, r)
+	case "storage":
+		s.handleSetupStorage(w, r)
 	case "finalize":
 		s.handleSetupFinalize(w, r)
 	case "done":
@@ -443,6 +463,18 @@ type setupPageData struct {
 	SelectedProvider dnsProviderSpec
 	Flash            string
 	Err              string
+
+	// Storage step (stepStorage). DiskFreeBytes / DiskTotalBytes describe
+	// the host disk underlying /srv/store; the suggested defaults below
+	// derive from those (small fraction for personal, half for shared).
+	// PersonalSizeGiB / SharedSizeGiB carry the operator's last-typed
+	// values back through validation re-renders.
+	DiskFreeBytes        int64
+	DiskTotalBytes       int64
+	PersonalSizeGiB      string
+	SharedSizeGiB        string
+	SuggestedPersonalGiB int64
+	SuggestedSharedGiB   int64
 }
 
 func (s *server) renderSetup(w http.ResponseWriter, name string, data setupPageData) {
@@ -626,7 +658,7 @@ func (s *server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
 		st.AdminEmail = email
 		st.AdminPasswordHash = hash
 		st.EnableTOTP = enableTOTP
-		st.Step = stepFinalize
+		st.Step = stepStorage
 		if err := s.saveSetupState(st); err != nil {
 			http.Error(w, "save state: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -639,7 +671,7 @@ func (s *server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
 		// (TODO Wave 3B: not yet wired — for now finalize will fail
 		// loudly with a clear "missing in-memory password" error).
 		setupSecretCache.set(name, pw)
-		http.Redirect(w, r, "/setup/finalize", http.StatusSeeOther)
+		http.Redirect(w, r, "/setup/storage", http.StatusSeeOther)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -683,12 +715,174 @@ func (c *secretCache) delete(k string) {
 var setupSecretCache = &secretCache{}
 
 // ---------------------------------------------------------------------------
+// step 3.5 — LUKS volume sizes (personal + shared)
+//
+// The wizard writes /srv/store/setup/state.json with PersonalLUKSSize +
+// SharedLUKSSize (raw bytes). Finalize then exports those as
+// PERSONAL_LUKS_SIZE_BYTES + SHARED_LUKS_SIZE_BYTES when shelling out to
+// the volume-creation scripts, AND reflects PersonalLUKSSize back into
+// cfg.luksSizeGB (rounded up to GiB) so the day-2 /users handler creates
+// each user's volume at the operator's chosen size.
+//
+// We deliberately do NOT enforce envelope rules — the operator can set
+// values larger than the disk if they explicitly type those (sparse
+// images won't allocate up-front anyway). The template displays a warning
+// next to the field if the value is outside the recommended envelope so
+// the operator knows what they're agreeing to.
+
+// diskFreeBytes returns (free, total, err) for the filesystem holding
+// /srv/store. The container has /srv/store bind-mounted from the host,
+// so syscall.Statfs reports the host disk's actual free/total bytes.
+func diskFreeBytes(path string) (free int64, total int64, err error) {
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(path, &fs); err != nil {
+		return 0, 0, err
+	}
+	free = int64(fs.Bavail) * int64(fs.Bsize)
+	total = int64(fs.Blocks) * int64(fs.Bsize)
+	return free, total, nil
+}
+
+const gibBytes int64 = 1 << 30
+
+// suggestedSizes computes default suggestions for the personal + shared
+// volumes given the disk's free bytes. Personal: smaller of (10 GiB,
+// 10 % of free). Shared: 50 % of free. Both rounded down to GiB; both
+// floor at 1 GiB so the suggestion is never zero on a tiny dev disk.
+func suggestedSizes(free int64) (personalGiB int64, sharedGiB int64) {
+	tenPercent := free / 10
+	personal := int64(10) * gibBytes
+	if tenPercent < personal {
+		personal = tenPercent
+	}
+	shared := free / 2
+	personalGiB = personal / gibBytes
+	sharedGiB = shared / gibBytes
+	if personalGiB < 1 {
+		personalGiB = 1
+	}
+	if sharedGiB < 1 {
+		sharedGiB = 1
+	}
+	return
+}
+
+// parseGiB parses an operator-typed integer GiB string into bytes.
+// Returns (bytes, ok). Empty / non-numeric / non-positive return (0, false).
+func parseGiB(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	var n int64
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int64(c-'0')
+		if n > 1<<30 { // sanity ceiling, > 1 EiB
+			return 0, false
+		}
+	}
+	if n <= 0 {
+		return 0, false
+	}
+	return n * gibBytes, true
+}
+
+func (s *server) handleSetupStorage(w http.ResponseWriter, r *http.Request) {
+	st, err := s.loadSetupState()
+	if err != nil {
+		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	free, total, _ := diskFreeBytes("/srv/store")
+	sugPersonal, sugShared := suggestedSizes(free)
+
+	personalDisplay := ""
+	sharedDisplay := ""
+	if st.PersonalLUKSSize > 0 {
+		personalDisplay = fmt.Sprintf("%d", st.PersonalLUKSSize/gibBytes)
+	} else {
+		personalDisplay = fmt.Sprintf("%d", sugPersonal)
+	}
+	if st.SharedLUKSSize > 0 {
+		sharedDisplay = fmt.Sprintf("%d", st.SharedLUKSSize/gibBytes)
+	} else {
+		sharedDisplay = fmt.Sprintf("%d", sugShared)
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.renderSetup(w, "setup-storage.html", setupPageData{
+			Title: "setup — storage", Step: stepStorage, State: st, Domain: st.Domain,
+			DiskFreeBytes:        free,
+			DiskTotalBytes:       total,
+			PersonalSizeGiB:      personalDisplay,
+			SharedSizeGiB:        sharedDisplay,
+			SuggestedPersonalGiB: sugPersonal,
+			SuggestedSharedGiB:   sugShared,
+		})
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		personalRaw := r.Form.Get("personal_size_gib")
+		sharedRaw := r.Form.Get("shared_size_gib")
+		personalBytes, okP := parseGiB(personalRaw)
+		sharedBytes, okS := parseGiB(sharedRaw)
+		errMsg := ""
+		switch {
+		case !okP:
+			errMsg = "personal volume size: must be a positive integer (GiB)"
+		case !okS:
+			errMsg = "shared volume size: must be a positive integer (GiB)"
+		}
+		if errMsg != "" {
+			s.renderSetup(w, "setup-storage.html", setupPageData{
+				Title: "setup — storage", Step: stepStorage, State: st, Domain: st.Domain,
+				DiskFreeBytes:        free,
+				DiskTotalBytes:       total,
+				PersonalSizeGiB:      personalRaw,
+				SharedSizeGiB:        sharedRaw,
+				SuggestedPersonalGiB: sugPersonal,
+				SuggestedSharedGiB:   sugShared,
+				Err:                  errMsg,
+			})
+			return
+		}
+		st.PersonalLUKSSize = personalBytes
+		st.SharedLUKSSize = sharedBytes
+		st.Step = stepFinalize
+		if err := s.saveSetupState(st); err != nil {
+			http.Error(w, "save state: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/setup/finalize", http.StatusSeeOther)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // step 4 — finalize summary page (GET) + kickoff (POST)
 
 func (s *server) handleSetupFinalize(w http.ResponseWriter, r *http.Request) {
 	st, err := s.loadSetupState()
 	if err != nil {
 		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Belt-and-braces: if the operator started this wizard before the
+	// storage step existed (state.json from an older bootstrap), bounce
+	// them back so we have real sizes to feed the volume scripts. The
+	// step machinery can land here directly via stale state.Step =
+	// "finalize" when the JSON predates the new field.
+	if st.PersonalLUKSSize == 0 || st.SharedLUKSSize == 0 {
+		st.Step = stepStorage
+		_ = s.saveSetupState(st)
+		http.Redirect(w, r, "/setup/storage", http.StatusSeeOther)
 		return
 	}
 	switch r.Method {
@@ -855,15 +1049,27 @@ func (s *server) runFinalize(
 		_ = s.saveSetupState(st)
 	}
 
-	// 2. shared LUKS keyfile — verify (Wave 2B already created it).
-	if !st.CompletedSteps.SharedKeyVerify {
-		status("shared_key", "verifying /etc/luks/_shared.key")
+	// 2. shared LUKS volume — provision at the operator's chosen size
+	// (or re-assert if the bootstrap-phase2 default-size run already laid
+	// it down). Script is idempotent: if /srv/store/data/_shared.img
+	// exists it skips dd+luksFormat and only re-asserts keyfile/group/
+	// mountpoint state. After the script returns, /etc/luks/_shared.key
+	// MUST exist; we still call finalizeVerifySharedKey for the
+	// cloud-fail-closed signal so a regression is loud.
+	if !st.CompletedSteps.SharedVolReady {
+		status("shared_volume", "provisioning /srv/store/mnt/_shared")
+		if err := s.finalizeEnsureSharedVolume(ctx, st, logLine); err != nil {
+			// Non-fatal: cloud (copyparty) starts even without /shared
+			// (the [/shared] block fails-closed in copyparty.conf), so
+			// the operator can still finish setup and remediate from a
+			// host shell. Surface the error in the SSE log so it's not
+			// silently swallowed.
+			logLine("warning: shared volume provisioning failed: " + err.Error())
+		}
 		if err := s.finalizeVerifySharedKey(); err != nil {
-			// Non-fatal warning rather than hard fail — the operator
-			// can re-run create-shared-volume.sh post-setup.
 			logLine("warning: " + err.Error())
 		}
-		st.CompletedSteps.SharedKeyVerify = true
+		st.CompletedSteps.SharedVolReady = true
 		_ = s.saveSetupState(st)
 	}
 
@@ -897,7 +1103,24 @@ func (s *server) runFinalize(
 		_ = s.saveSetupState(st)
 	}
 
-	// 6. flip out of setup mode.
+	// 6. apply the operator's chosen personal LUKS size to the live
+	// process so subsequent /users creates use it. cfg is a value copy
+	// inside setupState's host server, so we mutate it directly. The
+	// rounding-up (rather than down) means a wizard-chosen 9.5 GiB
+	// becomes 10 GiB on subsequent creates — better to over-allocate
+	// than to silently shrink the operator's intent.
+	if st.PersonalLUKSSize > 0 {
+		gib := int(st.PersonalLUKSSize / gibBytes)
+		if st.PersonalLUKSSize%gibBytes != 0 {
+			gib++
+		}
+		if gib < 1 {
+			gib = 1
+		}
+		s.cfg.luksSizeGB = gib
+	}
+
+	// 7. flip out of setup mode.
 	if !st.CompletedSteps.SentinelTouched {
 		status("sentinel", "marking setup complete")
 		if err := s.finalizeTouchSentinel(); err != nil {
@@ -960,13 +1183,48 @@ func (s *server) finalizeVerifySharedKey() error {
 	const path = "/etc/luks/_shared.key"
 	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("%s: %w (Wave 2B's create-shared-volume.sh "+
-			"may not have run; cloud's [/shared] block will fail-closed)", path, err)
+		return fmt.Errorf("%s: %w (cloud's [/shared] block will fail-closed; "+
+			"re-run scripts/create-shared-volume.sh as root, or revisit "+
+			"/setup/storage if the wizard short-circuited the size step)", path, err)
 	}
 	if info.Size() < 32 {
 		return fmt.Errorf("%s: too small (%d bytes; expected >= 32)", path, info.Size())
 	}
 	return nil
+}
+
+// ---- finalize step 2b: provision the shared volume at operator size ------
+//
+// Calls scripts/create-shared-volume.sh with SHARED_LUKS_SIZE_BYTES set
+// to st.SharedLUKSSize. The script is idempotent — if the .img already
+// exists (e.g. bootstrap-phase2 ran with the default 10 GiB before the
+// wizard collected a real size) it just re-asserts keyfile/group/mount
+// state and exits 0. We deliberately do NOT shrink an existing larger
+// .img to match a smaller wizard-chosen value; the operator can re-run
+// the script manually after `rm /srv/store/data/_shared.img` if they
+// want a strict resize.
+//
+// ADMIN_USERS is also passed through so the operator's chosen admin
+// username lands in the `shared-users` group at create time.
+func (s *server) finalizeEnsureSharedVolume(ctx context.Context, st *setupState, logLine func(string)) error {
+	if testModeEnabled() {
+		logLine("TEST_MODE: skipping create-shared-volume.sh")
+		return nil
+	}
+	script := filepath.Join(s.cfg.repoDir, "scripts/create-shared-volume.sh")
+	if _, err := os.Stat(script); err != nil {
+		return fmt.Errorf("script not found: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, "bash", script)
+	env := append([]string{}, os.Environ()...)
+	if st.SharedLUKSSize > 0 {
+		env = append(env, fmt.Sprintf("SHARED_LUKS_SIZE_BYTES=%d", st.SharedLUKSSize))
+	}
+	if st.AdminUsername != "" {
+		env = append(env, "ADMIN_USERS="+st.AdminUsername)
+	}
+	cmd.Env = env
+	return runStreaming(cmd, logLine)
 }
 
 // ---- finalize step 3: re-render templates --------------------------------

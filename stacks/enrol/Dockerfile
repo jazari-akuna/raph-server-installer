@@ -62,6 +62,15 @@ FROM debian:trixie-slim
 #   passwd / login        — useradd / userdel for host-side user
 #                           management; provided by the `passwd` package
 #                           in trixie.
+#   gettext-base          — provides `envsubst`. The wizard's finalize
+#                           step shells out to scripts/render-templates.sh
+#                           (see setup.go finalizeRenderTemplates) which
+#                           uses envsubst per-file. Without this, the
+#                           re-render step fails inside the container with
+#                           "envsubst: command not found" for every
+#                           *.template file. Phase 1's apt install on
+#                           the host is unrelated — finalize runs inside
+#                           THIS container.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -77,6 +86,7 @@ RUN apt-get update \
         docker-cli \
         passwd \
         login \
+        gettext-base \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/enrol /usr/local/bin/enrol

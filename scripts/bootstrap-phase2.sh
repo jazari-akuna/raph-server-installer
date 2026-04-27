@@ -155,46 +155,39 @@ fi
 # Step 3 — shared volume (Parcel 2B).
 # ──────────────────────────────────────────────────────────────────────────
 
-# Coordinated with Parcel 2B: scripts/create-shared-volume.sh creates and
-# mounts the shared LUKS-on-loopback volume that copyparty needs for its
-# [/shared] block. If 2B's script isn't present yet, log and continue —
-# cloud will start without /shared and the wizard can finalise later.
+# The shared LUKS volume is now provisioned by the wizard's finalize step
+# (stacks/enrol/setup.go § finalizeEnsureSharedVolume) so the operator can
+# choose its size on the new /setup/storage step rather than having phase 2
+# silently lay down a 10 GiB default. Phase 2 only installs the boot-time
+# auto-mount unit so the wizard-created volume comes back after reboot.
+#
+# Cloud (copyparty) launches in step 4 below with [/shared] fail-closed
+# until the wizard's finalize creates the .img + keyfile + mount; after
+# that, copyparty picks the bind-mount up via the rshared propagation set
+# on enrol's /srv/store mount.
 SHARED_SCRIPT="$REPO_DIR/scripts/create-shared-volume.sh"
 SHARED_UNIT_SRC="$REPO_DIR/host/systemd/shared-store.service"
 SHARED_UNIT_DST="/etc/systemd/system/shared-store.service"
-if [[ -x "$SHARED_SCRIPT" ]]; then
-  strict_step "create shared volume"
-  log "==> creating shared volume via $SHARED_SCRIPT"
-  # We deliberately do NOT abort phase 2 if the shared volume fails:
-  # cloud (copyparty) starts fine without /shared, the wizard finalises
-  # the volume later. We DO surface the rc clearly.
-  set +e
-  bash "$SHARED_SCRIPT"
-  shared_rc=$?
-  set -e
-  if (( shared_rc != 0 )); then
-    log "    WARNING: $SHARED_SCRIPT exited rc=$shared_rc; cloud will start"
-    log "             without /shared. Investigate before announcing setup-ready"
-    log "             (see 'docker logs cloud' and 'cryptsetup status store_shared')."
-  fi
-  # Install + enable the boot-time auto-mount unit so /shared comes back
-  # after every reboot. We do NOT --now: the create script already left
-  # the volume mounted in this boot; `start` would fail because the
-  # mapper is open. The unit fires cleanly on next reboot.
-  if [[ -f "$SHARED_UNIT_SRC" ]]; then
-    install -d -m 0755 /etc/systemd/system   # why: standard systemd dir, idempotent
-    install -m 0644 "$SHARED_UNIT_SRC" "$SHARED_UNIT_DST"
-    if [[ "${TEST_MODE:-0}" == "1" ]] && ! command -v systemctl >/dev/null 2>&1; then
-      log "    TEST_MODE: skipping systemctl daemon-reload + enable shared-store.service"
-    else
-      systemctl daemon-reload
-      if ! systemctl enable shared-store.service >/dev/null 2>&1; then
-        log "    WARNING: enable shared-store.service failed; volume won't auto-mount on reboot"
-      fi
+if [[ -f "$SHARED_UNIT_SRC" ]]; then
+  strict_step "install shared-store unit"
+  log "==> installing shared-store.service (auto-mount on boot)"
+  install -d -m 0755 /etc/systemd/system   # why: standard systemd dir, idempotent
+  install -m 0644 "$SHARED_UNIT_SRC" "$SHARED_UNIT_DST"
+  if [[ "${TEST_MODE:-0}" == "1" ]] && ! command -v systemctl >/dev/null 2>&1; then
+    log "    TEST_MODE: skipping systemctl daemon-reload + enable shared-store.service"
+  else
+    systemctl daemon-reload
+    if ! systemctl enable shared-store.service >/dev/null 2>&1; then
+      log "    WARNING: enable shared-store.service failed; volume won't auto-mount on reboot"
     fi
   fi
 else
-  log "==> $SHARED_SCRIPT not present (Parcel 2B); skipping shared volume"
+  log "==> $SHARED_UNIT_SRC not present; skipping unit install"
+fi
+log "==> shared LUKS volume creation deferred to wizard /setup/storage + finalize"
+if [[ ! -x "$SHARED_SCRIPT" ]]; then
+  log "    WARNING: $SHARED_SCRIPT missing or not executable; the wizard's"
+  log "             finalize step will not be able to provision /shared either."
 fi
 
 # ──────────────────────────────────────────────────────────────────────────

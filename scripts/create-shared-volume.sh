@@ -7,7 +7,13 @@
 # `shared-store.service` systemd unit which fires at boot.
 #
 # Usage:  sudo create-shared-volume.sh
-# Tunables (env): SHARED_VOLUME_SIZE_GIB (default 10)
+# Tunables (env): SHARED_LUKS_SIZE_BYTES (preferred, set by wizard finalize
+#                                         from the operator's chosen size)
+#                 SHARED_VOLUME_SIZE_GIB (legacy GiB integer; default 10
+#                                         when neither env var is set —
+#                                         applies to bootstrap-phase2's
+#                                         "soft-provision" call before
+#                                         the wizard collects a real size)
 #                 ADMIN_USERS            (whitespace-separated; each is
 #                                         added to the `shared-users` group)
 #
@@ -38,11 +44,33 @@ fi
 
 # ---------------------------------------------------------------------------
 # Tunables / paths
-
-size_gib="${SHARED_VOLUME_SIZE_GIB:-10}"
-if ! [[ $size_gib =~ ^[1-9][0-9]*$ ]]; then
-    echo "SHARED_VOLUME_SIZE_GIB must be a positive integer (GiB), got: $size_gib" >&2
-    exit 1
+#
+# Size resolution priority:
+#   1. SHARED_LUKS_SIZE_BYTES   (set by enrol's finalize from state.json
+#                                 — operator-chosen via the wizard)
+#   2. SHARED_VOLUME_SIZE_GIB   (legacy integer-GiB; bootstrap-phase2's
+#                                 pre-wizard "soft-provision" path)
+#   3. default 10 GiB           (only the soft-provision path lands here;
+#                                 the wizard always supplies bytes)
+#
+# `dd ... seek=<bytes>` accepts a raw integer (bytes); the legacy GiB
+# value is multiplied to bytes here so downstream logic is uniform.
+size_bytes=""
+if [[ -n "${SHARED_LUKS_SIZE_BYTES:-}" ]]; then
+    if ! [[ ${SHARED_LUKS_SIZE_BYTES} =~ ^[1-9][0-9]*$ ]]; then
+        echo "SHARED_LUKS_SIZE_BYTES must be a positive integer (bytes), got: ${SHARED_LUKS_SIZE_BYTES}" >&2
+        exit 1
+    fi
+    size_bytes="${SHARED_LUKS_SIZE_BYTES}"
+    size_gib=$(( size_bytes / (1024*1024*1024) ))
+    [[ $size_gib -lt 1 ]] && size_gib=1   # display only; size_bytes drives dd
+else
+    size_gib="${SHARED_VOLUME_SIZE_GIB:-10}"
+    if ! [[ $size_gib =~ ^[1-9][0-9]*$ ]]; then
+        echo "SHARED_VOLUME_SIZE_GIB must be a positive integer (GiB), got: $size_gib" >&2
+        exit 1
+    fi
+    size_bytes=$(( size_gib * 1024 * 1024 * 1024 ))
 fi
 
 # TEST_MODE: cap to a 16 MiB sparse blob and stub the destructive cryptsetup
@@ -108,9 +136,12 @@ if [[ $img_already_present -eq 0 ]]; then
         chmod 0600 "$img"
         chown root:root "$img" 2>/dev/null || true
     else
-        echo "==> creating sparse ${size_gib} GiB blob at $img"
-        # Same sparse-file idiom used by create-store-volume.sh.
-        dd if=/dev/zero of="$img" bs=1 count=0 seek="${size_gib}G" status=none
+        echo "==> creating sparse ${size_gib} GiB (${size_bytes} bytes) blob at $img"
+        # Same sparse-file idiom used by create-store-volume.sh. We seek
+        # by raw bytes so SHARED_LUKS_SIZE_BYTES values that aren't an
+        # exact GiB multiple (e.g. wizard-suggested "free * 0.5") land
+        # at the requested size precisely.
+        dd if=/dev/zero of="$img" bs=1 count=0 seek="${size_bytes}" status=none
         chmod 0600 "$img"
         chown root:root "$img"
 

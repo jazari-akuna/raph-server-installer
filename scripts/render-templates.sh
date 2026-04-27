@@ -26,6 +26,23 @@
 
 set -euo pipefail
 
+# ---------- preflight ----------------------------------------------------
+#
+# `envsubst` lives in the gettext-base Debian package. If it's missing
+# every per-template substitution below will fail with the same useless
+# "envsubst: command not found" line repeated N times. Surface the
+# missing-package case once, with a clear remediation pointer covering
+# both the host (gettext-base) and the enrol container (apt install
+# gettext-base in the Dockerfile runtime stage), instead.
+if ! command -v envsubst >/dev/null 2>&1; then
+  echo "render-templates: envsubst is not on PATH (gettext-base)" >&2
+  echo "remediation:" >&2
+  echo "  host  : DEBIAN_FRONTEND=noninteractive apt-get install -y gettext-base" >&2
+  echo "  enrol : ensure stacks/enrol/Dockerfile runtime stage installs gettext-base" >&2
+  echo "          (rebuild via: cd stacks/enrol && docker compose --env-file /opt/stacks/.env up -d --build)" >&2
+  exit 127
+fi
+
 # ---------- args ----------------------------------------------------------
 
 ENV_FILE=""

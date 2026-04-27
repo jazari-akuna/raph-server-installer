@@ -136,9 +136,17 @@ services:
       # the finalize pipeline so it can re-run render-templates.sh
       # and wire-npm-routes.sh, and so it can `docker compose run`
       # the certbot one-shot from the ingress stack.
+      #
+      # Both repo + stacks are bind-mounted RW (not ro) because
+      # render-templates.sh writes the rendered sibling next to each
+      # *.template file under /opt/raph-server-installer, and the
+      # finalize handler appends operator-supplied secrets to
+      # /opt/stacks/.env (NPM admin password etc.). With `:ro` here
+      # the wizard's templates step fails with EROFS on the mv into
+      # the rendered output.
       - /etc/raph-installer:/etc/raph-installer:ro
-      - /opt/raph-server-installer:/opt/raph-server-installer:ro
-      - /opt/stacks:/opt/stacks:ro
+      - /opt/raph-server-installer:/opt/raph-server-installer:rw
+      - /opt/stacks:/opt/stacks:rw
 
     environment:
       # Bind to the docker0 bridge gateway IP, which is what NPM's

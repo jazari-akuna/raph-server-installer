@@ -426,7 +426,9 @@ _wizard_kill_enrol() {
 #   - GET /setup/domain returns 200 and contains the operator's DOMAIN
 #   - POST /setup/domain (cookie + dummy form) 303s to /setup/dns
 #   - POST /setup/dns (provider=rfc2136 + dummy creds) 303s to /setup/admin
-#   - POST /setup/admin (alice/12-char-password) 303s to /setup/finalize
+#   - POST /setup/admin (alice/12-char-password) 303s to /setup/storage
+#   - GET /setup/storage returns 200 + a free-space line + size inputs
+#   - POST /setup/storage (10 GiB / 50 GiB) 303s to /setup/finalize
 #   - GET /setup/finalize returns 200
 #   - GET /setup/events emits `event: done` within 30 s (every shell-out
 #     in runFinalize either no-ops in TEST_MODE or hits a stub that
@@ -574,15 +576,38 @@ test_wizard_walkthrough() {
     -d "dns_rfc2136_secret=dGVzdC10c2lnLXNlY3JldA==" \
     -d "dns_rfc2136_algorithm=HMAC-SHA512"
 
-  # ----- e. POST /setup/admin (alice/12-char-password) → /setup/finalize
-  assert_http_303_to "$base/setup/admin" "/setup/finalize" \
-    "POST /setup/admin (alice) 303s to /setup/finalize" \
+  # ----- e. POST /setup/admin (alice/12-char-password) → /setup/storage
+  assert_http_303_to "$base/setup/admin" "/setup/storage" \
+    "POST /setup/admin (alice) 303s to /setup/storage" \
     -b "$cookie_jar" -X POST \
     -d "name=alice" \
     -d "displayname=Alice" \
     -d "email=$ADMIN_EMAIL" \
     -d "password=alice-pw-1234" \
     -d "password_confirm=alice-pw-1234"
+
+  # ----- e2. GET /setup/storage → 200 + size inputs --------------------
+  local storage_body="$scenario_dir/storage.html"
+  curl -sS -b "$cookie_jar" --max-time 5 -o "$storage_body" -w '%{http_code}' \
+    "$base/setup/storage" > "$scenario_dir/storage.code" 2>/dev/null || true
+  if [[ "$(cat "$scenario_dir/storage.code")" == "200" ]]; then
+    _pass "GET /setup/storage returned 200"
+  else
+    _fail "GET /setup/storage returned $(cat "$scenario_dir/storage.code")"
+  fi
+  if grep -q 'name="personal_size_gib"' "$storage_body" && \
+     grep -q 'name="shared_size_gib"' "$storage_body"; then
+    _pass "/setup/storage body contains personal+shared size inputs"
+  else
+    _fail "/setup/storage body missing personal+shared size inputs"
+  fi
+
+  # ----- e3. POST /setup/storage (10 / 50 GiB) → /setup/finalize -------
+  assert_http_303_to "$base/setup/storage" "/setup/finalize" \
+    "POST /setup/storage (10/50 GiB) 303s to /setup/finalize" \
+    -b "$cookie_jar" -X POST \
+    -d "personal_size_gib=10" \
+    -d "shared_size_gib=50"
 
   # ----- f. GET /setup/finalize → 200 ----------------------------------
   local final_code
