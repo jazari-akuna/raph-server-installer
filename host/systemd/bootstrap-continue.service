@@ -1,0 +1,33 @@
+# raph-server-installer — Phase 2 trigger.
+#
+# Installed by bootstrap.sh (Phase 1) and enabled to fire once after the
+# post-DKMS reboot. The unit calls scripts/bootstrap-phase2.sh which brings
+# the Docker stacks up and exposes the setup wizard.
+#
+# Self-disables once Phase 2 succeeds:
+#   - ConditionPathExists=!/srv/store/.bootstrap-phase2-complete  (won't run
+#     if the sentinel is present)
+#   - bootstrap-phase2.sh ALSO calls `systemctl disable` itself
+#     (belt-and-suspenders)
+
+[Unit]
+Description=raph-server-installer Phase 2 (post-reboot bring-up)
+Documentation=https://github.com/jazari-akuna/raph-server-installer
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+ConditionPathExists=/srv/store/.bootstrap-phase1-complete
+ConditionPathExists=!/srv/store/.bootstrap-phase2-complete
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/raph-server-installer/scripts/bootstrap-phase2.sh
+StandardOutput=journal+console
+StandardError=journal+console
+# bootstrap-phase2.sh is itself idempotent and times-out the enrol-healthz
+# wait at 30s. Cap the whole unit at 10 minutes so a stuck `docker compose
+# pull` never wedges the boot indefinitely.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

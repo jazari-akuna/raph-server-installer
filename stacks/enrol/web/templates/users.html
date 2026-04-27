@@ -7,6 +7,7 @@
   <p class="hint">
     {{gb .Storage.TotalBytes}}&nbsp;GB filesystem hosting <code>/srv/store</code>:
     {{gb .Storage.UserOnDisk}}&nbsp;GB used by user volumes,
+    {{gb .Storage.Shared.OnDiskBytes}}&nbsp;GB by the shared volume,
     {{gb .Storage.SystemBytes}}&nbsp;GB by the system,
     {{gb .Storage.FreeBytes}}&nbsp;GB free.
   </p>
@@ -16,6 +17,9 @@
       {{if .Exists}}
       <div class="seg seg-user{{if not .Mounted}} seg-locked{{end}}" style="width:{{pct .OnDiskBytes $.Storage.TotalBytes}}%" title="{{.Name}} {{gb .OnDiskBytes}} GB on-disk"></div>
       {{end}}
+    {{end}}
+    {{if .Storage.Shared.Provisioned}}
+    <div class="seg seg-user{{if not .Storage.Shared.Mounted}} seg-locked{{end}}" style="width:{{pct .Storage.Shared.OnDiskBytes .Storage.TotalBytes}}%" title="_shared {{gb .Storage.Shared.OnDiskBytes}} GB on-disk"></div>
     {{end}}
     <div class="seg seg-free" style="width:{{pct .Storage.FreeBytes .Storage.TotalBytes}}%" title="free {{gb .Storage.FreeBytes}} GB"></div>
   </div>
@@ -45,6 +49,18 @@
         <td>{{gb .NominalBytes}} GB</td>
       </tr>
       {{end}}
+      <tr>
+        <td><span class="swatch swatch-user{{if not .Storage.Shared.Mounted}} swatch-locked{{end}}"></span></td>
+        <td>
+          _shared <span class="muted">(all users, keyfile-unlocked)</span>
+          {{if .Storage.Shared.Mounted}}<span class="ok">mounted</span>
+          {{else if .Storage.Shared.Provisioned}}<span class="warn">not mounted</span>
+          {{else}}<span class="muted">not provisioned</span>{{end}}
+        </td>
+        <td>{{gb .Storage.Shared.OnDiskBytes}} GB</td>
+        <td>{{if .Storage.Shared.Mounted}}{{gb .Storage.Shared.UsedInner}} / {{gb .Storage.Shared.InnerCapacity}} GB{{else}}—{{end}}</td>
+        <td>—</td>
+      </tr>
       <tr>
         <td><span class="swatch swatch-free"></span></td>
         <td>free</td>

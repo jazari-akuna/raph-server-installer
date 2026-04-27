@@ -53,6 +53,11 @@ services:
       # `rprivate` propagation does NOT do this; we verified
       # empirically before changing this stack. See
       # ../enrol/DESIGN.md § 0.3 for the propagation gotcha.
+      #
+      # The shared volume at /srv/store/mnt/_shared (auto-unlocked
+      # by host-side shared-store.service) is visible here as
+      # /w/_shared via the same rslave propagation — copyparty's
+      # [/shared] block in conf/copyparty.conf points at /w/_shared.
       - type: bind
         source: /srv/store/mnt
         target: /w

@@ -46,6 +46,26 @@ type StorageInfo struct {
 	NominalBytes  int64  // sum of per-user nominal allocation (luksSizeGB each)
 	SystemBytes   int64  // total - free - userOnDisk (everything else)
 	Users         []UserStorage
+	Shared        SharedStorage // shared volume (/srv/store/mnt/_shared)
+}
+
+// SharedStorage is the read-only status row for the system-managed
+// shared LUKS volume (created by scripts/create-shared-volume.sh,
+// auto-unlocked at boot by shared-store.service).
+//
+// Status values:
+//
+//	"mounted"         — blob exists, keyfile present, currently mounted
+//	"not mounted"     — blob exists but mapper isn't open / fs isn't mounted
+//	"not provisioned" — no blob (create-shared-volume.sh hasn't run)
+type SharedStorage struct {
+	Status        string // see comment above
+	Provisioned   bool
+	Mounted       bool
+	OnDiskBytes   int64 // real on-disk consumption of the sparse .img
+	UsedInner     int64 // bytes used inside the mounted ext4, 0 when not mounted
+	InnerCapacity int64 // ext4 size when mounted, 0 when not mounted
+	FreeInner     int64 // bytes free inside the mounted ext4, 0 when not mounted
 }
 
 // UserStorage is the per-user row in the storage panel.
@@ -91,11 +111,45 @@ func storageSnapshot(cfg config, users []string) StorageInfo {
 		si.NominalBytes += us.NominalBytes
 		si.Users = append(si.Users, us)
 	}
-	si.SystemBytes = si.TotalBytes - si.FreeBytes - si.UserOnDisk
+	si.Shared = sharedSnapshot(cfg)
+	// Account for the shared volume's on-disk footprint in the
+	// "system" residual so the storage bar adds up cleanly.
+	si.SystemBytes = si.TotalBytes - si.FreeBytes - si.UserOnDisk - si.Shared.OnDiskBytes
 	if si.SystemBytes < 0 {
 		si.SystemBytes = 0
 	}
 	return si
+}
+
+// sharedSnapshot reads the shared volume's on-disk + mount state.
+// Read-only; tolerates Stat/Statfs errors by zeroing the relevant fields.
+// Path is fixed (matches scripts/create-shared-volume.sh +
+// host/systemd/shared-store.service): the shared volume is system-
+// managed, not a per-user volume, so it doesn't go through volumePaths.
+func sharedSnapshot(cfg config) SharedStorage {
+	const sharedName = "_shared"
+	img := filepath.Join(cfg.storeDataDir, sharedName+".img")
+	mnt := filepath.Join(cfg.storeMntDir, sharedName)
+
+	ss := SharedStorage{Status: "not provisioned"}
+	if st, err := os.Stat(img); err == nil {
+		ss.Provisioned = true
+		ss.Status = "not mounted"
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			ss.OnDiskBytes = int64(sys.Blocks) * 512
+		}
+		if isMounted(mnt) {
+			ss.Mounted = true
+			ss.Status = "mounted"
+			var mfs syscall.Statfs_t
+			if err := syscall.Statfs(mnt, &mfs); err == nil {
+				ss.InnerCapacity = int64(mfs.Blocks) * int64(mfs.Bsize)
+				ss.UsedInner = int64(mfs.Blocks-mfs.Bfree) * int64(mfs.Bsize)
+				ss.FreeInner = int64(mfs.Bavail) * int64(mfs.Bsize)
+			}
+		}
+	}
+	return ss
 }
 
 func volumePaths(cfg config, user string) (img, mountpoint, mapper string) {

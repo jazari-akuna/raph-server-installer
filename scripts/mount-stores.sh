@@ -20,11 +20,17 @@ mnt_dir=/srv/store/mnt
 # Discover users from the *.img files present in $data_dir. The store image
 # filename is the user's login name. This avoids hardcoding admin usernames
 # into the script and stays correct as users are added/removed via the wizard.
+#
+# coordinated with Parcel 2B: the shared volume's image is created at
+# $data_dir/_shared.img by scripts/create-shared-volume.sh and mounted by
+# host/systemd/shared-store.service. We deliberately skip _shared here so
+# this per-user mount script never double-mounts or prompts for the shared
+# keyfile — that mount is handled by the dedicated systemd unit.
 users=()
 shopt -s nullglob
 for img in "$data_dir"/*.img; do
     bn="$(basename "$img" .img)"
-    [[ "$bn" == "_shared" ]] && continue   # shared volume handled separately
+    [[ "$bn" == "_shared" ]] && continue   # shared volume handled separately (Parcel 2B)
     users+=("$bn")
 done
 shopt -u nullglob

@@ -11,6 +11,15 @@
 
 set -euo pipefail
 
+# Wave 2A: regional-split + qedge are opt-in (blueprint § G1). The default
+# turnkey installer flow does NOT need gw0; the wizard turns it on later
+# if the operator enables the feature. Phase-2 bootstrap honours this gate
+# by setting SKIP_GW0=1 unless the operator overrides.
+if [[ "${SKIP_GW0:-1}" == "1" ]]; then
+  echo "[install-gw0] SKIP_GW0=1, skipping (regional-split is opt-in)"
+  exit 0
+fi
+
 if [[ $EUID -ne 0 ]]; then
   echo "must run as root" >&2
   exit 1

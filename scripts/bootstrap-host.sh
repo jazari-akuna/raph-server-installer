@@ -2,7 +2,11 @@
 # bootstrap-host.sh — Build Sequence Step 1: base host hardening.
 #
 # Run as root on a fresh Ubuntu 24.04 VPS, AFTER the laptop's deploy.sh has
-# rsync'd this repo's host/ tree to /root/host/. Idempotent — safe to re-run.
+# rsync'd this repo's host/ tree to /root/host/ (legacy laptop path) OR
+# under bootstrap.sh which symlinks /root/host -> /opt/raph-server-installer/host
+# (Phase 1 entrypoint expects DOMAIN to be exported and ADMIN_USERS to
+# have been set; bootstrap.sh threads both through). Idempotent — safe to
+# re-run.
 #
 # Out of scope (handled in later steps / manual follow-up):
 #   - sshd hardening drop-in (installed only after admin keys are verified)
@@ -14,6 +18,19 @@ set -euo pipefail
 if [[ $EUID -ne 0 ]]; then
   echo "must run as root" >&2
   exit 1
+fi
+
+# Persist DOMAIN to /etc/server-domain so downstream scripts that derive
+# values from it (provision-peer.sh, cert-renewal-hook.sh) Just Work even
+# if the operator runs them in a fresh shell. Idempotent: only writes when
+# DOMAIN is in the env, leaves an existing file alone otherwise.
+if [[ -n "${DOMAIN:-}" ]]; then
+  if [[ ! -f /etc/server-domain ]] \
+     || [[ "$(cat /etc/server-domain 2>/dev/null)" != "$DOMAIN" ]]; then
+    printf '%s\n' "$DOMAIN" > /etc/server-domain
+    chmod 0644 /etc/server-domain
+    echo "==> wrote /etc/server-domain ($DOMAIN)"
+  fi
 fi
 
 REPO_HOST_DIR="/root/host"
