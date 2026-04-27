@@ -59,6 +59,14 @@ FROM debian:trixie-slim
 #   docker-cli            — used to call `docker exec authelia authelia
 #                           storage user totp generate <user>` via the
 #                           bind-mounted /var/run/docker.sock.
+#   docker-compose-plugin — provides `docker compose` as a CLI subcommand.
+#                           The wizard's finalize step shells out to
+#                           `docker compose --profile finalize -f
+#                           ingress/docker-compose.yml run --rm certbot ...`
+#                           to issue the wildcard cert. Without the plugin
+#                           the docker CLI doesn't know `compose` is a
+#                           subcommand and parses `--profile` as a global
+#                           flag → "unknown flag: --profile".
 #   passwd / login        — useradd / userdel for host-side user
 #                           management; provided by the `passwd` package
 #                           in trixie.
@@ -88,6 +96,28 @@ RUN apt-get update \
         login \
         gettext-base \
  && rm -rf /var/lib/apt/lists/*
+
+# docker-compose-plugin isn't in the Debian apt repo (it's only published in
+# Docker's own apt repo, which we don't wire up in this image). Pull the
+# static binary from the upstream release directly. Pinned version matches
+# install-docker.sh's host-side compose plugin so finalize behaviour matches
+# what the operator gets if they run `docker compose` on the host. The
+# checksum is verified to fail-fast on a tampered download.
+ARG DOCKER_COMPOSE_VERSION=v2.32.2
+ARG DOCKER_COMPOSE_SHA256=e746a42f33113ca1057a72adff5f07d584b38c94dd7cc8368f6a30c276367710
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in x86_64) compose_arch=x86_64 ;; aarch64) compose_arch=aarch64 ;; \
+      *) echo "unsupported arch $arch for docker-compose static binary" >&2; exit 1 ;; \
+    esac; \
+    install -d /usr/libexec/docker/cli-plugins; \
+    wget -qO /usr/libexec/docker/cli-plugins/docker-compose \
+      "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${compose_arch}"; \
+    if [ "$compose_arch" = x86_64 ]; then \
+      echo "${DOCKER_COMPOSE_SHA256}  /usr/libexec/docker/cli-plugins/docker-compose" | sha256sum -c -; \
+    fi; \
+    chmod +x /usr/libexec/docker/cli-plugins/docker-compose; \
+    docker compose version
 
 COPY --from=build /out/enrol /usr/local/bin/enrol
 COPY web /app/web
