@@ -1640,10 +1640,19 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			AdvancedConfig:        fmt.Sprintf(npmAdvAuthPortalTmpl, st.Domain),
 		},
 		{
-			DomainNames:           []string{"enrol." + st.Domain},
-			ForwardScheme:         "http",
-			ForwardHost:           "enrol",
-			ForwardPort:           8080,
+			DomainNames:   []string{"enrol." + st.Domain},
+			ForwardScheme: "http",
+			// enrol runs with `network_mode: host` (it needs the host net
+			// namespace for `awg syncconf gw0`), so it has NO IP on the
+			// `edge` docker network and Docker DNS can't resolve "enrol"
+			// from the ingress container — the proxy_pass would 502 with
+			// "enrol could not be resolved". enrol binds ENROL_LISTEN to
+			// 172.17.0.1:8080 (the docker bridge gateway), which IS
+			// reachable from every bridge-attached container, so we
+			// forward there directly. Same trick that scripts/bootstrap-
+			// npm-setup-route.sh uses for the setup proxy host.
+			ForwardHost: "172.17.0.1",
+			ForwardPort: 8080,
 			BlockExploits:         true,
 			AllowWebsocketUpgrade: true,
 			CertificateID:         certID,
