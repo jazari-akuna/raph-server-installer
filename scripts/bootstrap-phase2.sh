@@ -78,25 +78,34 @@ fi
 
 # ──────────────────────────────────────────────────────────────────────────
 # Step 1 — verify AmneziaWG kernel module is loadable.
+# Only meaningful when gw0 (regional-split) is opted in; the default
+# turnkey flow neither installs nor needs amneziawg, so checking for it
+# would always fail and abort phase 2 before any docker stack came up.
 # ──────────────────────────────────────────────────────────────────────────
 
-log "==> verifying amneziawg kernel module"
-if [[ "${TEST_MODE:-0}" == "1" ]]; then
-  log "    TEST_MODE: skipping modinfo/modprobe amneziawg (DKMS not built in container)"
-else
-  if ! modinfo amneziawg >/dev/null 2>&1; then
-    fail "amneziawg kernel module not present after reboot — DKMS build failed. \
+SKIP_GW0="${SKIP_GW0:-1}"
+
+if [[ "$SKIP_GW0" != "1" ]]; then
+  log "==> verifying amneziawg kernel module"
+  if [[ "${TEST_MODE:-0}" == "1" ]]; then
+    log "    TEST_MODE: skipping modinfo/modprobe amneziawg (DKMS not built in container)"
+  else
+    if ! modinfo amneziawg >/dev/null 2>&1; then
+      fail "amneziawg kernel module not present after reboot — DKMS build failed. \
 Inspect /var/lib/dkms/amneziawg/*/build/make.log and the install-gw0.sh \
 remediation block."
-  fi
-  log "    amneziawg modinfo OK"
+    fi
+    log "    amneziawg modinfo OK"
 
-  # Don't load it pre-emptively — install-gw0.sh / awg-quick will pull it in
-  # when needed. modprobe-test it to surface any latent load failure now.
-  if ! modprobe -n amneziawg >/dev/null 2>&1; then
-    log "    WARNING: modprobe -n amneziawg failed; the module may still load \
+    # Don't load it pre-emptively — install-gw0.sh / awg-quick will pull it in
+    # when needed. modprobe-test it to surface any latent load failure now.
+    if ! modprobe -n amneziawg >/dev/null 2>&1; then
+      log "    WARNING: modprobe -n amneziawg failed; the module may still load \
 when awg-quick runs but this is suspicious"
+    fi
   fi
+else
+  log "==> SKIP_GW0=1 — skipping amneziawg module verification (gw0 is opt-in)"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -105,7 +114,6 @@ fi
 
 # Default: SKIP. Regional-split + qedge are opt-in features (blueprint § G1).
 # The wizard can re-run install-gw0.sh later if the operator turns it on.
-SKIP_GW0="${SKIP_GW0:-1}"
 if [[ "$SKIP_GW0" == "1" ]]; then
   log "==> SKIP_GW0=1 — skipping install-gw0.sh (regional-split is opt-in)"
 else
