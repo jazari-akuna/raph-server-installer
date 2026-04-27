@@ -178,11 +178,26 @@ AUTH_HEADER=(-H "Authorization: Bearer $TOKEN")
 SETUP_HOST="setup.$DOMAIN"
 DOMAIN_NAMES_JSON="$(jq -nc --arg setup "$SETUP_HOST" '[$setup]')"
 
+# advanced_config: nginx fragment NPM injects into this proxy host's
+# server{} block. Two requirements the default doesn't meet:
+#   - The wizard's /setup/events SSE stream stays silent for >60s during
+#     certbot's DNS propagation wait. NPM's default proxy_read_timeout
+#     of 60s slams the stream shut and the operator's browser shows
+#     "(reconnecting…)" — the operator thinks finalize crashed and
+#     hits Retry, kicking off a parallel certbot that locks against
+#     the first run. Bumping read/send timeouts to 600s + adding 30s
+#     SSE keepalives in enrol's handler keeps the stream alive end-to-end.
+#   - Default proxy_buffering=on collects the entire SSE response before
+#     forwarding, defeating the streaming entirely. Disable it for /events
+#     specifically and for the host as a whole (defence in depth).
+ADVANCED_CONFIG=$'proxy_read_timeout 600s;\nproxy_send_timeout 600s;\nproxy_buffering off;\nproxy_cache off;\nchunked_transfer_encoding on;\nlocation /setup/events {\n    proxy_pass http://$server:$port;\n    proxy_set_header Host $host;\n    proxy_http_version 1.1;\n    proxy_set_header Connection \'\';\n    proxy_buffering off;\n    proxy_cache off;\n    proxy_read_timeout 1h;\n    chunked_transfer_encoding on;\n}\n'
+
 PAYLOAD="$(jq -nc \
     --argjson names "$DOMAIN_NAMES_JSON" \
     --arg host "$FORWARD_HOST" \
     --arg port "$FORWARD_PORT" \
     --arg scheme "$FORWARD_SCHEME" \
+    --arg adv "$ADVANCED_CONFIG" \
     '{
         domain_names: $names,
         forward_scheme: $scheme,
@@ -197,7 +212,7 @@ PAYLOAD="$(jq -nc \
         http2_support: false,
         hsts_enabled: false,
         hsts_subdomains: false,
-        advanced_config: "",
+        advanced_config: $adv,
         meta: {letsencrypt_agree: false, dns_challenge: false},
         locations: []
     }')"
