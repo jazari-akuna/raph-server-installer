@@ -270,6 +270,48 @@ func (pc *parsedConf) removePeerByPubkey(path, pubkey string) (bool, error) {
 	return true, atomicWrite(path, []byte(out), 0o600)
 }
 
+// removePeersByPubkeys rewrites gw0.conf with EVERY matching [Peer] block
+// stripped, in a single pass: one read, one write. Use this for bulk
+// deletes (e.g. removeUserPeers cascading from a /users delete) — the
+// per-peer loop pattern (call removePeerByPubkey then re-loadConf) can
+// nil-deref if a single reload fails, and racks up N writes for N peers
+// each racing any concurrent read of gw0.conf.
+//
+// Pubkeys absent from the parsed conf are silently skipped (idempotent
+// end-state). Caller must not have mutated pc since loadConf.
+func (pc *parsedConf) removePeersByPubkeys(path string, pubkeys map[string]bool) error {
+	if len(pubkeys) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(pc.raw), "\n")
+	drop := make([]bool, len(lines))
+	for i := range pc.peers {
+		e := &pc.peers[i]
+		if !pubkeys[e.publicKey] {
+			continue
+		}
+		dropFrom := e.startLine
+		if dropFrom > 0 && strings.HasPrefix(strings.TrimSpace(lines[dropFrom-1]), "# peer:") {
+			dropFrom--
+		}
+		dropTo := e.endLine
+		if dropFrom > 0 && strings.TrimSpace(lines[dropFrom-1]) == "" {
+			dropFrom--
+		}
+		for k := dropFrom; k <= dropTo && k < len(lines); k++ {
+			drop[k] = true
+		}
+	}
+	keep := make([]string, 0, len(lines))
+	for i, ln := range lines {
+		if !drop[i] {
+			keep = append(keep, ln)
+		}
+	}
+	out := strings.Join(keep, "\n")
+	return atomicWrite(path, []byte(out), 0o600)
+}
+
 // listPeersWithMeta returns the merged view of [Peer] blocks + sidecar
 // metadata. Peers that have no sidecar entry (e.g. ones added by
 // scripts/provision-peer.sh, or by the prior version of enrol whose

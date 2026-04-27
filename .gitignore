@@ -12,6 +12,7 @@ peers/
 *.key
 *.crt
 *.pem
+*.secret
 *.env
 .env
 .env.*

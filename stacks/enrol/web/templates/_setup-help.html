@@ -1,0 +1,182 @@
+{{/*
+   _setup-help.html — per-platform AmneziaWG client install + .conf
+   import instructions, rendered as native <details> accordions (no JS).
+
+   Data passed in (setupHelpData from server.go):
+     .PeerName        string
+     .ClientConf      string
+     .QRDataURI       template.URL  (data:image/png;base64,...)
+     .Endpoint        string
+     .ApexDomain      string
+     .DefaultPlatform string  ("win"|"mac"|"linux"|"android"|"ios"|"unknown")
+
+   The accordion that matches DefaultPlatform is rendered with the
+   `open` attribute; the others are collapsed but reachable. On
+   "unknown", Windows opens by default.
+*/}}
+
+{{define "setup-help"}}
+<section class="setup-help" id="setup-help">
+  <h3>set up your device</h3>
+  <p class="hint">
+    Pick your operating system, install AmneziaWG, then import the
+    <code>{{.PeerName}}.conf</code> shown above (or scan the QR on a
+    phone). The same <code>.conf</code> works on every platform.
+  </p>
+
+  <details {{if or (eq .DefaultPlatform "win") (eq .DefaultPlatform "unknown")}}open{{end}}>
+    <summary>
+      <svg class="platform-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2" y="3" width="9" height="9" fill="currentColor"/>
+        <rect x="13" y="3" width="9" height="9" fill="currentColor"/>
+        <rect x="2" y="14" width="9" height="9" fill="currentColor"/>
+        <rect x="13" y="14" width="9" height="9" fill="currentColor"/>
+      </svg>
+      Windows
+    </summary>
+    <ol>
+      <li>
+        Download the <strong>AmneziaWG client for Windows</strong> from
+        <a href="https://amnezia.org/downloads" target="_blank" rel="noopener noreferrer">amnezia.org/downloads</a>
+        and install the <code>.msi</code>.
+      </li>
+      <li>Open AmneziaWG and click <strong>Import config from file</strong>.</li>
+      <li>Select <code>{{.PeerName}}.conf</code> (download it from this page).</li>
+      <li>Click <strong>connect</strong>.</li>
+    </ol>
+  </details>
+
+  <details {{if eq .DefaultPlatform "mac"}}open{{end}}>
+    <summary>
+      <svg class="platform-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="13" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>
+        <rect x="9" y="19" width="6" height="2" fill="currentColor"/>
+        <rect x="6" y="21" width="12" height="1" fill="currentColor"/>
+      </svg>
+      macOS
+    </summary>
+    <ol>
+      <li>
+        Download the <strong>AmneziaWG client for macOS</strong> from
+        <a href="https://amnezia.org/downloads" target="_blank" rel="noopener noreferrer">amnezia.org/downloads</a>
+        (Apple Silicon and Intel are both on the same page).
+      </li>
+      <li>Drag the app to <strong>Applications</strong> and open it.</li>
+      <li>Click <strong>Import config from file</strong> and select <code>{{.PeerName}}.conf</code>.</li>
+      <li>Click <strong>connect</strong>.</li>
+    </ol>
+  </details>
+
+  <details {{if eq .DefaultPlatform "linux"}}open{{end}}>
+    <summary>
+      <svg class="platform-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="9" r="5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <circle cx="10" cy="8" r="1" fill="currentColor"/>
+        <circle cx="14" cy="8" r="1" fill="currentColor"/>
+        <path d="M5 21 Q5 14 12 14 Q19 14 19 21 Z" fill="none" stroke="currentColor" stroke-width="2"/>
+      </svg>
+      Linux (CLI)
+    </summary>
+    <ol>
+      <li>
+        Install <code>amneziawg-tools</code>:
+        <ul>
+          <li>Debian/Ubuntu: <pre class="cmd">sudo apt install amneziawg-tools amneziawg-dkms</pre></li>
+          <li>Fedora: see <a href="https://github.com/amnezia-vpn/amneziawg-linux-kernel-module" target="_blank" rel="noopener noreferrer">amneziawg-linux-kernel-module</a>.</li>
+        </ul>
+      </li>
+      <li>
+        Place the <code>.conf</code> in the right directory:
+        <pre class="cmd">sudo install -m600 {{.PeerName}}.conf /etc/amnezia/amneziawg/{{.PeerName}}.conf</pre>
+      </li>
+      <li>
+        Bring the tunnel up:
+        <pre class="cmd">sudo awg-quick up {{.PeerName}}</pre>
+      </li>
+      <li>
+        To stop:
+        <pre class="cmd">sudo awg-quick down {{.PeerName}}</pre>
+      </li>
+    </ol>
+  </details>
+
+  <details>
+    <summary>
+      <svg class="platform-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="3" width="18" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M2 21 L22 21" stroke="currentColor" stroke-width="2"/>
+      </svg>
+      Linux (GUI)
+    </summary>
+    <ol>
+      <li>
+        Alternative to the CLI: install the <strong>AmneziaVPN AppImage</strong>
+        from
+        <a href="https://amnezia.org/downloads" target="_blank" rel="noopener noreferrer">amnezia.org/downloads</a>.
+      </li>
+      <li>Open the app and click <strong>Import config from file</strong>.</li>
+      <li>Select <code>{{.PeerName}}.conf</code> and connect.</li>
+    </ol>
+  </details>
+
+  <details {{if eq .DefaultPlatform "android"}}open{{end}}>
+    <summary>
+      <svg class="platform-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="6" y="3" width="12" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+        <circle cx="12" cy="18" r="1" fill="currentColor"/>
+      </svg>
+      Android
+    </summary>
+    <ol>
+      <li>
+        Install <strong>AmneziaWG</strong> from
+        <a href="https://play.google.com/store/apps/details?id=org.amnezia.awg" target="_blank" rel="noopener noreferrer">Google Play</a>
+        or F-Droid.
+      </li>
+      <li>In the app, tap <strong>+</strong>.</li>
+      <li>
+        Tap <strong>Scan QR code</strong> (recommended) and scan the QR
+        below, or tap <strong>Import from file</strong> and select
+        <code>{{.PeerName}}.conf</code>.
+      </li>
+    </ol>
+    {{if .QRDataURI}}
+    <p class="muted">Scan from your phone:</p>
+    <p><img class="qr" src="{{.QRDataURI}}" alt="device QR for {{.PeerName}}"></p>
+    {{end}}
+  </details>
+
+  <details {{if eq .DefaultPlatform "ios"}}open{{end}}>
+    <summary>
+      <svg class="platform-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="7" y="2" width="10" height="20" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+        <circle cx="12" cy="19" r="1" fill="currentColor"/>
+        <line x1="10" y1="4" x2="14" y2="4" stroke="currentColor" stroke-width="1"/>
+      </svg>
+      iOS
+    </summary>
+    <ol>
+      <li>
+        Install <strong>AmneziaWG</strong> from the
+        <a href="https://apps.apple.com/app/amneziawg/id6478942365" target="_blank" rel="noopener noreferrer">App Store</a>.
+      </li>
+      <li>Tap <strong>+</strong>.</li>
+      <li>
+        Tap <strong>Scan QR code</strong> and scan the QR below, or tap
+        <strong>Import from file</strong> and select <code>{{.PeerName}}.conf</code>.
+      </li>
+    </ol>
+    {{if .QRDataURI}}
+    <p class="muted">Scan from your phone:</p>
+    <p><img class="qr" src="{{.QRDataURI}}" alt="device QR for {{.PeerName}}"></p>
+    {{end}}
+  </details>
+
+  <p class="hint">
+    After connecting, visit
+    <a href="https://{{.ApexDomain}}" target="_blank" rel="noopener noreferrer">https://{{.ApexDomain}}</a>
+    from the device — you should see the apex login page.
+    Endpoint: <code>{{.Endpoint}}</code>
+  </p>
+</section>
+{{end}}

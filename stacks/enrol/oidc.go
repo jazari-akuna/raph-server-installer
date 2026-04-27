@@ -46,10 +46,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -198,7 +200,7 @@ func rotateOIDCConsoleSecret(envFilePath, plaintextPath string) error {
 	// being sourced by bash. (Compose's env-file parser strips the quotes.)
 	newLine := fmt.Sprintf("%s='%s'", oidcEnvVar, hash)
 	updated := replaceOrAppendEnvLine(string(envBytes), oidcEnvVar, newLine)
-	if err := atomicWriteFile(envFilePath, []byte(updated), 0o600); err != nil {
+	if err := atomicWriteFilePreservingMode(envFilePath, []byte(updated)); err != nil {
 		return fmt.Errorf("oidc: rewrite %s: %w", envFilePath, err)
 	}
 	return nil
@@ -264,6 +266,45 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, mode); err != nil {
 		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// atomicWriteFilePreservingMode rewrites path atomically (tmp + rename) while
+// preserving the existing file's mode and uid/gid. This matters for
+// /opt/stacks/.env, which may already exist with mode 0640 owned by
+// root:docker (or similar) so `docker compose` can read it — a blind
+// 0o600 root-owned rewrite would brick the next compose pull/up.
+//
+// If path doesn't exist yet, defaults to mode 0o600 and skips the chown
+// (caller is the only stakeholder for a brand-new file). Linux-only:
+// uid/gid extraction goes via syscall.Stat_t — fine, this is a Linux
+// service.
+func atomicWriteFilePreservingMode(path string, data []byte) error {
+	mode := os.FileMode(0o600)
+	var (
+		hasStat  bool
+		uid, gid int
+	)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			hasStat = true
+			uid = int(st.Uid)
+			gid = int(st.Gid)
+		}
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	if hasStat {
+		// Best-effort: chown failure (e.g. EPERM in a rootless test
+		// harness) is logged but not fatal — the rename will still
+		// succeed and the in-place mode is preserved.
+		if err := os.Chown(tmp, uid, gid); err != nil {
+			log.Printf("oidc: chown %s failed: %v (continuing)", tmp, err)
+		}
 	}
 	return os.Rename(tmp, path)
 }

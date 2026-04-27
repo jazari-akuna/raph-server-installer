@@ -204,6 +204,38 @@ func TestReplaceOrAppendEnvLineAppendsWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestRotateOIDCConsoleSecretPreservesEnvFileMode pins the contract that
+// the env-file rewrite uses the mode-preserving atomic write — so an
+// existing /opt/stacks/.env with mode 0640 (root:docker) keeps its mode
+// across rotation. A regression here would brick `docker compose`'s
+// ability to read the env file on the next pull/up.
+func TestRotateOIDCConsoleSecretPreservesEnvFileMode(t *testing.T) {
+	tmp := t.TempDir()
+	envPath := filepath.Join(tmp, ".env")
+	plaintextPath := filepath.Join(tmp, "oidc-secret")
+
+	original := oidcEnvVar + "='$pbkdf2-sha512$bootstrap-placeholder'\n"
+	if err := os.WriteFile(envPath, []byte(original), 0o640); err != nil {
+		t.Fatalf("seed env: %v", err)
+	}
+	// Re-chmod explicitly because the test process's umask may strip
+	// group bits at WriteFile time.
+	if err := os.Chmod(envPath, 0o640); err != nil {
+		t.Fatalf("chmod seed env: %v", err)
+	}
+
+	if err := rotateOIDCConsoleSecret(envPath, plaintextPath); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	info, err := os.Stat(envPath)
+	if err != nil {
+		t.Fatalf("stat env: %v", err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Errorf("env mode = %o after rotate, want 0640 (rewrite must preserve)", info.Mode().Perm())
+	}
+}
+
 // TestReadEnvVarStripsQuotes covers the three quoting styles bootstrap.sh
 // emits ('single', "double", and bare).
 func TestReadEnvVarStripsQuotes(t *testing.T) {

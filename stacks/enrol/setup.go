@@ -15,17 +15,21 @@
 //
 // AUTHENTICATION MODEL:
 //
-//   The wizard runs over PLAINTEXT HTTP (no cert yet). The only guard is
-//   the SETUP_TOKEN written by Phase 1 of bootstrap.sh into
-//   /etc/raph-installer/setup-token. The operator received it printed on
-//   the bootstrap completion banner. Every wizard request must carry it
-//   in either ?token= or the setup_token cookie (set by /setup on first
-//   visit). Once setup completes the token becomes useless — all
-//   /setup/* routes return 404 from then on (handled by setupRouteGate
-//   in server.go, not in the handlers themselves).
+//   The wizard runs over PLAINTEXT HTTP (no cert yet) and is intentionally
+//   unauthenticated FROM AUTHELIA'S PERSPECTIVE — there is no Authelia yet
+//   to authenticate against. The browser-facing trust boundary is DNS
+//   publication of setup.${DOMAIN}: only the operator (who set up the apex
+//   zone) can route a browser there. The window is short: setup mode
+//   closes the moment finalize touches /srv/store/.setup-complete, which
+//   removes the NPM proxy host (handled by setupRouteGate in server.go).
 //
-//   This is identical in spirit to NPM's first-boot admin: an out-of-band
-//   secret that flips to dead code on first successful use.
+//   BUT: enrol binds 172.17.0.1:8080 (the docker bridge gateway IP), so
+//   every container on the host can POST directly to /setup/* and drive
+//   the wizard, including writing DNS provider creds and the admin
+//   password hash. To stop that, requireSetupToken ALSO requires the
+//   X-Forward-Auth-Secret header (NPM injects it on the setup proxy host).
+//   Bridge attackers don't have the secret; legitimate browser requests
+//   that arrive through NPM do. See requireSetupToken below.
 //
 // STATE FILE LAYOUT (/srv/store/setup/state.json):
 //
@@ -64,6 +68,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -365,37 +370,33 @@ func (s *server) setupModeActive() bool {
 // ---------------------------------------------------------------------------
 // token check
 
-const setupCookieName = "setup_token"
-
-// requireSetupToken validates either ?token=... or the setup_token cookie.
-// On the very first GET /setup the token MUST come via query string; we
-// accept it, set an HttpOnly cookie, and redirect to /setup/domain so the
-// token doesn't linger in the browser address bar.
+// requireSetupToken gates every wizard endpoint on the X-Forward-Auth-Secret
+// header. Returns true on success; on failure writes a 401 response and
+// returns false (callers must immediately return without writing further
+// output).
 //
-// Constant-time compare to avoid trivial timing oracles — irrelevant at
-// our threat-model scale but cheap discipline.
-func (s *server) requireSetupToken(_ http.ResponseWriter, _ *http.Request) bool {
-	// Setup-mode access gate disabled: the wizard is reachable for anyone
-	// who can resolve setup.${DOMAIN} and route to it. The window is short
-	// (open only between bootstrap completion and the operator finishing
-	// the finalize step, which removes the proxy host), and DNS for the
-	// setup subdomain is the operator's own to control.
+// THREAT MODEL: pre-finalize there is no Authelia and no TLS, so cookie/
+// token gates would buy nothing — the trust boundary for browser access
+// is DNS publication of setup.${DOMAIN}. But enrol binds 172.17.0.1:8080,
+// the docker bridge gateway, which means every container on the host
+// (think: a copyparty CVE before TLS is even up) can POST to /setup/*
+// directly with curl. Without this check, that container could drive the
+// wizard end-to-end: write DNS provider creds, set the admin password
+// hash, kick finalize, and end up owning the box. The X-Forward-Auth-
+// Secret header is the right gate: NPM injects it on the setup proxy
+// host (advanced_config), bridge-only attackers don't have it. Same gate
+// as requireAuth uses for the post-finalize surface.
+//
+// Function name + signature kept stable: this is called from the route
+// table (handleSetupSub, handleSetupEvents) and a rename would ripple.
+func (s *server) requireSetupToken(w http.ResponseWriter, r *http.Request) bool {
+	if err := checkForwardAuthSecret(r, s.cfg); err != nil {
+		http.Error(w,
+			"401 — setup wizard requires forward-auth header (NPM proxy not wired)",
+			http.StatusUnauthorized)
+		return false
+	}
 	return true
-}
-
-// setSetupCookie persists the token for the rest of the wizard flow so
-// subsequent POSTs don't need ?token= on every form. HttpOnly + SameSite
-// strict; Secure intentionally OFF because the wizard runs over plain
-// HTTP until the wildcard cert is issued.
-func setSetupCookie(w http.ResponseWriter, value string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     setupCookieName,
-		Value:    value,
-		Path:     "/setup",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   60 * 60 * 4, // 4h — finalize cert issuance + buffer
-	})
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +412,9 @@ func (s *server) registerSetupRoutes(mux *http.ServeMux) {
 }
 
 func (s *server) handleSetupRoot(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSetupToken(w, r) {
+		return
+	}
 	// Serve the current wizard step inline at `/` so the operator never
 	// sees a redirect — the address bar stays at http://setup.${DOMAIN}/
 	// for the entry GET. Subsequent form POSTs use /setup/<step> URLs
@@ -1016,6 +1020,31 @@ func (s *server) handleSetupEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
+	// Disable the per-server WriteTimeout for this connection: the
+	// finalize pipeline can stream for 5+ minutes (cert issuance dominates)
+	// while main.go sets WriteTimeout=30s to bound every other handler.
+	// http.NewResponseController (Go 1.20+) is the supported way to
+	// override per-server deadlines without touching the global setting.
+	if rc := http.NewResponseController(w); rc != nil {
+		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+			// Best-effort: some test ResponseWriters don't support it.
+			log.Printf("setup-events: clear write deadline: %v", err)
+		}
+	}
+
+	// writeMu serializes every write+flush against the keepalive
+	// goroutine. Without it, a keepalive tick that fires mid-emit
+	// interleaves `: keepalive\n\n` bytes inside a `data:` frame and
+	// EventSource drops the message. Rare in practice but real,
+	// especially under HTTP/2 retries.
+	var writeMu sync.Mutex
+	writeFrame := func(b []byte) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_, _ = w.Write(b)
+		flusher.Flush()
+	}
+
 	// Keepalive ticker. 15s is well under any sane HTTP idle timeout
 	// (NPM defaults to 60s; the upstream nginx proxy_read_timeout is
 	// 60s by default).
@@ -1032,12 +1061,17 @@ func (s *server) handleSetupEvents(w http.ResponseWriter, r *http.Request) {
 				// Comment lines are ignored by EventSource consumers
 				// but reset proxy idle timers. Best-effort: a slow/dead
 				// writer surfaces as the next finalize step's write
-				// failing.
-				if _, err := io.WriteString(w, ": keepalive\n\n"); err != nil {
+				// failing. Serialized against emit via writeMu.
+				writeMu.Lock()
+				_, err := io.WriteString(w, ": keepalive\n\n")
+				if err == nil {
+					flusher.Flush()
+				}
+				writeMu.Unlock()
+				if err != nil {
 					cancel()
 					return
 				}
-				flusher.Flush()
 			}
 		}
 	}()
@@ -1046,8 +1080,7 @@ func (s *server) handleSetupEvents(w http.ResponseWriter, r *http.Request) {
 	// go. emit captures the writer + flusher in a closure so step funcs
 	// don't need to know about HTTP plumbing.
 	emit := func(event, payload string) {
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, payload)
-		flusher.Flush()
+		writeFrame([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", event, payload)))
 	}
 	emitStatus := func(step, msg string) {
 		emit("status", fmt.Sprintf(`{"step":%q,"msg":%q}`, step, msg))
@@ -1110,7 +1143,9 @@ func (s *server) runFinalize(
 			return wrapErr("users_db", err)
 		}
 		st.CompletedSteps.UsersDBWritten = true
-		_ = s.saveSetupState(st)
+		if err := s.saveSetupState(st); err != nil {
+			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
+		}
 	}
 
 	// 2. shared LUKS volume — provision at the operator's chosen size
@@ -1133,7 +1168,9 @@ func (s *server) runFinalize(
 			return wrapErr("shared_volume", err)
 		}
 		st.CompletedSteps.SharedVolReady = true
-		_ = s.saveSetupState(st)
+		if err := s.saveSetupState(st); err != nil {
+			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
+		}
 	}
 
 	// 2b. admin's personal LUKS volume — created at the operator-chosen
@@ -1160,7 +1197,9 @@ func (s *server) runFinalize(
 	}
 	if !st.CompletedSteps.AdminVolReady {
 		st.CompletedSteps.AdminVolReady = true
-		_ = s.saveSetupState(st)
+		if err := s.saveSetupState(st); err != nil {
+			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
+		}
 	}
 
 	// 3. rotate the OIDC console (Portainer) client_secret. MUST run
@@ -1182,7 +1221,9 @@ func (s *server) runFinalize(
 		// is what proves the new hash actually landed in configuration.yml.
 		logLine("oidc: client_secret rotated; plaintext at " + oidcPlaintextDefaultPath)
 		st.CompletedSteps.OIDCRotated = true
-		_ = s.saveSetupState(st)
+		if err := s.saveSetupState(st); err != nil {
+			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
+		}
 	}
 
 	// 4. render Authelia config + sibling templates.
@@ -1200,7 +1241,9 @@ func (s *server) runFinalize(
 		// `docker restart`s themselves.
 		reloadAuthelia(ctx, logLine)
 		st.CompletedSteps.TemplatesRender = true
-		_ = s.saveSetupState(st)
+		if err := s.saveSetupState(st); err != nil {
+			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
+		}
 	}
 
 	// 5. cert issuance via certbot — slowest step, stream stdout.
@@ -1213,7 +1256,9 @@ func (s *server) runFinalize(
 			return wrapErr("cert", err)
 		}
 		st.CompletedSteps.CertIssued = true
-		_ = s.saveSetupState(st)
+		if err := s.saveSetupState(st); err != nil {
+			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
+		}
 	}
 
 	// 6. wire NPM proxy hosts.
@@ -1226,7 +1271,9 @@ func (s *server) runFinalize(
 			return wrapErr("npm", err)
 		}
 		st.CompletedSteps.NPMRoutesWired = true
-		_ = s.saveSetupState(st)
+		if err := s.saveSetupState(st); err != nil {
+			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
+		}
 	}
 
 	// 7. apply the operator's chosen personal LUKS size to the live
@@ -1271,11 +1318,34 @@ func (s *server) runFinalize(
 		}
 		st.CompletedSteps.SentinelTouched = true
 		st.Step = stepDone
-		_ = s.saveSetupState(st)
+		if err := s.saveSetupState(st); err != nil {
+			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
+		}
 	}
 
 	// Drop the in-memory plaintext password — never needed again.
 	setupSecretCache.delete(st.AdminUsername)
+
+	// Scrub sensitive state.json fields. Setup is done; the wizard never
+	// re-reads these on success. Leaving them on-disk turns any future
+	// /srv/store/setup/ leak (misconfigured share, backup snapshot,
+	// path-traversal in another stack) into an offline argon2 crack target
+	// AND a live DNS-provider credential disclosure. Non-sensitive fields
+	// (Domain, AdminUsername, completed_steps, ...) are intentionally
+	// preserved so the "remove sentinel + re-walk" recovery recipe still
+	// resumes with the operator's original choices visible. Only run on
+	// success — on failure the operator may need the creds for a re-walk.
+	st.AdminPasswordHash = ""
+	st.DNSProviderCreds = nil
+	if err := s.saveSetupState(st); err != nil {
+		// Final state.json write — surface the error to the SSE
+		// stream / caller. The sentinel is already touched so setup is
+		// effectively done, but a silent persist failure here means the
+		// scrubbed state never lands on disk and the operator never
+		// learns; better to fail loudly so they can investigate
+		// /srv/store/setup/.
+		return wrapErr("save-state", err)
+	}
 
 	status("done", "all steps complete")
 	return nil
@@ -1465,24 +1535,38 @@ func (s *server) finalizeRenderTemplates(ctx context.Context, logLine func(strin
 // names already match certbot's expected keys); for Google the JSON blob
 // is written to a separate JSON file and only the path is referenced here.
 //
-// Returns: (mainINIBody, sidecarPath, sidecarBody). Sidecar is empty for
-// every provider except google.
-func dnsCredsINI(provider string, creds map[string]string) (string, string, string) {
+// Keys are emitted in lexicographic order so the output is deterministic
+// across runs (Go map iteration order is randomised). Values containing
+// CR or LF are rejected — DNS provider creds are opaque tokens and an
+// embedded newline is almost certainly an injection attempt or paste error.
+//
+// Returns: (mainINIBody, sidecarPath, sidecarBody, err). Sidecar is empty
+// for every provider except google.
+func dnsCredsINI(provider string, creds map[string]string) (string, string, string, error) {
 	if provider == "google" {
 		// google needs a JSON file + a tiny INI pointing at it.
 		jsonPath := "/srv/store/setup/google-creds.json"
 		jsonBody := creds["dns_google_credentials"]
 		ini := "dns_google_credentials = " + jsonPath + "\n"
-		return ini, jsonPath, jsonBody
+		return ini, jsonPath, jsonBody, nil
 	}
+	keys := make([]string, 0, len(creds))
+	for k := range creds {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var b strings.Builder
-	for k, v := range creds {
+	for _, k := range keys {
+		v := creds[k]
+		if strings.ContainsAny(v, "\n\r") {
+			return "", "", "", fmt.Errorf("dns creds key %q has newline; refusing to render", k)
+		}
 		b.WriteString(k)
 		b.WriteString(" = ")
 		b.WriteString(v)
 		b.WriteString("\n")
 	}
-	return b.String(), "", ""
+	return b.String(), "", "", nil
 }
 
 // certbotCredsHostDir is the tmpfs-backed directory the wizard writes the
@@ -1525,7 +1609,10 @@ func (s *server) finalizeIssueCert(ctx context.Context, st *setupState, logLine 
 	if err := os.MkdirAll(certbotCredsHostDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir %s: %w", certbotCredsHostDir, err)
 	}
-	ini, sidecarHostPath, sidecarBody := dnsCredsINI(st.DNSProvider, st.DNSProviderCreds)
+	ini, sidecarHostPath, sidecarBody, err := dnsCredsINI(st.DNSProvider, st.DNSProviderCreds)
+	if err != nil {
+		return fmt.Errorf("render dns creds INI: %w", err)
+	}
 	credsHostFile := filepath.Join(certbotCredsHostDir, st.DNSProvider+".ini")
 	credsContainerFile := "/tmp/certbot-creds/" + st.DNSProvider + ".ini"
 	if err := os.WriteFile(credsHostFile, []byte(ini), 0o600); err != nil {
@@ -1607,23 +1694,35 @@ const (
 	npmDefaultAdminPass  = "changeme"
 )
 
-// npmAdvFwdAuth — forward-auth advanced_config used by enrol/cloud/console
-// proxy hosts. Identical to wire-npm-routes.sh ADV_FWD_AUTH heredoc;
+// npmAdvFwdAuthTmpl — forward-auth advanced_config used by enrol/cloud/
+// console proxy hosts. The single `%s` slot is the X-Forward-Auth-Secret
+// (filled at finalize time from /etc/raph-installer/enrol-forward-auth.secret
+// → ENROL_FORWARD_AUTH_SECRET). Without the header injection, an attacker
+// who lands on the docker bridge can curl 172.17.0.1:8080 directly with
+// forged Remote-User / Remote-Groups and become root. The secret is hex
+// (alnum) so no nginx-config-special chars can appear inside the literal.
+//
 // nginx variables ($forward_scheme, $server, $port) are literal in the
 // templated config, NOT interpolated by Go.
-const npmAdvFwdAuth = `include /snippets/authelia-location.conf;
+const npmAdvFwdAuthTmpl = `include /snippets/authelia-location.conf;
+
+proxy_set_header X-Forward-Auth-Secret '%s';
 
 location / {
     include /snippets/proxy.conf;
     include /snippets/authelia-authrequest.conf;
+    proxy_set_header X-Forward-Auth-Secret '%[1]s';
     proxy_pass $forward_scheme://$server:$port;
 }
 `
 
-// npmAdvAuthPortalTmpl — auth-portal advanced_config. The bare GET / rewrite
-// includes the operator's domain, which is interpolated by fmt.Sprintf at
-// call time. All other $-prefixed identifiers are nginx variables and must
-// remain literal.
+// npmAdvAuthPortalTmpl — auth-portal advanced_config. Two `%s` slots:
+// (1) the operator's domain for the bare-GET 302, (2) the
+// X-Forward-Auth-Secret threaded through to the /login-intercept rewrite
+// (enrol's /login-intercept is reached via NPM forwarded as the regular
+// requireAuth path; without the header the new secret gate would 401).
+// All other $-prefixed identifiers are nginx variables and must remain
+// literal.
 const npmAdvAuthPortalTmpl = `location = / {
     if ($arg_rd = "") {
         return 302 /?rd=https://enrol.%s/;
@@ -1638,6 +1737,7 @@ location = /api/firstfactor {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forward-Auth-Secret '%s';
     proxy_http_version 1.1;
 }
 `
@@ -1735,6 +1835,22 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 	}
 	logLine(fmt.Sprintf("npm: certificate id=%d (PEM uploaded)", certID))
 
+	// X-Forward-Auth-Secret: read from the same env var enrol's startup
+	// uses (`ENROL_FORWARD_AUTH_SECRET`, written to /opt/stacks/.env by
+	// scripts/generate-enrol-forward-auth-secret.sh during phase 2). If
+	// it's empty here we ABORT — wiring proxy hosts without the header
+	// would leave enrol 401-ing every protected request the moment
+	// finalize completes (requireAuth fail-closes on empty secret), and
+	// the operator would see a mysterious post-finalize outage with no
+	// log line tying it back to the missing env var. Surfacing the
+	// misconfig HERE, at finalize time, is the right call.
+	fwdSecret := strings.TrimSpace(os.Getenv("ENROL_FORWARD_AUTH_SECRET"))
+	if fwdSecret == "" {
+		return errors.New("finalize/wire-npm: ENROL_FORWARD_AUTH_SECRET is empty — refusing to wire forgeable proxy hosts; re-run scripts/generate-enrol-forward-auth-secret.sh and retry finalize")
+	}
+	advFwdAuth := fmt.Sprintf(npmAdvFwdAuthTmpl, fwdSecret)
+	advAuthPortal := fmt.Sprintf(npmAdvAuthPortalTmpl, st.Domain, fwdSecret)
+
 	// The four proxy hosts. Order matches wire-npm-routes.sh; the
 	// advanced_config strings are byte-for-byte identical so cookies and
 	// in-flight Authelia sessions survive the swap-over.
@@ -1750,7 +1866,7 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			SSLForced:             true,
 			HTTP2Support:          true,
 			HSTSEnabled:           true,
-			AdvancedConfig:        fmt.Sprintf(npmAdvAuthPortalTmpl, st.Domain),
+			AdvancedConfig:        advAuthPortal,
 		},
 		{
 			DomainNames:   []string{"enrol." + st.Domain},
@@ -1772,7 +1888,7 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			SSLForced:             true,
 			HTTP2Support:          true,
 			HSTSEnabled:           true,
-			AdvancedConfig:        npmAdvFwdAuth,
+			AdvancedConfig:        advFwdAuth,
 		},
 		{
 			DomainNames:           []string{"cloud." + st.Domain},
@@ -1785,7 +1901,7 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			SSLForced:             true,
 			HTTP2Support:          true,
 			HSTSEnabled:           true,
-			AdvancedConfig:        npmAdvFwdAuth,
+			AdvancedConfig:        advFwdAuth,
 		},
 		{
 			DomainNames:           []string{"console." + st.Domain},
@@ -1798,7 +1914,7 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			SSLForced:             true,
 			HTTP2Support:          true,
 			HSTSEnabled:           true,
-			AdvancedConfig:        npmAdvFwdAuth,
+			AdvancedConfig:        advFwdAuth,
 		},
 	}
 

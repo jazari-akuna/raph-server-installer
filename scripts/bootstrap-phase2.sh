@@ -18,6 +18,12 @@
 # enable/disable of the unit is too.
 #
 # Logs: tee'd to /var/log/raph-installer/phase2.log + stdout.
+#
+# Upgrading an existing finalized deployment (sentinel /srv/store/.setup-complete
+# present) where the four production proxy hosts predate the forward-auth
+# secret? Run scripts/retrofit-enrol-forward-auth.sh once after the upgrade
+# pull — see docs/maintenance.md "Retrofitting forward-auth secret on
+# existing deployments". Phase 2 does NOT auto-invoke it.
 
 # ──────────────────────────────────────────────────────────────────────────
 # Strict mode + structured failure reporting (shared lib)
@@ -288,6 +294,24 @@ install -d -m 0700 -o root -g root /run/raph-certbot
 # operator's password survives an enrol restart mid-wizard.
 strict_step "ensure setup secrets tmpfs dir"
 install -d -m 0700 -o root -g root /run/raph-setup-secrets
+
+# Generate the shared X-Forward-Auth-Secret BEFORE bringing enrol up
+# so the env var is in /opt/stacks/.env when compose substitutes it
+# into enrol's container environment. enrol is fail-closed: if the
+# var is empty at startup, every protected route returns 401. The
+# same secret is consumed by bootstrap-npm-setup-route.sh below
+# (setup proxy host advanced_config) and by the wizard's finalize
+# step (the four steady-state proxy hosts). See
+# generate-enrol-forward-auth-secret.sh for the threat model.
+if [[ "${TEST_MODE:-0}" != "1" ]]; then
+  strict_step "generate enrol forward-auth secret"
+  log "==> generating enrol forward-auth secret (idempotent)"
+  run_subscript "$REPO_DIR/scripts/generate-enrol-forward-auth-secret.sh"
+  # Re-source the env file so the just-appended ENROL_FORWARD_AUTH_SECRET
+  # is available to bootstrap-npm-setup-route.sh further down (it reads
+  # via the same .env source pattern).
+  set -a; . "$ENV_FILE"; set +a
+fi
 
 compose_up ingress
 compose_up authelia

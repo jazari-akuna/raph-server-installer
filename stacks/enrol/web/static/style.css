@@ -156,3 +156,49 @@ dl dd { margin-left: 0; margin-bottom: 0.3em; }
 .launcher .tile-delete button:focus {
   opacity: 0.9;
 }
+
+/* peers.html row-actions cell: keep the "setup" link and the inline
+   delete form on the same line. */
+td.row-actions { white-space: nowrap; }
+td.row-actions form { display: inline; margin-left: 0.4em; }
+td.row-actions .button { font-size: 0.85em; padding: 0.2em 0.6em; }
+
+/* setup-help — per-platform AmneziaWG install instructions, rendered
+   as native <details> accordions on peer-created and peer-detail. */
+.setup-help { margin-top: 1.5em; }
+.setup-help h3 { border-bottom: 1px solid var(--border); padding-bottom: 0.25em; }
+.setup-help details {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5em 0.9em;
+  margin: 0.4em 0;
+  background: #fff;
+}
+.setup-help details[open] { background: #fafaf7; }
+.setup-help summary {
+  cursor: pointer;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 0.1em 0;
+}
+.setup-help summary::-webkit-details-marker { color: var(--muted); }
+.setup-help .platform-icon {
+  width: 24px;
+  height: 24px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.setup-help ol { margin: 0.6em 0 0.4em 1.2em; padding: 0; }
+.setup-help ol li { margin: 0.4em 0; }
+.setup-help ul { margin: 0.3em 0 0.3em 1.2em; padding: 0; }
+.setup-help pre.cmd {
+  background: #fff;
+  border: 1px solid var(--border);
+  padding: 0.55em 0.75em;
+  overflow-x: auto;
+  font-size: 0.85em;
+  margin: 0.35em 0;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}

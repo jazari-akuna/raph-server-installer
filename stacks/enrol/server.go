@@ -160,7 +160,14 @@ func (s *server) routes() http.Handler {
 	// IS the auth endpoint — no requireAuth, no CSRF. NPM rewrites only
 	// POST /api/firstfactor here; we proxy verbatim to Authelia and on
 	// success fire-and-forget a LUKS unlock for the user.
-	mux.HandleFunc("/login-intercept", s.handleLoginIntercept)
+	//
+	// We CAN'T wrap this in requireAuth (Authelia hasn't issued a cookie
+	// yet — Remote-User isn't set), but we MUST still refuse direct calls
+	// from the docker bridge, otherwise any container can POST forged
+	// credentials and trigger the LUKS-unlock side-effect. requireForwardAuth
+	// applies just the X-Forward-Auth-Secret check — NPM injects the
+	// header on the /api/firstfactor rewrite, bridge attackers don't.
+	mux.HandleFunc("/login-intercept", requireForwardAuth(s.cfg, s.handleLoginIntercept))
 
 	// Two-tier access model (see auth.go):
 	//   - requireAuth(cfg, false, ...): any authenticated user (admin OR
@@ -927,23 +934,35 @@ func (s *server) removeUserPeers(name, actor, auditPath string) error {
 			toRemove = append(toRemove, p)
 		}
 	}
+	if len(toRemove) == 0 {
+		return nil
+	}
+	// Single-pass rewrite. The previous loop called removePeerByPubkey
+	// per peer and then `pc, _ = loadConf(...)` to refresh state — but
+	// that swallowed the reload error, so a transient read failure left
+	// pc nil and the next iteration nil-deref'd. Rewriting all matched
+	// peers in one read+one write also collapses N file rewrites + N
+	// races against any concurrent reader of gw0.conf into one.
+	drop := make(map[string]bool, len(toRemove))
 	for _, p := range toRemove {
-		_, err := pc.removePeerByPubkey(confPath, p.PublicKey)
-		if err != nil {
+		drop[p.PublicKey] = true
+	}
+	if err := pc.removePeersByPubkeys(confPath, drop); err != nil {
+		// Mirror the operator's intent in the audit log so a failed
+		// cascade doesn't disappear silently.
+		for _, p := range toRemove {
 			writeAudit(auditPath, auditEntry{Action: "peer.remove", Actor: actor,
 				Target: p.Name, Result: "fail", Note: err.Error()})
-			continue
 		}
+		return err
+	}
+	for _, p := range toRemove {
 		_ = meta.delete(p.PublicKey)
 		writeAudit(auditPath, auditEntry{Action: "peer.remove", Actor: actor,
 			Target: p.Name, Result: "ok",
 			Pubkey: p.PublicKey, IP: p.IP})
-		// Re-read pc so the next iteration sees the rewritten file.
-		pc, _ = loadConf(confPath)
 	}
-	if len(toRemove) > 0 {
-		_ = reloadInterface(s.cfg.awgDir, s.cfg.awgIface)
-	}
+	_ = reloadInterface(s.cfg.awgDir, s.cfg.awgIface)
 	return nil
 }
 
@@ -965,6 +984,78 @@ type peersListData struct {
 	Users         []string
 	Tags          []string
 	Flash         string
+}
+
+// setupHelpData feeds web/templates/_setup-help.html. Everything is
+// computed per-request from the peer + cfg + UA — nothing here is
+// persisted. The QR is rendered inline as a base64 data-URI so it can't
+// be fetched separately or cached as its own resource (the existing
+// /peers/<name>/qr.png endpoint stays as is for the "QR" block above).
+type setupHelpData struct {
+	PeerName        string
+	ClientConf      string
+	QRDataURI       template.URL
+	Endpoint        string
+	ApexDomain      string
+	DefaultPlatform string // "win"|"mac"|"linux"|"android"|"ios"|"unknown"
+}
+
+// detectPlatform returns a coarse platform tag for the User-Agent. Only
+// used to decide which <details> block opens by default in the setup-
+// help section. Order matters: iPad/iPhone before "Mac OS X" (recent
+// iPadOS reports "Mac OS X"; the iPad keyword check above catches
+// most), and "Android" before "Linux" (Android UAs include "Linux").
+// We never log the UA — see buildSetupHelp.
+func detectPlatform(ua string) string {
+	switch {
+	case strings.Contains(ua, "iPhone"), strings.Contains(ua, "iPad"), strings.Contains(ua, "iPod"):
+		return "ios"
+	case strings.Contains(ua, "Android"):
+		return "android"
+	case strings.Contains(ua, "Windows"):
+		return "win"
+	case strings.Contains(ua, "Mac OS X"), strings.Contains(ua, "Macintosh"):
+		return "mac"
+	case strings.Contains(ua, "Linux"):
+		return "linux"
+	default:
+		return "unknown"
+	}
+}
+
+// buildSetupHelp shells out to qrencode (already in the Dockerfile;
+// reused from totp.go) and base64-encodes the PNG into a data: URI so
+// the partial template can <img src="data:..."> it inline.
+//
+// We deliberately do NOT log the conf, the QR, the data-URI, or the
+// User-Agent — the conf carries the peer's private key and the UA is
+// fingerprinting surface we don't need to retain.
+func (s *server) buildSetupHelp(r *http.Request, p peer, clientConf string) (setupHelpData, error) {
+	d := setupHelpData{
+		PeerName:        p.Name,
+		ClientConf:      clientConf,
+		Endpoint:        s.cfg.awgEndpoint,
+		ApexDomain:      s.cfg.domain,
+		DefaultPlatform: detectPlatform(r.UserAgent()),
+	}
+	png, err := qrencode(clientConf)
+	if err != nil {
+		// QR is convenience for mobile; the .conf import path still
+		// works on every platform without it. Surface the error so
+		// callers can decide whether to fail the whole render.
+		return d, err
+	}
+	d.QRDataURI = template.URL("data:image/png;base64," +
+		base64.StdEncoding.EncodeToString(png))
+	return d, nil
+}
+
+// noStore sets cache headers that prevent any intermediate cache from
+// retaining responses that contain peer secrets (.conf private key, QR
+// data-URI). Applied on peer-created and peer-detail.
+func noStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, private")
+	w.Header().Set("Pragma", "no-cache")
 }
 
 // awgEnabled reports whether AmneziaWG (gw0) is provisioned on this host
@@ -1026,6 +1117,15 @@ func (s *server) handlePeers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) renderPeerList(w http.ResponseWriter, r *http.Request, flash string) {
+	// Defence-in-depth: requireAuth already 401s when X-Enrol-User is
+	// missing, but a future routing change must not silently render every
+	// peer as if "" were a viewer. (For non-admins, an empty viewer would
+	// match the prefix "-" against every peer name, leaking nothing in
+	// today's data shape but still wrong-by-construction.)
+	if r.Header.Get("X-Enrol-User") == "" {
+		http.Error(w, "401 — authentication required", http.StatusUnauthorized)
+		return
+	}
 	csrf := ensureCSRF(w, r)
 	confPath := filepath.Join(s.cfg.awgDir, s.cfg.awgIface+".conf")
 	pc, err := loadConf(confPath)
@@ -1115,6 +1215,13 @@ func groupPeersByUser(all []peer, knownUsers []string) []peerGroup {
 }
 
 func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
+	// Defence-in-depth: see renderPeerList. requireAuth gates this
+	// handler today; the per-handler guard protects against a future
+	// routing change exposing the create-peer surface anonymously.
+	if r.Header.Get("X-Enrol-User") == "" {
+		http.Error(w, "401 — authentication required", http.StatusUnauthorized)
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
 		return
@@ -1155,7 +1262,7 @@ func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Reject duplicate name.
-	meta, _ := newMetaStore(filepath.Join(s.cfg.awgDir, "peers-meta.json"))
+	meta, metaErr := newMetaStore(filepath.Join(s.cfg.awgDir, "peers-meta.json"))
 	for _, p := range pc.listPeersWithMeta(meta) {
 		if p.Name == name {
 			http.Error(w, "device "+name+" already exists",
@@ -1187,7 +1294,14 @@ func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "write conf: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := meta.put(p); err != nil {
+	if metaErr != nil {
+		// Meta store init failed earlier — skip the put. The peer is
+		// already on the wire (gw0.conf appended above); failing the
+		// request now would be a ghost-peer surprise for the operator
+		// (UI says fail, but the device is live). Loud-log instead so
+		// removeUserPeers can be re-tried after the store is repaired.
+		log.Printf("WARNING: meta store init failed: %v — peer %s won't be tracked for owner %s", metaErr, name, user)
+	} else if err := meta.put(p); err != nil {
 		log.Printf("meta put: %v (peer added to gw0.conf anyway)", err)
 	}
 	writeAudit(auditPath, auditEntry{Action: "peer.add", Actor: actor,
@@ -1211,6 +1325,10 @@ func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	csrf := ensureCSRF(w, r)
+	help, helpErr := s.buildSetupHelp(r, p, clientConf)
+	if helpErr != nil {
+		log.Printf("buildSetupHelp %s: %v (rendering without QR)", p.Name, helpErr)
+	}
 	data := struct {
 		Title         string
 		User          string
@@ -1219,6 +1337,7 @@ func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 		Peer          peer
 		ClientConf    string
 		ReloadNote    string
+		SetupHelp     setupHelpData
 	}{
 		Title:         "device added",
 		User:          actor,
@@ -1227,8 +1346,10 @@ func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 		Peer:          p,
 		ClientConf:    clientConf,
 		ReloadNote:    reloadNote,
+		SetupHelp:     help,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	noStore(w)
 	if err := s.tmpl.ExecuteTemplate(w, "peer-created.html", data); err != nil {
 		log.Printf("template peer-created.html: %v", err)
 	}
@@ -1255,6 +1376,13 @@ func (s *server) devicesForUser(user string) []peer {
 }
 
 func (s *server) handlePeerSub(w http.ResponseWriter, r *http.Request) {
+	// Defence-in-depth: requireAuth normally gates this handler — but the
+	// /peers/<name>/conf and /peers/<name>/qr.png paths leak per-peer
+	// secrets, so 401 here too if the upstream gate is ever bypassed.
+	if r.Header.Get("X-Enrol-User") == "" {
+		http.Error(w, "401 — authentication required", http.StatusUnauthorized)
+		return
+	}
 	if !s.awgEnabled() {
 		// Same rationale as handlePeers: render the empty-state for
 		// safe (GET) verbs so the operator sees the explanation rather
@@ -1337,6 +1465,10 @@ func (s *server) handlePeerDetail(w http.ResponseWriter, r *http.Request, name s
 		return
 	}
 	clientConf := renderClientConf(p, pc, s.cfg)
+	help, helpErr := s.buildSetupHelp(r, p, clientConf)
+	if helpErr != nil {
+		log.Printf("buildSetupHelp %s: %v (rendering without QR)", p.Name, helpErr)
+	}
 	data := struct {
 		Title         string
 		User          string
@@ -1345,6 +1477,7 @@ func (s *server) handlePeerDetail(w http.ResponseWriter, r *http.Request, name s
 		Peer          peer
 		ClientConf    string
 		ArchiveExists bool
+		SetupHelp     setupHelpData
 	}{
 		Title:         "peer " + p.Name,
 		User:          r.Header.Get("X-Enrol-User"),
@@ -1353,8 +1486,10 @@ func (s *server) handlePeerDetail(w http.ResponseWriter, r *http.Request, name s
 		Peer:          p,
 		ClientConf:    clientConf,
 		ArchiveExists: archiveExists(s.cfg, p.Name),
+		SetupHelp:     help,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	noStore(w)
 	if err := s.tmpl.ExecuteTemplate(w, "peer-detail.html", data); err != nil {
 		log.Printf("template peer-detail.html: %v", err)
 	}
@@ -1420,7 +1555,10 @@ func (s *server) handleDownloadConf(w http.ResponseWriter, r *http.Request, name
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Content-Disposition",
 				fmt.Sprintf(`attachment; filename="%s.conf"`, name))
-			w.Write(b)
+			if _, err := w.Write(b); err != nil {
+				log.Printf("download conf %s: write failed: %v", name, err)
+				return
+			}
 			return
 		} else {
 			log.Printf("archive read %s: %v (falling back to render)", name, err)
@@ -1435,7 +1573,10 @@ func (s *server) handleDownloadConf(w http.ResponseWriter, r *http.Request, name
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="%s.conf"`, name))
-	io.WriteString(w, conf)
+	if _, err := w.Write([]byte(conf)); err != nil {
+		log.Printf("download conf %s: write failed: %v", name, err)
+		return
+	}
 }
 
 func (s *server) handleUploadPeerConf(w http.ResponseWriter, r *http.Request, name string) {

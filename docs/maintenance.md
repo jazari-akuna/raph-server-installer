@@ -526,6 +526,31 @@ just incrementally more correct.
 
 ---
 
+## Retrofitting forward-auth secret on existing deployments
+
+The four production NPM proxy hosts (`auth`/`enrol`/`cloud`/`console`)
+must inject `X-Forward-Auth-Secret` on every request — recent `enrol`
+revisions fail closed without it (any container on the docker bridge
+could otherwise forge `Remote-User` headers and become root). Boxes
+provisioned before the secret was introduced still wire those hosts
+without the header; pulling the upgrade flips `enrol` to fail-closed and
+every protected UI starts returning 401.
+
+One-shot retrofit (idempotent, never deletes existing hosts/certs):
+
+```sh
+sudo /opt/raph-server-installer/scripts/retrofit-enrol-forward-auth.sh
+```
+
+The script generates the secret if missing, logs into NPM with the
+bootstrap admin creds at `/etc/raph-installer/npm-bootstrap.pass` (or
+`NPM_EMAIL` / `NPM_PASS` if you've rotated past the bootstrap admin),
+and PUTs each of the four hosts with the updated `advanced_config`. Run
+it once per upgraded VPS; a second run is a no-op. New installs do this
+automatically via the wizard's finalize step.
+
+---
+
 ## Triage / log locations
 
 | Symptom                              | First place to look                                                                  |

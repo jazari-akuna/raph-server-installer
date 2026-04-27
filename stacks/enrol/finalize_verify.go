@@ -38,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -98,12 +99,22 @@ func (s *server) verifySharedVolume() error {
 	return fmt.Errorf("verify shared_volume: %s is not mounted (expected /dev/mapper/store_shared)", mountPoint)
 }
 
+// unrendered matches an envsubst-style placeholder of the form
+// ${SHOUTY_SNAKE_CASE} — the exact shape envsubst leaves behind when an
+// expected variable was unset. Tightened from a substring check on `${`
+// so this doesn't false-positive on configs that legitimately use shell
+// or nginx-style $variable syntax.
+var unrendered = regexp.MustCompile(`\$\{[A-Z_][A-Z0-9_]*\}`)
+
 // verifyTemplatesRendered asserts the rendered Authelia configuration.yml
 // contains NO bootstrap-placeholder strings AND that the OIDC console
-// client_secret is a syntactically-valid pbkdf2-sha512 hash. This is the
-// check that would have caught the silent failure: render-templates.sh
-// happily substituted `$pbkdf2-sha512$bootstrap-placeholder` from the
-// env var into the YAML, exited 0, and Authelia then refused to start.
+// client_secret is a syntactically-valid pbkdf2-sha512 hash. It also
+// scans for any leftover envsubst placeholder of the form ${UPPER_NAME}
+// (see the unrendered regex above) — that's the "envsubst silently
+// blanked an unset var" failure mode. This is the check that would have
+// caught the silent failure: render-templates.sh happily substituted
+// `$pbkdf2-sha512$bootstrap-placeholder` from the env var into the YAML,
+// exited 0, and Authelia then refused to start.
 func (s *server) verifyTemplatesRendered() error {
 	cfgPath := filepath.Join(s.cfg.stacksDir, "authelia/configuration.yml")
 	b, err := os.ReadFile(cfgPath)
@@ -122,12 +133,9 @@ func (s *server) verifyTemplatesRendered() error {
 	if strings.Contains(scrubbed, "REPLACE_ME") {
 		return fmt.Errorf("verify templates: %s still contains 'REPLACE_ME' tokens", cfgPath)
 	}
-	// Also assert no leftover ${VAR} tokens in active config — that's the
-	// "envsubst silently blanked an unset var" failure mode.
-	for _, line := range strings.Split(scrubbed, "\n") {
-		if strings.Contains(line, "${") && strings.Contains(line, "}") {
-			return fmt.Errorf("verify templates: %s has unsubstituted ${...} token: %q", cfgPath, strings.TrimSpace(line))
-		}
+	// Scan the file bytes for an envsubst-style ${UPPER_NAME} placeholder.
+	if m := unrendered.Find([]byte(scrubbed)); m != nil {
+		return fmt.Errorf("verify templates: %s has unsubstituted %s token", cfgPath, string(m))
 	}
 	// Dig out the OIDC client_secret line and pbkdf2-validate it.
 	hash := extractOIDCClientSecret(string(b))

@@ -47,6 +47,7 @@ var (
 
 func init() {
 	for _, c := range []string{
+		"0.0.0.0/8", // "this network" — Linux routes outbound 0.0.0.0 to localhost.
 		"10.0.0.0/8",
 		"172.16.0.0/12",
 		"192.168.0.0/16",
@@ -56,6 +57,12 @@ func init() {
 		"::1/128",
 		"fc00::/7",
 		"fe80::/10",
+		// We deliberately do NOT add "::ffff:0:0/96" — its (*net.IPNet).Contains
+		// matches every IPv4-mapped IPv6, which under Go's representation is
+		// also every IPv4 address (net.ParseIP("8.8.8.8") returns a 16-byte
+		// 4-in-6 slice). Adding it would block all v4 traffic, public included.
+		// IPv4-mapped IPv6 SSRF (e.g. http://[::ffff:127.0.0.1]/) is handled
+		// in isPrivateIP() below via To4() normalisation before the CIDR sweep.
 	} {
 		_, n, err := net.ParseCIDR(c)
 		if err != nil {
@@ -172,8 +179,21 @@ func removeOldIcons(dir, id string) error {
 }
 
 func isPrivateIP(ip net.IP) bool {
+	// Belt-and-braces: net.IP's own classifiers cover 0.0.0.0 / :: (Unspecified)
+	// and 127.0.0.0/8 / ::1 (Loopback) regardless of how the address was parsed,
+	// including IPv4-mapped forms like ::ffff:127.0.0.1.
+	if ip.IsUnspecified() || ip.IsLoopback() {
+		return true
+	}
+	// Normalise IPv4-mapped IPv6 to the canonical 4-byte form so the v4 CIDRs
+	// (10/8, 172.16/12, …) catch hosts typed as e.g. "[::ffff:10.0.0.1]". For
+	// non-mapped addresses To4() returns nil and we fall through to the raw ip.
+	probe := ip
+	if v4 := ip.To4(); v4 != nil {
+		probe = v4
+	}
 	for _, n := range privateBlocks {
-		if n.Contains(ip) {
+		if n.Contains(probe) {
 			return true
 		}
 	}

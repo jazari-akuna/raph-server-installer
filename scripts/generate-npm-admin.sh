@@ -61,11 +61,30 @@ pass="$(cat "$PASS_FILE")"
 # preserve any operator-supplied lines. Single-quoted to survive bash
 # sourcing AND docker-compose's .env reader (compose strips outer single
 # quotes per the compose-spec env-file format).
+#
+# Atomicity: the email and password lines MUST be written together — a
+# SIGKILL between two separate `>>` redirections would leave the env file
+# with the email line but no password, and the next NPM bootstrap attempt
+# would silently start from a broken admin pair. Build BOTH missing lines
+# into one buffer and write with ONE `>>` redirection. POSIX guarantees
+# writes ≤ PIPE_BUF (4096 bytes on Linux) to a regular file are atomic;
+# our buffer is at most ~120 bytes (two short KEY='VAL' lines) so a single
+# write() syscall covers it — no partial-append window.
+append_buf=""
 if ! grep -q '^NPM_INITIAL_ADMIN_EMAIL=' "$ENV_FILE"; then
-  printf "NPM_INITIAL_ADMIN_EMAIL='%s'\n" "$NPM_EMAIL" >> "$ENV_FILE"
-  log "added NPM_INITIAL_ADMIN_EMAIL to $ENV_FILE"
+  append_buf+="$(printf "NPM_INITIAL_ADMIN_EMAIL='%s'" "$NPM_EMAIL")"$'\n'
 fi
 if ! grep -q '^NPM_INITIAL_ADMIN_PASSWORD=' "$ENV_FILE"; then
-  printf "NPM_INITIAL_ADMIN_PASSWORD='%s'\n" "$pass" >> "$ENV_FILE"
-  log "added NPM_INITIAL_ADMIN_PASSWORD to $ENV_FILE"
+  append_buf+="$(printf "NPM_INITIAL_ADMIN_PASSWORD='%s'" "$pass")"$'\n'
+fi
+if [[ -n "$append_buf" ]]; then
+  printf '%s' "$append_buf" >> "$ENV_FILE"
+  # Log AFTER the append so a crash between the writes and the log lines
+  # doesn't leave stale "added X" output suggesting a partial state.
+  if [[ "$append_buf" == *NPM_INITIAL_ADMIN_EMAIL=* ]]; then
+    log "added NPM_INITIAL_ADMIN_EMAIL to $ENV_FILE"
+  fi
+  if [[ "$append_buf" == *NPM_INITIAL_ADMIN_PASSWORD=* ]]; then
+    log "added NPM_INITIAL_ADMIN_PASSWORD to $ENV_FILE"
+  fi
 fi

@@ -104,18 +104,23 @@ RUN apt-get update \
 # what the operator gets if they run `docker compose` on the host. The
 # checksum is verified to fail-fast on a tampered download.
 ARG DOCKER_COMPOSE_VERSION=v2.32.2
-ARG DOCKER_COMPOSE_SHA256=e746a42f33113ca1057a72adff5f07d584b38c94dd7cc8368f6a30c276367710
+ARG DOCKER_COMPOSE_SHA256_X86_64=e746a42f33113ca1057a72adff5f07d584b38c94dd7cc8368f6a30c276367710
+# aarch64 SHA from the same release's checksums.txt:
+#   https://github.com/docker/compose/releases/download/v2.32.2/checksums.txt
+# Without this pin, an arm64 build silently skipped sha256sum -c, so a tampered
+# release CDN payload would land inside this privileged container == host root.
+ARG DOCKER_COMPOSE_SHA256_AARCH64=c5b795b304410d46a754ecacfee36bf1f341e3bcd562a882525115e09ed90d6c
 RUN set -eux; \
     arch="$(uname -m)"; \
-    case "$arch" in x86_64) compose_arch=x86_64 ;; aarch64) compose_arch=aarch64 ;; \
+    case "$arch" in \
+      x86_64)  compose_arch=x86_64;  compose_sha="${DOCKER_COMPOSE_SHA256_X86_64}"  ;; \
+      aarch64) compose_arch=aarch64; compose_sha="${DOCKER_COMPOSE_SHA256_AARCH64}" ;; \
       *) echo "unsupported arch $arch for docker-compose static binary" >&2; exit 1 ;; \
     esac; \
     install -d /usr/libexec/docker/cli-plugins; \
     wget -qO /usr/libexec/docker/cli-plugins/docker-compose \
       "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${compose_arch}"; \
-    if [ "$compose_arch" = x86_64 ]; then \
-      echo "${DOCKER_COMPOSE_SHA256}  /usr/libexec/docker/cli-plugins/docker-compose" | sha256sum -c -; \
-    fi; \
+    echo "${compose_sha}  /usr/libexec/docker/cli-plugins/docker-compose" | sha256sum -c -; \
     chmod +x /usr/libexec/docker/cli-plugins/docker-compose; \
     docker compose version
 

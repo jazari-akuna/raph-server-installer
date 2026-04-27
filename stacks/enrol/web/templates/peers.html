@@ -20,7 +20,8 @@
             <td>{{.DeviceTag}}</td>
             <td>{{.AddedBy}}</td>
             <td>{{if .AddedAt.IsZero}}—{{else}}{{.AddedAt.Format "2006-01-02 15:04"}}{{end}}</td>
-            <td>
+            <td class="row-actions">
+              <a class="button" href="/peers/{{.Name}}#setup-help">setup</a>
               <form method="POST" action="/peers/{{.Name}}/delete"
                     onsubmit="return confirm('Remove device {{.Name}}?')">
                 <input type="hidden" name="csrf" value="{{$.CSRF}}">

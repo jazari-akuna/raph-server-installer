@@ -54,6 +54,17 @@ type config struct {
 	templatesDir  string
 	staticDir     string
 
+	// forwardAuthSecret is the shared secret NPM injects on every protected
+	// proxy host as `X-Forward-Auth-Secret`. enrol's requireAuth refuses
+	// requests that don't carry it BEFORE looking at Remote-User. This
+	// blocks header forgery from any container that can reach
+	// 172.17.0.1:8080 (the docker bridge gateway enrol binds to). Read
+	// from $ENROL_FORWARD_AUTH_SECRET — generated host-side by
+	// scripts/generate-enrol-forward-auth-secret.sh and threaded through
+	// /opt/stacks/.env. Empty value = fail-closed (every protected
+	// request 401s).
+	forwardAuthSecret string
+
 	// Users / Authelia integration.
 	usersDBPath       string // /etc/authelia/users_database.yml inside container
 	autheliaContainer string // "authelia"
@@ -120,6 +131,7 @@ func loadConfig() config {
 		headerUser:        envOr("ENROL_HEADER_USER", "Remote-User"),
 		headerGroups:      envOr("ENROL_HEADER_GROUPS", "Remote-Groups"),
 		requiredGroup:     envOr("ENROL_REQUIRED_GROUP", "admins"),
+		forwardAuthSecret: os.Getenv("ENROL_FORWARD_AUTH_SECRET"),
 		templatesDir:      envOr("ENROL_TEMPLATES", "/app/web/templates"),
 		staticDir:         envOr("ENROL_STATIC", "/app/web/static"),
 		usersDBPath:       envOr("ENROL_USERS_DB", "/etc/authelia/users_database.yml"),
