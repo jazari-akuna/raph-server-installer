@@ -53,6 +53,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1448,7 +1449,30 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			"(restart wizard at /setup/admin to re-enter)")
 	}
 	newPass := []byte(plaintext)
-	defaultPass := []byte(npmDefaultAdminPass)
+
+	// Resolve the CURRENT NPM admin (the one Bootstrap will rotate to the
+	// operator's chosen email). NPM 2.14 dropped the legacy
+	// admin@example.com/changeme default; scripts/generate-npm-admin.sh
+	// instead writes a random password to /etc/raph-installer/npm-bootstrap.pass
+	// and stamps INITIAL_ADMIN_EMAIL/PASSWORD into the ingress container env
+	// at compose-up time. Read both back here. Fall back to the legacy
+	// admin@example.com/changeme pair only if the file is absent — covers
+	// hypothetical re-runs against an older NPM that still ships the legacy
+	// defaults.
+	currentEmail := npmDefaultAdminEmail
+	currentPass := []byte(npmDefaultAdminPass)
+	if envEmail := strings.TrimSpace(os.Getenv("NPM_INITIAL_ADMIN_EMAIL")); envEmail != "" {
+		currentEmail = envEmail
+	}
+	if data, err := os.ReadFile("/etc/raph-installer/npm-bootstrap.pass"); err == nil {
+		bp := bytes.TrimRight(data, "\r\n")
+		if len(bp) > 0 {
+			currentPass = bp
+			if envEmail := strings.TrimSpace(os.Getenv("NPM_INITIAL_ADMIN_EMAIL")); envEmail == "" {
+				currentEmail = "bootstrap@local" // matches generate-npm-admin.sh default
+			}
+		}
+	}
 
 	npm := NewNPMClient(finalizeNPMBaseURL(), nil)
 
@@ -1458,7 +1482,7 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 	// Bootstrap covers UpsertProxyHost).
 	logLine("npm: bootstrapping admin credentials")
 	if err := npm.Bootstrap(ctx,
-		npmDefaultAdminEmail, defaultPass,
+		currentEmail, currentPass,
 		st.AdminEmail, newPass); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
