@@ -20,7 +20,7 @@
     <nav>
       <a href="/">apps</a>
       <a href="/users">users</a>
-      <a href="/peers">devices</a>
+      {{if awgEnabled}}<a href="/peers">devices</a>{{end}}
       <a href="/audit">audit</a>
     </nav>
     <div class="who">{{.User}}</div>

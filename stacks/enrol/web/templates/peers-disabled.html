@@ -1,0 +1,22 @@
+{{template "head" .}}
+
+<section>
+  <h2>devices</h2>
+  <p class="muted">
+    AmneziaWG (the regional split-tunnel VPN that backs the devices feature)
+    is not enabled on this server. AmneziaWG is opt-in: a default install
+    skips it because most operators don't need a per-user split tunnel.
+  </p>
+  <p>
+    To enable it, run <code>scripts/install-gw0.sh</code> on the host
+    (or set <code>SKIP_GW0=0</code> before re-running
+    <code>scripts/bootstrap-phase2.sh</code>). Once gw0 is up, this page
+    will list peer devices grouped by user and let you add new ones.
+  </p>
+  <p class="hint">
+    No peers exist yet — there is nothing to migrate or back up before
+    enabling. Existing user accounts and storage volumes are unaffected.
+  </p>
+</section>
+
+{{template "tail" .}}

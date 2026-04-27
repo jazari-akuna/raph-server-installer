@@ -124,7 +124,12 @@
   {{else}}
   <p>no devices yet.</p>
   {{end}}
+  {{if awgEnabled}}
   <p><a class="button" href="/peers">add device →</a></p>
+  {{else}}
+  <p class="hint">AmneziaWG not enabled on this server — devices feature
+    disabled. Run <code>scripts/install-gw0.sh</code> to turn it on.</p>
+  {{end}}
 </section>
 
 <section class="danger-zone">

@@ -42,6 +42,16 @@ func newServer(cfg config) (*server, error) {
 		// link in _layout.html). Captured by closure so we don't have to
 		// thread cfg.domain into every page-data struct.
 		"domain": func() string { return cfg.domain },
+		// awgEnabled reports whether AmneziaWG (regional split tunnel) is
+		// installed on this host, by checking for the existence of
+		// gw0.conf. Used by _layout.html to hide the "devices" nav entry
+		// on installs that opted out of gw0 (the default; opt-in via
+		// SKIP_GW0=0). Captured by closure for the same reason as domain.
+		"awgEnabled": func() bool {
+			path := filepath.Join(cfg.awgDir, cfg.awgIface+".conf")
+			_, err := os.Stat(path)
+			return err == nil
+		},
 		"gb": func(n int64) string {
 			return fmt.Sprintf("%.1f", float64(n)/(1<<30))
 		},
@@ -108,20 +118,35 @@ func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		// In setup mode we deliberately don't require gw0.conf: the
-		// wizard runs before AmneziaWG is provisioned (gw0 is opt-in
-		// via SKIP_GW0=0; see Wave 2A). Treat existence of the wizard
-		// itself as "ready" until setup completes.
+		// Healthz reports liveness of the enrol service itself: in setup
+		// mode we report "ok (setup mode)" so the dashboard knows the
+		// wizard is up; once the wizard completes (sentinel exists), we
+		// report plain "ok". We deliberately do NOT require gw0.conf:
+		// AmneziaWG (regional split tunnel) is opt-in via SKIP_GW0=0
+		// (default 1 — see scripts/bootstrap-phase2.sh), so on a default
+		// install gw0.conf will never exist and a check on it would keep
+		// the container "unhealthy" forever. The wizard's sentinel is
+		// the better signal of "setup is done"; for an explicit awg
+		// readiness probe see /healthz/awg.
 		if s.setupModeActive() {
 			fmt.Fprintln(w, "ok (setup mode)")
 			return
 		}
+		fmt.Fprintln(w, "ok")
+	})
+
+	// /healthz/awg — explicit signal of AmneziaWG availability. Always
+	// 200; the body indicates "present" or "absent". Use this from
+	// monitoring if you specifically care that gw0 was provisioned (e.g.
+	// alerting that an opt-in install silently failed). Healthz proper
+	// stays oblivious to gw0.
+	mux.HandleFunc("/healthz/awg", func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join(s.cfg.awgDir, s.cfg.awgIface+".conf")
 		if _, err := os.Stat(path); err != nil {
-			http.Error(w, "not ready: "+err.Error(), http.StatusServiceUnavailable)
+			fmt.Fprintln(w, "absent")
 			return
 		}
-		fmt.Fprintln(w, "ok")
+		fmt.Fprintln(w, "present")
 	})
 
 	mux.Handle("/static/", http.StripPrefix("/static/",
@@ -877,7 +902,52 @@ type peersListData struct {
 	Flash  string
 }
 
+// awgEnabled reports whether AmneziaWG (gw0) is provisioned on this host
+// by checking for gw0.conf. AmneziaWG is opt-in via SKIP_GW0=0 (default 1
+// — see scripts/bootstrap-phase2.sh "Step 2 — gw0 install"); on a default
+// install this returns false and the /peers UI renders an empty-state
+// page rather than 500ing on the missing file.
+func (s *server) awgEnabled() bool {
+	path := filepath.Join(s.cfg.awgDir, s.cfg.awgIface+".conf")
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// renderPeersDisabled renders the empty-state page for installs that
+// haven't enabled AmneziaWG. Keeps the layout chrome (header + nav) so
+// the operator can navigate away cleanly. Used by both /peers and
+// /peers/* handlers when gw0.conf is absent.
+func (s *server) renderPeersDisabled(w http.ResponseWriter, r *http.Request) {
+	csrf := ensureCSRF(w, r)
+	data := struct {
+		Title string
+		User  string
+		CSRF  string
+	}{
+		Title: "devices",
+		User:  r.Header.Get("X-Enrol-User"),
+		CSRF:  csrf,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.tmpl.ExecuteTemplate(w, "peers-disabled.html", data); err != nil {
+		log.Printf("template peers-disabled.html: %v", err)
+	}
+}
+
 func (s *server) handlePeers(w http.ResponseWriter, r *http.Request) {
+	if !s.awgEnabled() {
+		// Mutating verbs (POST/etc.) get a 503; the GET path renders the
+		// empty-state. POST shouldn't normally reach here since the form
+		// lives on the empty-state page, but defence in depth.
+		if r.Method != http.MethodGet {
+			http.Error(w, "AmneziaWG (gw0) is not installed; "+
+				"run scripts/install-gw0.sh on the host to enable devices",
+				http.StatusServiceUnavailable)
+			return
+		}
+		s.renderPeersDisabled(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.renderPeerList(w, r, "")
@@ -1093,6 +1163,20 @@ func (s *server) devicesForUser(user string) []peer {
 }
 
 func (s *server) handlePeerSub(w http.ResponseWriter, r *http.Request) {
+	if !s.awgEnabled() {
+		// Same rationale as handlePeers: render the empty-state for
+		// safe (GET) verbs so the operator sees the explanation rather
+		// than a hard error if they bookmark or paste a /peers/<name>
+		// URL on a default install.
+		if r.Method != http.MethodGet {
+			http.Error(w, "AmneziaWG (gw0) is not installed; "+
+				"run scripts/install-gw0.sh on the host to enable devices",
+				http.StatusServiceUnavailable)
+			return
+		}
+		s.renderPeersDisabled(w, r)
+		return
+	}
 	rest := strings.TrimPrefix(r.URL.Path, "/peers/")
 	if rest == "" {
 		http.Redirect(w, r, "/peers", http.StatusFound)
