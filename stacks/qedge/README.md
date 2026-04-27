@@ -5,17 +5,17 @@ Started only when the primary `gw0` (AmneziaWG) gateway path is silent under
 heavy regional pressure and an admin has decided to switch over.
 
 This README is the operational runbook for that switchover. Everything else
-about why this stack exists is in `docs/plan.md` (Step 11).
+about why this stack exists is in `docs/design.md` (Step 11).
 
 ## When to bring this up
 
 You bring `qedge` up when, **and only when**, all of the following hold:
 
-- `gw0` traffic from a probe client (yours or marcus's) is being dropped or
-  reset within seconds of bringing the tunnel up — i.e. active interference,
-  not just packet loss.
+- `gw0` traffic from a probe client is being dropped or reset within
+  seconds of bringing the tunnel up — i.e. active interference, not
+  just packet loss.
 - You've already verified the VPS itself is reachable (`mesh` works, the box
-  responds to pings or HTTPS on `cloud.antarctica-engineering.com`).
+  responds to pings or HTTPS on `cloud.${DOMAIN}`).
 - You've confirmed with the other admin (out-of-band) that the switch is
   happening, so neither of you wastes time debugging the wrong path.
 
@@ -24,7 +24,7 @@ If any of those is false: don't switch. The default daily driver is `gw0`.
 ## Cert provisioning (one-time, must run before first start)
 
 Hysteria2 needs a cert + key on disk. We reuse the wildcard
-`*.antarctica-engineering.com` cert that NPM (`ingress`) already provisioned
+`*.${DOMAIN}` cert that NPM (`ingress`) already provisioned
 via OVH DNS-01. NPM stores certs in numbered live/ directories under
 `/opt/stacks/ingress/letsencrypt/live/npm-N/` (the `N` is whatever number NPM
 assigned the cert when you created it in the admin UI — typically `npm-1`
@@ -36,7 +36,7 @@ On the VPS, as root:
 cd /opt/stacks/qedge
 
 # 1. find the right NPM cert directory (the one whose fullchain.pem covers
-#    *.antarctica-engineering.com — usually the first wildcard you made)
+#    *.${DOMAIN} — usually the first wildcard you made)
 ls -la /opt/stacks/ingress/letsencrypt/live/
 
 # 2. confirm the cert is the wildcard you expect
@@ -134,9 +134,9 @@ A pre-prepared **sing-box** client config is the recommended client for the
 `qedge` path. The pattern (full config generation is handled by the peer
 provisioning script later — out of scope for this stack):
 
-- Outbound: Hysteria2 to `cdn.antarctica-engineering.com:443/udp`,
+- Outbound: Hysteria2 to `cdn.${DOMAIN}:443/udp`,
   using `QEDGE_PASSWORD`, with `tls.server_name` =
-  `cdn.antarctica-engineering.com` (matches the wildcard SNI the server
+  `cdn.${DOMAIN}` (matches the wildcard SNI the server
   presents).
 - Route rules: built-in GeoIP database, with `{"geoip": ["cn"], "outbound":
   "direct"}` for domestic-direct split routing, and a default `proxy`
@@ -190,4 +190,4 @@ fi
 - `.env` is gitignored. `.env.example` ships with an empty placeholder.
 - Camouflage: nothing in this stack's paths, container name, or SNI says
   `hysteria` / `quic` / `vpn` / `tunnel`. The internal name is `qedge`; the
-  public hostname is `cdn.antarctica-engineering.com`.
+  public hostname is `cdn.${DOMAIN}`.

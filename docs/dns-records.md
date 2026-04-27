@@ -1,9 +1,9 @@
-# DNS Records — `antarctica-engineering.com` (OVH)
+# DNS Records — `<your-domain>` (default registrar: OVH)
 
 Operator reference. DNS is hosted at **OVH**. Records are direct-A only —
 no CDN / reverse-proxy / "AlwaysOn" fronting (see Out of scope).
 
-For design rationale see `docs/plan.md` § DNS Layout. For the OVH
+For design rationale see `docs/design.md` § DNS Layout. For the OVH
 application token (DNS-01 wildcard cert), see
 `stacks/ingress/README.md` § 2 — do not duplicate the steps here.
 
@@ -15,10 +15,10 @@ All point at the VPS public IPv4. No proxy in front. Same TTL for all four.
 
 | Name                              | Type | Target   | Notes                |
 |-----------------------------------|------|----------|----------------------|
-| `antarctica-engineering.com`      | A    | `VPS_IP` | apex                 |
-| `*.antarctica-engineering.com`    | A    | `VPS_IP` | wildcard             |
-| `gw.antarctica-engineering.com`   | A    | `VPS_IP` | gateway endpoint     |
-| `cdn.antarctica-engineering.com`  | A    | `VPS_IP` | alternate-ingress SNI|
+| `<your-domain>`      | A    | `VPS_IP` | apex                 |
+| `*.<your-domain>`    | A    | `VPS_IP` | wildcard             |
+| `gw.<your-domain>`   | A    | `VPS_IP` | gateway endpoint     |
+| `cdn.<your-domain>`  | A    | `VPS_IP` | alternate-ingress SNI|
 
 Apex + wildcard are what the wildcard LE cert covers (issued via DNS-01
 by `ingress`). `gw.` and `cdn.` exist as explicit names so peers connect
@@ -31,10 +31,10 @@ them — clearer intent for ops.
 
 | Subdomain                              | Service        | Public DNS? | Notes                                              |
 |----------------------------------------|----------------|-------------|----------------------------------------------------|
-| `cloud.antarctica-engineering.com`     | `cloud` (copyparty) | yes    | HTTPS via `ingress`; password-protected           |
-| `gw.antarctica-engineering.com`        | `gw0` endpoint | yes         | UDP/51820 — peers dial this hostname              |
-| `cdn.antarctica-engineering.com`       | `qedge` SNI    | yes         | UDP/443 (QUIC); presented as TLS handshake        |
-| `console.antarctica-engineering.com`   | `console` (Portainer) | **NO** | mesh-only; no public record by design             |
+| `cloud.<your-domain>`     | `cloud` (copyparty) | yes    | HTTPS via `ingress`; password-protected           |
+| `gw.<your-domain>`        | `gw0` endpoint | yes         | UDP/51820 — peers dial this hostname              |
+| `cdn.<your-domain>`       | `qedge` SNI    | yes         | UDP/443 (QUIC); presented as TLS handshake        |
+| `console.<your-domain>`   | `console` (Portainer) | **NO** | mesh-only; no public record by design             |
 | `ingress` admin (port 81)              | NPM admin UI   | **NO**      | mesh-only / SSH-tunnel; no public hostname        |
 | user-app subdomains                    | user stacks    | yes (covered by wildcard) | created on demand in `ingress`        |
 
@@ -61,11 +61,11 @@ Always query an off-OVH resolver so you don't see cache. Replace
 `<VPS_IP>` with the actual IP.
 
 ```sh
-dig +short @1.1.1.1 antarctica-engineering.com
-dig +short @1.1.1.1 wildcard-test-anything.antarctica-engineering.com
-dig +short @1.1.1.1 gw.antarctica-engineering.com
-dig +short @1.1.1.1 cdn.antarctica-engineering.com
-dig +short @8.8.8.8 antarctica-engineering.com    # cross-check second resolver
+dig +short @1.1.1.1 <your-domain>
+dig +short @1.1.1.1 wildcard-test-anything.<your-domain>
+dig +short @1.1.1.1 gw.<your-domain>
+dig +short @1.1.1.1 cdn.<your-domain>
+dig +short @8.8.8.8 <your-domain>    # cross-check second resolver
 ```
 
 All four `dig` calls must return exactly `<VPS_IP>` (single A line, no
@@ -74,7 +74,7 @@ All four `dig` calls must return exactly `<VPS_IP>` (single A line, no
 Negative checks (these should NOT resolve publicly):
 
 ```sh
-dig +short @1.1.1.1 console.antarctica-engineering.com    # expect: empty
+dig +short @1.1.1.1 console.<your-domain>    # expect: empty
 ```
 
 If `console` resolves publicly, somebody added a record they shouldn't
@@ -91,10 +91,9 @@ zone, and the rotation policy. Do not duplicate them here; if the
 process changes, change them there.
 
 Operational rules carried over for visibility:
-- Scope to `/domain/zone/antarctica-engineering.com/*` only. Never the
+- Scope to `/domain/zone/<your-domain>/*` only. Never the
   `/domain/zone/*` wildcard.
-- Rotate yearly. Both admins (sagan, marcus) hold the rotation
-  reminder.
+- Rotate yearly. Each admin holds the rotation reminder.
 - Tokens never go in git. `.env` is gitignored; only `.env.example`
   with placeholders is tracked.
 
@@ -112,4 +111,4 @@ Why: `gw0` (UDP/51820) and `qedge` (UDP/443 QUIC) ride raw IP — an
 HTTP-only proxy drops them. A TLS-terminating proxy in front of
 `ingress` also breaks the wildcard cert chain we issued and inserts an
 unwanted MITM. Re-opening this is a plan-level decision; see
-`docs/plan.md` § "Things explicitly NOT in scope".
+`docs/design.md` § "Things explicitly NOT in scope".

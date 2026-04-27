@@ -87,7 +87,6 @@ WORKDIR /app
 ENV ENROL_LISTEN=:8080 \
     ENROL_AWG_DIR=/etc/amnezia/amneziawg \
     ENROL_AWG_IFACE=gw0 \
-    ENROL_AWG_ENDPOINT=gw.antarctica-engineering.com:51820 \
     ENROL_PEER_SUBNET=10.99.0.0/24 \
     ENROL_PEER_START=10 \
     ENROL_HEADER_USER=Remote-User \
@@ -95,6 +94,9 @@ ENV ENROL_LISTEN=:8080 \
     ENROL_REQUIRED_GROUP=admins \
     ENROL_TEMPLATES=/app/web/templates \
     ENROL_STATIC=/app/web/static
+# ENROL_DOMAIN and ENROL_AWG_ENDPOINT are intentionally NOT defaulted in the
+# image — the compose file (or the operator) must supply them at runtime so
+# the image stays domain-agnostic.
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/enrol"]

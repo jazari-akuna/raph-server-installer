@@ -396,7 +396,7 @@ func renderClientConf(p peer, pc *parsedConf, cfg config) string {
 	}
 	allowed := "0.0.0.0/0,::/0"
 	for _, candidate := range []string{
-		"/var/cache/rarcus/allowed-ips.txt",
+		"/var/cache/raph/allowed-ips.txt",
 		filepath.Join(cfg.awgDir, "allowed-ips.txt"),
 	} {
 		if b, err := os.ReadFile(candidate); err == nil && len(b) > 0 {

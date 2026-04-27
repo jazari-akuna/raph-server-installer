@@ -1,6 +1,6 @@
 # enrol — server admin UI
 
-Public hostname: `enrol.antarctica-engineering.com`. Auth delegated to
+Public hostname: `enrol.${DOMAIN}` (e.g. `enrol.example.com`). Auth delegated to
 Authelia via NPM forward-auth: enrol trusts `Remote-User` and
 `Remote-Groups` headers. Membership of group `admins` is required for
 all routes besides the static healthcheck.
@@ -51,7 +51,7 @@ What this does NOT defend against:
 
 ## Auth flow
 
-1. Browser → `https://enrol.antarctica-engineering.com/users`.
+1. Browser → `https://enrol.${DOMAIN}/users`.
 2. NPM auth_request → `http://authelia:9091/api/verify`.
 3. No session → 401 → NPM 302s to the Authelia portal.
 4. Login + TOTP → Authelia sets the SSO cookie on the apex domain.
@@ -69,7 +69,7 @@ have to visit `/users/<u>/luks/unlock` from the launcher.
 
 ### How it works
 
-1. NPM's `auth.antarctica-engineering.com` site has a single extra
+1. NPM's `auth.${DOMAIN}` site has a single extra
    `location = /api/firstfactor` that proxies to the host-network
    `enrol` service at `http://172.17.0.1:8080/login-intercept` (see
    `wire-npm-routes.sh § ADV_AUTH_PORTAL`).
@@ -113,7 +113,7 @@ manually from the launcher.
 Each login produces (at most) one new audit entry:
 
 ```jsonl
-{"action":"luks.auto-unlock","actor":"sagan","target":"sagan","result":"ok","note":"via login"}
+{"action":"luks.auto-unlock","actor":"alice","target":"alice","result":"ok","note":"via login"}
 {"action":"luks.auto-unlock","actor":"alice","target":"alice","result":"fail","note":"wrong passphrase"}
 {"action":"luks.auto-unlock","actor":"bob","target":"bob","result":"fail","note":"no LUKS blob"}
 ```
@@ -220,10 +220,10 @@ Authelia, NPM, console (Portainer) do not need to be touched.
 
 ## Migration: adopting existing state
 
-On first run after upgrade, enrol enumerates `users_database.yml` and
-treats every entry as a managed user — including the existing `sagan`
-and `marcus` who were created out-of-band. Their LUKS blobs and peers
-are similarly adopted; nothing is rewritten until an operator action
+On first run after upgrade (or after operators created users
+out-of-band), enrol enumerates `users_database.yml` and treats every
+entry as a managed user. Pre-existing LUKS blobs and peers are
+similarly adopted; nothing is rewritten until an operator action
 modifies it. There is no "import" step.
 
 ## Environment
@@ -233,7 +233,8 @@ modifies it. There is no "import" step.
 | `ENROL_LISTEN`              | `172.17.0.1:8080` | bind address |
 | `ENROL_AWG_DIR`             | `/etc/amnezia/amneziawg` | gw0.conf + sidecars |
 | `ENROL_AWG_IFACE`           | `gw0` | interface |
-| `ENROL_AWG_ENDPOINT`        | `gw.antarctica-engineering.com:51820` | client endpoint |
+| `ENROL_DOMAIN`              | _(required)_                  | apex domain (e.g. `example.com`); URL roots derived from this |
+| `ENROL_AWG_ENDPOINT`        | `gw.${ENROL_DOMAIN}:51820`    | client endpoint |
 | `ENROL_PEER_SUBNET`         | `10.99.0.0/24` | peer subnet |
 | `ENROL_PEER_START`          | `10` | first host octet |
 | `ENROL_HEADER_USER`         | `Remote-User` | auth header |

@@ -5,9 +5,9 @@
 //   users:
 //     <name>:
 //       disabled: false
-//       displayname: 'Sagan'
+//       displayname: 'Alice'
 //       password: '$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>'
-//       email: 'sagan@…'
+//       email: 'alice@…'
 //       groups: ['admins']
 //
 // We use these five core fields plus YAML map order (preserved by

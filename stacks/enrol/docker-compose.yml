@@ -1,7 +1,11 @@
 # enrol — server admin UI (users, LUKS storage, TOTP, devices).
 #
-# Camouflage: external hostname is `enrol.antarctica-engineering.com`.
+# Camouflage: external hostname is `enrol.${DOMAIN}` (e.g. enrol.example.com).
 # Internal container/service name `enrol` is fine.
+#
+# ${DOMAIN} is read from /opt/stacks/.env, which bootstrap writes at install
+# time from the operator-supplied $DOMAIN. Compose substitutes it before
+# starting the container.
 #
 # Auth is delegated entirely to Authelia via NPM forward-auth. enrol
 # trusts the Remote-User and Remote-Groups headers and rejects any
@@ -134,7 +138,8 @@ services:
       ENROL_LISTEN: "172.17.0.1:8080"
       ENROL_AWG_DIR: "/etc/amnezia/amneziawg"
       ENROL_AWG_IFACE: "gw0"
-      ENROL_AWG_ENDPOINT: "gw.antarctica-engineering.com:51820"
+      ENROL_DOMAIN: "${DOMAIN:?DOMAIN must be set in /opt/stacks/.env}"
+      ENROL_AWG_ENDPOINT: "gw.${DOMAIN}:51820"
       ENROL_PEER_SUBNET: "10.99.0.0/24"
       ENROL_PEER_START: "10"
       ENROL_HEADER_USER: "Remote-User"

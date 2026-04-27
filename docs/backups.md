@@ -1,14 +1,14 @@
 # Backups — operator runbook
 
 Operational runbook for the encrypted-blob backup workflow. Implements
-build-sequence step 12 (`docs/plan.md`) and is exercised by verification
+build-sequence step 12 (`docs/design.md`) and is exercised by verification
 check 6.
 
 The hard rules from the plan, restated up front:
 
 - **Pull, not push.** The backup tool runs on the **admin's laptop**.
   The VPS holds **no** backup credentials and **no** restic binary.
-- **Per-admin repos.** sagan and marcus each maintain their own restic
+- **Per-admin repos.** Each admin maintains their own restic
   repository. They back up only their **own** `${user}.img`. There is
   no shared repo and no cross-admin access.
 - **The repo password lives on the laptop only.** Never on the VPS,
@@ -21,19 +21,19 @@ The hard rules from the plan, restated up front:
 ## Architecture
 
 ```
-        Admin laptop                         VPS (antarctica-engineering.com)
+        Admin laptop                         VPS (<your-domain>)
    ┌────────────────────────┐           ┌────────────────────────────────┐
-   │ ~/.cache/restic-rarcus/│           │ /srv/store/data/<user>.img      │
+   │ ~/.cache/restic-raph/  │           │ /srv/store/data/<user>.img      │
    │   <user>/<user>.img    │  rsync    │   (LUKS2 sparse blob, opaque)   │
    │     (staging mirror)   │ ◀────ssh──│                                 │
    │                        │           │ /home/<user>/.ssh/             │
    │ ~/.local/share/        │           │   authorized_keys              │
-   │   restic-rarcus/<user>/│           │   (forced-command lock)         │
+   │   restic-raph/<user>/  │           │   (forced-command lock)         │
    │     (restic repo)      │           │                                 │
    │                        │           │ NO restic, NO repo password.    │
    │ ~/.ssh/id_restic_<user>│           └────────────────────────────────┘
-   │ ~/.config/restic-      │
-   │   rarcus/<user>.passwd │
+   │ ~/.config/restic-raph/ │
+   │   <user>.passwd        │
    └────────────────────────┘
 ```
 
@@ -77,8 +77,8 @@ defeating the point. `rsync --inplace` is the fast path.
 
 ## One-time setup per admin laptop
 
-Do this once on each admin's laptop, replacing `<user>` with `sagan`
-or `marcus` and `<vps-host>` with the connection target.
+Do this once on each admin's laptop, replacing `<user>` with the admin's
+VPS username and `<vps-host>` with the connection target.
 
 ### 1. Install restic
 
@@ -172,17 +172,17 @@ have the timer service wrap it with `restic --password-command=…`, or
 store it in a 0600 file:
 
 ```sh
-mkdir -p ~/.config/restic-rarcus
+mkdir -p ~/.config/restic-raph
 umask 077
 # either prompt for it now and save, or paste it in via your editor:
-read -rsp "restic password for <user>: " p && echo "$p" > ~/.config/restic-rarcus/<user>.passwd
+read -rsp "restic password for <user>: " p && echo "$p" > ~/.config/restic-raph/<user>.passwd
 unset p
-chmod 0600 ~/.config/restic-rarcus/<user>.passwd
+chmod 0600 ~/.config/restic-raph/<user>.passwd
 
-mkdir -p ~/.local/share/restic-rarcus
+mkdir -p ~/.local/share/restic-raph
 restic init \
-    -r ~/.local/share/restic-rarcus/<user> \
-    --password-file ~/.config/restic-rarcus/<user>.passwd
+    -r ~/.local/share/restic-raph/<user> \
+    --password-file ~/.config/restic-raph/<user>.passwd
 ```
 
 If the laptop is lost, the repo is unrecoverable without that password.
@@ -247,7 +247,7 @@ systemctl --user start restic-backup-<user>.service
 The script (see `scripts/templates/restic-backup.sh`):
 
 1. `rsync`'s `/srv/store/data/<user>.img` from the VPS to
-   `~/.cache/restic-rarcus/<user>/<user>.img` over the dedicated SSH
+   `~/.cache/restic-raph/<user>/<user>.img` over the dedicated SSH
    key.
 2. Runs `restic backup` against the staged file with the `daily` tag.
 3. Runs `restic forget --prune` with the configured retention policy
@@ -264,14 +264,14 @@ from scratch.
 ```sh
 # 1. inspect snapshots
 restic snapshots \
-    -r ~/.local/share/restic-rarcus/<user> \
-    --password-file ~/.config/restic-rarcus/<user>.passwd
+    -r ~/.local/share/restic-raph/<user> \
+    --password-file ~/.config/restic-raph/<user>.passwd
 
 # 2. restore the latest snapshot (writes the .img tree under /tmp/recover)
 mkdir -p /tmp/recover
 restic restore latest \
-    -r ~/.local/share/restic-rarcus/<user> \
-    --password-file ~/.config/restic-rarcus/<user>.passwd \
+    -r ~/.local/share/restic-raph/<user> \
+    --password-file ~/.config/restic-raph/<user>.passwd \
     --target /tmp/recover
 
 # locate the restored .img — restic preserves the source path:
@@ -333,9 +333,8 @@ failure that has to be triaged before the next snapshot is taken.
   a single user's history (steady-state delta is small), but
   cross-user dedup is essentially worthless: each user's blob has its
   own LUKS master key, so the byte streams are uncorrelated. There is
-  no benefit to sharing a repo between sagan and marcus, and there
-  are real downsides (mutual access to each other's snapshot
-  metadata).
+  no benefit to sharing a repo between admins, and there are real
+  downsides (mutual access to each other's snapshot metadata).
 - **Backups continue to work whether or not `mount-stores.sh` has
   been run.** The `.img` file exists on disk regardless of mount
   state — it's a plain sparse file. Mount state affects only the

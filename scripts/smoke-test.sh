@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# smoke-test.sh — programmatic verification runner for rarcus-server.
+# smoke-test.sh — programmatic verification runner for raph-server-installer.
 #
 # Mirrors docs/verification.md as code. Designed to be run from the
 # operator's laptop (not on the VPS): laptop-side checks hit public DNS
@@ -10,12 +10,19 @@
 # the count of FAILs, so cron / CI can branch on it.
 #
 # Usage:
-#   ./scripts/smoke-test.sh
-#   VPS_HOST=foo.example VPS_USER=marcus ./scripts/smoke-test.sh
+#   VPS_HOST=foo.example VPS_USER=<admin> DOMAIN=foo.example ./scripts/smoke-test.sh
 #
-# Environment:
-#   VPS_HOST           Default: antarctica-engineering.com
-#   VPS_USER           Default: sagan
+# Environment (all required unless noted):
+#   VPS_HOST           SSH-reachable hostname or IP of the VPS.
+#   VPS_USER           SSH login username on the VPS.
+#   DOMAIN             Apex domain the installer is hosting on (e.g. example.com).
+#                      Used to derive subdomain hosts (auth, gw, cdn, cloud, ...).
+#   EXPECTED_IP        Public IPv4 the apex/wildcard records should resolve to.
+#                      If unset, the script skips DNS-IP equality checks.
+#   PEER_SUBNET        AWG peer subnet for NAT MASQUERADE rule check.
+#                      Default: 10.99.0.0/24
+#   CHNROUTES_PATH     Filesystem path to the chnroutes cache file on the VPS.
+#                      Default: /var/cache/raph/chnroutes.txt
 #   RESTIC_REPOSITORY  If set, Section 6 actually runs. If unset, skipped.
 #
 # Conventions:
@@ -32,10 +39,18 @@ set -uo pipefail
 # config
 # ---------------------------------------------------------------------------
 
-VPS_HOST="${VPS_HOST:-antarctica-engineering.com}"
-VPS_USER="${VPS_USER:-sagan}"
-EXPECTED_IP="43.228.124.145"
-APEX="antarctica-engineering.com"
+VPS_HOST="${VPS_HOST:-}"
+VPS_USER="${VPS_USER:-}"
+APEX="${DOMAIN:-}"
+EXPECTED_IP="${EXPECTED_IP:-}"
+PEER_SUBNET="${PEER_SUBNET:-10.99.0.0/24}"
+CHNROUTES_PATH="${CHNROUTES_PATH:-/var/cache/raph/chnroutes.txt}"
+
+if [[ -z "$VPS_HOST" || -z "$VPS_USER" || -z "$APEX" ]]; then
+    echo "smoke-test.sh: VPS_HOST, VPS_USER, and DOMAIN are required env vars." >&2
+    exit 2
+fi
+
 WILDCARD_HOST="anything.${APEX}"
 GW_HOST="gw.${APEX}"
 CDN_HOST="cdn.${APEX}"
@@ -44,7 +59,6 @@ CONSOLE_HOST="console.${APEX}"
 ENROL_HOST="enrol.${APEX}"
 AUTH_HOST="auth.${APEX}"
 EXPECTED_CN="*.${APEX}"
-PEER_SUBNET="10.99.0.0/24"
 
 # ssh options reused everywhere
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new)
@@ -84,6 +98,15 @@ dns_check() {
     local name="$1" host="$2"
     local got
     got="$(dig @1.1.1.1 +short +time=3 +tries=2 "$host" 2>/dev/null | grep -E '^[0-9]+\.' | head -1)"
+    if [[ -z "$EXPECTED_IP" ]]; then
+        # No expected IP supplied — assert only that *something* resolves.
+        if [[ -n "$got" ]]; then
+            pass "$name resolves to $got"
+        else
+            fail "$name" "no A record returned"
+        fi
+        return
+    fi
     if [[ "$got" == "$EXPECTED_IP" ]]; then
         pass "$name resolves to $EXPECTED_IP"
     else
@@ -153,7 +176,7 @@ cert_cn_check() {
     subject="$(openssl s_client -connect "${CLOUD_HOST}:443" -servername "${CLOUD_HOST}" \
         </dev/null 2>/dev/null \
         | openssl x509 -noout -subject 2>/dev/null || true)"
-    # subject example: subject=CN = *.antarctica-engineering.com
+    # subject example: subject=CN = *.<your-domain>
     if [[ "$subject" == *"$EXPECTED_CN"* ]]; then
         pass "cert CN is ${EXPECTED_CN}"
     else
@@ -265,14 +288,16 @@ printf "store-mount-instances\t%s\n" "${inst:-<none-active>}"
 '
 probe fail2ban_banned  bash -c 'sudo fail2ban-client status sshd 2>/dev/null | awk -F: "/Total banned/ {gsub(/ /,\"\",\$2); print \$2}" || echo 0'
 
-# Section 7 — chnroutes2 cache freshness
-probe chnroutes_cache  bash -c 'sudo find /var/cache/rarcus/chnroutes.txt -mtime -35 2>/dev/null || true'
+# Section 7 — chnroutes2 cache freshness. Path is injected by laptop side.
+probe chnroutes_cache  bash -c "sudo find ${__CHNROUTES_PATH__} -mtime -35 2>/dev/null || true"
 REMOTE
 }
 
 run_host_probes() {
     local script
     script="$(build_remote_script)"
+    # Substitute laptop-side env into the remote script (single token).
+    script="${script//__CHNROUTES_PATH__/${CHNROUTES_PATH}}"
     HOST_REPORT="$(ssh "${SSH_OPTS[@]}" "${VPS_USER}@${VPS_HOST}" 'bash -s' \
         <<<"$script" 2>/dev/null)" || return 1
     return 0
@@ -579,7 +604,7 @@ run_chnroutes_section() {
     section "7/7" "chnroutes2"
     local out
     out="$(extract_block chnroutes_cache | tr -d '[:space:]')"
-    if [[ "$out" == "/var/cache/rarcus/chnroutes.txt" ]]; then
+    if [[ "$out" == "${CHNROUTES_PATH}" ]]; then
         pass "chnroutes.txt fresh (<35 days)"
     else
         fail "chnroutes.txt" "missing or stale (>35 days) — refresh via update-route-tables.sh"
@@ -591,7 +616,7 @@ run_chnroutes_section() {
 # ---------------------------------------------------------------------------
 
 main() {
-    printf '=== rarcus-server smoke test ===\n'
+    printf '=== raph-server-installer smoke test ===\n'
     printf 'target: %s@%s\n' "$VPS_USER" "$VPS_HOST"
 
     run_dns_section

@@ -1,17 +1,17 @@
 # authelia — SSO gate for the shared VPS.
 #
-# Camouflage: external hostname is `auth.antarctica-engineering.com`.
+# Camouflage: external hostname is `auth.${DOMAIN}` (e.g. auth.example.com).
 # Internal container/service name `authelia` is fine — the camouflage layer
 # only constrains user-visible artifacts (DNS, paths, banner-grabbable).
 #
 # Reachable only via `ingress` over the `edge` network on :9091.
-# No public port binding. NPM proxies auth.antarctica-engineering.com →
-# authelia:9091 (with bypass policy — see DESIGN.md).
+# No public port binding. NPM proxies `auth.${DOMAIN}` → authelia:9091
+# (with bypass policy — see DESIGN.md).
 #
 # Three forms of secret material live next to this compose:
 #   .env              jwt/session/storage/oidc-hmac secrets   (mode 0600)
 #   secrets/oidc-key.pem   RSA-2048 PKCS#8 OIDC issuer key     (mode 0600)
-#   users_database.yml     argon2id pw hashes for sagan/marcus (mode 0600)
+#   users_database.yml     argon2id pw hashes for each admin   (mode 0600)
 # All three are gitignored; .example shells live in the repo.
 
 services:

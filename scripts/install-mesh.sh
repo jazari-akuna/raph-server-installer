@@ -4,7 +4,7 @@
 #
 # Camouflage: the overlay is referred to as `mesh` everywhere in this repo and
 # in any operational doc. The package itself is `tailscale` — package names are
-# explicitly out of scope for the camouflage layer (see docs/plan.md). What we
+# explicitly out of scope for the camouflage layer (see docs/design.md). What we
 # DO control: the host's tailnet name (the `--hostname=` we recommend below)
 # and the fact that no public DNS / no inbound public port advertises this
 # service. The mesh is the ONLY external path to the `console` (Portainer) and
@@ -25,11 +25,11 @@
 #
 # Usage:
 #     # Interactive (default): operator clicks the printed URL in a browser
-#     sudo TS_HOSTNAME=ls-462561-52263 ./install-mesh.sh
+#     sudo TS_HOSTNAME=<neutral-hostname> ./install-mesh.sh
 #
 #     # Unattended (CI / automated bring-up): pre-generate a reusable
 #     # auth key in the Tailscale admin console and pass it in
-#     sudo TAILSCALE_AUTHKEY=tskey-auth-... TS_HOSTNAME=ls-462561-52263 \
+#     sudo TAILSCALE_AUTHKEY=tskey-auth-... TS_HOSTNAME=<neutral-hostname> \
 #         ./install-mesh.sh
 #
 # Env:
@@ -112,18 +112,16 @@ cat <<EOF
 ================================================================
 mesh node is up. Reach this VPS over the tailnet at:
 
-    ssh sagan@${TS_HOSTNAME}
-    ssh marcus@${TS_HOSTNAME}
+    ssh <admin>@${TS_HOSTNAME}
 
 The mesh is the only external path to:
 
     console (Portainer)         https://${TS_HOSTNAME}:9443
     ingress (NPM admin panel)   http://${TS_HOSTNAME}:81
 
-Both admins must also join the tailnet from their own dev machines:
+Each admin must also join the tailnet from their own dev machines:
 
-    sagan:  on laptop, run \`tailscale up\` and authenticate.
-    marcus: on laptop, run \`tailscale up\` and authenticate.
+    on laptop, run \`tailscale up\` and authenticate.
 
 Optional UDP-throughput tweak (Tailscale recommends; see
 https://tailscale.com/s/ethtool-config-udp-gro):

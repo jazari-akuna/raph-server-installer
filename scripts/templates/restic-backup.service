@@ -4,15 +4,15 @@
 # restic-backup.timer for scheduled invocation. Substitute the <USER>
 # placeholder before installing:
 #
-#   sed "s/<USER>/sagan/g" restic-backup.service \
-#       > ~/.config/systemd/user/restic-backup-sagan.service
-#   sed "s/<USER>/sagan/g" restic-backup.timer \
-#       > ~/.config/systemd/user/restic-backup-sagan.timer
+#   sed "s/<USER>/alice/g" restic-backup.service \
+#       > ~/.config/systemd/user/restic-backup-alice.service
+#   sed "s/<USER>/alice/g" restic-backup.timer \
+#       > ~/.config/systemd/user/restic-backup-alice.timer
 #   systemctl --user daemon-reload
-#   systemctl --user enable --now restic-backup-sagan.timer
+#   systemctl --user enable --now restic-backup-alice.timer
 #
 # Placeholders:
-#   <USER>  — sagan | marcus. Used to name the script and to build the
+#   <USER>  — VPS account name. Used to name the script and to build the
 #             unit description. Must match the USER_NAME baked into
 #             ~/.local/bin/restic-backup-<USER>.sh.
 #
@@ -23,7 +23,7 @@
 
 [Unit]
 Description=restic pull-backup of /srv/store/data/<USER>.img
-Documentation=file:///%h/Projects/rarcus-server/docs/backups.md
+Documentation=file:///%h/Projects/raph-server-installer/docs/backups.md
 Wants=network-online.target
 After=network-online.target
 

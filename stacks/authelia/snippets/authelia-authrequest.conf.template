@@ -1,5 +1,9 @@
 # authelia-authrequest.conf — the auth_request + Remote-* header forward.
 #
+# This file is a TEMPLATE — render via render-templates.sh, which substitutes
+# ${DOMAIN} from /etc/server-domain. The rendered .conf (without the
+# .template extension) is gitignored and used by NPM directly.
+#
 # Include this inside the `location / {}` (or any other protected
 # location) of an NPM proxy host. It performs the auth_request subrequest
 # against the /authelia internal location and, on success, forwards the
@@ -24,4 +28,4 @@ proxy_set_header Remote-Email      $email;
 
 # On 401 from the auth_request: send the user to the Authelia portal,
 # preserving the originally-requested URL via ?rd=.
-error_page 401 =302 https://auth.antarctica-engineering.com/?rd=$target_url;
+error_page 401 =302 https://auth.${DOMAIN}/?rd=$target_url;

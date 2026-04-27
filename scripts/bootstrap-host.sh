@@ -17,7 +17,15 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 REPO_HOST_DIR="/root/host"
-ADMINS=(sagan marcus)
+# ADMIN_USERS is supplied by the bootstrap orchestrator (whitespace-separated).
+# In the turnkey installer flow the wizard creates exactly one admin, so the
+# array has a single entry. The script supports multiple entries for operators
+# who pre-seed admins through ADMIN_USERS before running this step.
+read -r -a ADMINS <<<"${ADMIN_USERS:-}"
+if [[ ${#ADMINS[@]} -eq 0 ]]; then
+  echo "ADMIN_USERS env var must list one or more admin usernames" >&2
+  exit 1
+fi
 
 echo "==> apt update + full-upgrade"
 export DEBIAN_FRONTEND=noninteractive
@@ -150,21 +158,20 @@ Step 1 base hardening: DONE
 ================================================================
 
 NEXT: install the sshd hardening drop-in — but ONLY after you have
-verified that BOTH admin keys work in a fresh session.
+verified that every admin key works in a fresh session.
 
 Verification commands (run from your laptop, in a NEW terminal,
 keeping this root session open as a safety net):
 
-    ssh sagan@<vps-ip>  'whoami && sudo -n true || sudo -v'
-    ssh marcus@<vps-ip> 'whoami && sudo -n true || sudo -v'
+    ssh <admin>@<vps-ip>  'whoami && sudo -n true || sudo -v'
 
-Both must succeed. Then, on the VPS as root:
+Repeat for each admin. All must succeed. Then, on the VPS as root:
 
     install -m 644 /root/host/ssh/sshd_config.d/99-hardening.conf \
         /etc/ssh/sshd_config.d/99-hardening.conf
     sshd -t && systemctl reload ssh
 
-After reload, open ANOTHER fresh ssh as sagan/marcus before closing
+After reload, open ANOTHER fresh ssh as <admin> before closing
 this root session. If the new session works, you're done with Step 1.
 
 Reminder: ufw is staged but not active. Enable it in Step 3 after

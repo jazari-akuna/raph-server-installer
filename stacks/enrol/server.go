@@ -37,6 +37,11 @@ type server struct {
 func newServer(cfg config) (*server, error) {
 	tmpl := template.New("").Funcs(template.FuncMap{
 		"join": strings.Join,
+		// domain returns the apex domain for use in templates that need
+		// to construct externally-facing URLs (e.g. the Authelia logout
+		// link in _layout.html). Captured by closure so we don't have to
+		// thread cfg.domain into every page-data struct.
+		"domain": func() string { return cfg.domain },
 		"gb": func(n int64) string {
 			return fmt.Sprintf("%.1f", float64(n)/(1<<30))
 		},
@@ -69,7 +74,7 @@ func newServer(cfg config) (*server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse templates %s: %w", pattern, err)
 	}
-	if err := bootstrapLauncher(cfg.launcherDir); err != nil {
+	if err := bootstrapLauncher(cfg.launcherDir, cfg.domain); err != nil {
 		return nil, fmt.Errorf("bootstrap launcher: %w", err)
 	}
 	if err := ensureArchiveDir(cfg); err != nil {

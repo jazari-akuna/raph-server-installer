@@ -1,0 +1,114 @@
+# raph-server-installer — continuous integration
+#
+# Runs on every push to main and on every pull request. Lints shell
+# scripts, builds + vets the enrol Go service, sanity-checks every
+# compose file, and verifies the template-rendering pipeline against
+# .env.example.
+#
+# Each job is intentionally narrow so a failure points at one thing.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck on all shell scripts
+        # Find every *.sh file under the repo (excluding vendored content),
+        # run shellcheck with the -x flag so source-followed scripts are
+        # checked too. SC1091 is suppressed because some scripts source
+        # files that only exist on the target host (e.g. /etc/server-domain).
+        run: |
+          set -e
+          mapfile -t scripts < <(find . -type f -name '*.sh' \
+            -not -path './.git/*' \
+            -not -path './tests/*' \
+            | sort)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "no shell scripts found"
+            exit 0
+          fi
+          printf '%s\n' "${scripts[@]}"
+          shellcheck -x -e SC1091 "${scripts[@]}"
+
+  go-build:
+    name: Go build / vet (enrol)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: stacks/enrol
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+          cache-dependency-path: stacks/enrol/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+  compose-check:
+    name: docker compose config
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render templates with example env
+        # The compose files reference ${DOMAIN} and other env vars via the
+        # compose-level :? error indicator. Source .env.example so the
+        # config check has values to interpolate, then run `docker compose
+        # config` per stack. A failure here means a syntax error or an
+        # unresolved variable.
+        run: |
+          set -e
+          set -a
+          # shellcheck disable=SC1091
+          source .env.example
+          set +a
+          for stack in stacks/*/docker-compose.yml; do
+            dir=$(dirname "${stack}")
+            echo "::group::compose config: ${dir}"
+            (cd "${dir}" && docker compose config --quiet)
+            echo "::endgroup::"
+          done
+
+  render-templates:
+    name: render-templates.sh smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run render-templates.sh against .env.example
+        # TODO: Wave 2A wires render-templates.sh — until that script
+        # exists, this job soft-passes (prints a notice) so CI does not
+        # block 1B-vintage PRs. Once 2A lands, drop the conditional and
+        # let the script's own exit code drive the job.
+        run: |
+          set -e
+          if [ -x scripts/render-templates.sh ]; then
+            set -a
+            # shellcheck disable=SC1091
+            source .env.example
+            set +a
+            scripts/render-templates.sh --check
+          else
+            echo "::notice::scripts/render-templates.sh not present yet — skipping (wave 2A)"
+          fi

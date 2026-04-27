@@ -2,16 +2,16 @@
 #
 # Camouflage: service/container/network use the neutral name `cloud`.
 # No public port bindings — reachable only via `ingress`
-# (cloud.antarctica-engineering.com) over the shared `edge` network.
+# (`cloud.${DOMAIN}`) over the shared `edge` network.
 # copyparty's default port is 3923; we expose nothing to the host.
 #
 # Identity comes from Authelia via NPM forward-auth. See
 # ./conf/copyparty.conf and ../authelia/DESIGN.md.
 #
-# Volume semantics: /srv/store/mnt/{sagan,marcus} on the host are LUKS
-# unlock points. When the per-user blob is NOT unlocked these are empty
-# directories, and copyparty serves an empty volume — fail-closed by
-# accident, intentional. See ./README.md.
+# Volume semantics: /srv/store/mnt/<u> on the host are LUKS unlock
+# points (one per user). When the per-user blob is NOT unlocked these
+# are empty directories, and copyparty serves an empty volume —
+# fail-closed by accident, intentional. See ./README.md.
 
 services:
   cloud:
@@ -35,9 +35,8 @@ services:
     volumes:
       # Per-user data roots, served as a single bind-mount.
       #
-      # PRIOR LAYOUT (deprecated): two static per-user binds
-      #     /srv/store/mnt/sagan:/w/sagan
-      #     /srv/store/mnt/marcus:/w/marcus
+      # PRIOR LAYOUT (deprecated): one static per-user bind per user
+      #     /srv/store/mnt/<u>:/w/<u>
       # which required editing this file + recreating the container
       # for every new user.
       #
@@ -71,8 +70,8 @@ services:
       PYTHONUNBUFFERED: "1"
       # Per-user password hashes are no longer used: identity is
       # delegated to Authelia via the IdP headers configured in
-      # ./conf/copyparty.conf. SAGAN_PW_HASH / MARCUS_PW_HASH are
-      # intentionally dropped here.
+      # ./conf/copyparty.conf. Per-user hash env vars are intentionally
+      # dropped here.
 
     # Allow the thumbnailer to drain on shutdown (matches upstream advice).
     stop_grace_period: 15s

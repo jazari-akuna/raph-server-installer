@@ -1,10 +1,10 @@
 # claude-readme
 
-Entry point for any Claude session that opens this repo. Read `docs/plan.md` first — it is the canonical design and the source of truth.
+Entry point for any Claude session that opens this repo. Read `docs/design.md` first — it is the canonical design and the source of truth.
 
 ## What this repo is
 
-The editable, git-tracked source of truth for a shared LayerStack VPS bring-up. The VPS is a small box (2 vCPU, 4 GB RAM, 150 GB disk, public IPv4, CN2-GIA backbone, domain `antarctica-engineering.com`) that two co-admins (sagan, marcus) use as a Docker host, reverse-proxied app platform, encrypted file server, and remote-access gateway with regional split routing for users behind heavy filtering.
+The editable, git-tracked source of truth for a turnkey VPS installer (raph-server-installer). The VPS is a small box (2 vCPU, 4 GB RAM, 150 GB disk, public IPv4, CN2-GIA backbone, domain configured per install) used as a Docker host, reverse-proxied app platform, encrypted file server, and remote-access gateway with regional split routing for users behind heavy filtering.
 
 ## Current state
 
@@ -14,11 +14,11 @@ Just bootstrapped. The repo scaffold (`docs/`, `stacks/`, `host/`, `scripts/`) e
 
 Edit on this laptop. Commit. Deploy to the VPS via `scripts/deploy.sh` (rsync of `stacks/` + `host/` + reload systemd). Do not edit files directly on the VPS — the server filesystem must remain reproducible from this repo.
 
-The repo layout, build sequence, and verification steps are all in `docs/plan.md`. Start at **Step 0** of the build sequence and work down. Each step is intended to be runnable and verifiable on its own.
+The repo layout, build sequence, and verification steps are all in `docs/design.md`. Start at **Step 0** of the build sequence and work down. Each step is intended to be runnable and verifiable on its own.
 
 ## Load-bearing conventions a fresh agent must respect
 
-These are decisions made in the brainstorming session that produced `docs/plan.md`. They are easy to violate accidentally if you skip the plan.
+These are decisions made in the brainstorming session that produced `docs/design.md`. They are easy to violate accidentally if you skip the plan.
 
 - **Camouflage naming.** Public DNS, file paths, container names, systemd units, and script names never use the words `vpn`, `wireguard`, `amnezia`, `tunnel`, `stealth`, `vault`, `luks`, `crypt`, `tailscale`, or `hysteria`. Use the neutral vocabulary defined in the plan: `ingress`, `console`, `cloud`, `gw0`, `qedge`, `mesh`, `store`. This is defense-in-depth against passive observation, not against a shell-level attacker — package install names are out of scope.
 - **Admin UIs are not on public DNS.** Portainer (`console`) and the NPM admin panel (`ingress` admin) are reachable only via the `mesh` overlay or SSH tunnel. Do not create public proxy hosts for them.
@@ -31,7 +31,7 @@ These are decisions made in the brainstorming session that produced `docs/plan.m
 
 ## What lives where
 
-- `docs/plan.md` — the design doc. Read it before doing anything.
+- `docs/design.md` — the design doc. Read it before doing anything.
 - `docs/` — additional docs as the project grows (operational runbooks, recovery procedures, etc.).
 - `stacks/` — Docker Compose stacks deployed to the VPS via `console`. One subfolder per stack.
 - `host/` — files that go directly onto the VPS host filesystem (sysctl, ufw fragments, systemd units, gateway config templates).

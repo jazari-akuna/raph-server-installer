@@ -317,13 +317,12 @@ cat <<'EOF'
 Step 8 gw0 install: DONE
 ================================================================
 
-NEXT (Step 9): generate peer configs.
+NEXT (Step 9): generate peer configs (one per device).
 
-    /opt/scripts/provision-peer.sh sagan
-    /opt/scripts/provision-peer.sh marcus
+    /opt/scripts/provision-peer.sh <device-name>
 
 Each invocation appends a [Peer] block to /etc/amnezia/amneziawg/gw0.conf
-and emits peers/<user>-<device>.conf + QR on the laptop side.
+and emits peers/<device-name>.conf + QR on the laptop side.
 
 If `awg show gw0` printed nothing or `ip -d link` shows the interface
 DOWN, check:

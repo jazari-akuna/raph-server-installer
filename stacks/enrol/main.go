@@ -35,6 +35,12 @@ import (
 // configuration
 
 type config struct {
+	// domain is the apex domain the installer is hosting on (e.g. "example.com").
+	// All user-facing URLs are derived from it: cloud.${domain}, auth.${domain},
+	// console.${domain}, gw.${domain}:51820. Set via ENROL_DOMAIN; bootstrap
+	// writes this from $DOMAIN at install time.
+	domain string
+
 	listen        string
 	awgDir        string
 	awgIface      string
@@ -83,11 +89,16 @@ func loadConfig() config {
 	if err != nil || luksSize < 1 {
 		log.Fatalf("ENROL_LUKS_SIZE_GB: must be a positive integer, got %q", luksSizeStr)
 	}
+	domain := os.Getenv("ENROL_DOMAIN")
+	if domain == "" {
+		log.Fatal("ENROL_DOMAIN is required (set by bootstrap from $DOMAIN)")
+	}
 	return config{
+		domain:            domain,
 		listen:            envOr("ENROL_LISTEN", ":8080"),
 		awgDir:            envOr("ENROL_AWG_DIR", "/etc/amnezia/amneziawg"),
 		awgIface:          envOr("ENROL_AWG_IFACE", "gw0"),
-		awgEndpoint:       envOr("ENROL_AWG_ENDPOINT", "gw.antarctica-engineering.com:51820"),
+		awgEndpoint:       envOr("ENROL_AWG_ENDPOINT", "gw."+domain+":51820"),
 		peerSubnet:        envOr("ENROL_PEER_SUBNET", "10.99.0.0/24"),
 		peerStart:         start,
 		headerUser:        envOr("ENROL_HEADER_USER", "Remote-User"),

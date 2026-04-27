@@ -8,10 +8,10 @@
 # Camouflage:
 #   - Service name, container name, on-disk paths all use the neutral `qedge`.
 #     The package is `hysteria` (out of scope for the camouflage layer).
-#   - The server presents SNI cdn.antarctica-engineering.com via the wildcard
-#     cert provisioned by `ingress` (NPM). To a passive observer this looks
-#     like a CDN edge: a TLS handshake on :443 with a *.antarctica-engineering
-#     cert, and any HTTP probe is masqueraded as a generic CDN response (see
+#   - The server presents SNI cdn.${DOMAIN} via the wildcard cert
+#     provisioned by `ingress` (NPM). To a passive observer this looks
+#     like a CDN edge: a TLS handshake on :443 with a *.${DOMAIN} cert,
+#     and any HTTP probe is masqueraded as a generic CDN response (see
 #     ./config.yaml.template's masquerade block).
 #
 # Port layout — IMPORTANT:

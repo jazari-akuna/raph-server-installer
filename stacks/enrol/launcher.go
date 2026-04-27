@@ -105,7 +105,7 @@ func saveLauncher(dir string, apps []LauncherApp) error {
 	return os.Rename(tmp, filepath.Join(dir, "apps.json"))
 }
 
-func bootstrapLauncher(dir string) error {
+func bootstrapLauncher(dir, domain string) error {
 	if err := os.MkdirAll(filepath.Join(dir, "icons"), 0o750); err != nil {
 		return fmt.Errorf("mkdir launcher dir: %w", err)
 	}
@@ -117,9 +117,9 @@ func bootstrapLauncher(dir string) error {
 	}
 	icons := seedDefaultIcons(dir, "/app/web/static/launcher-defaults")
 	defaults := []LauncherApp{
-		{ID: "cloud", Name: "Cloud", URL: "https://cloud.antarctica-engineering.com/", Icon: icons["cloud"]},
-		{ID: "enrol-users", Name: "Enrol", URL: "https://enrol.antarctica-engineering.com/users", Icon: icons["enrol-users"]},
-		{ID: "console", Name: "Console", URL: "https://console.antarctica-engineering.com/", Icon: icons["console"]},
+		{ID: "cloud", Name: "Cloud", URL: "https://cloud." + domain + "/", Icon: icons["cloud"]},
+		{ID: "enrol-users", Name: "Enrol", URL: "https://enrol." + domain + "/users", Icon: icons["enrol-users"]},
+		{ID: "console", Name: "Console", URL: "https://console." + domain + "/", Icon: icons["console"]},
 	}
 	return saveLauncher(dir, defaults)
 }

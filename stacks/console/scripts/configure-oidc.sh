@@ -3,7 +3,7 @@
 # pointing at the Authelia provider.
 #
 # Run this AFTER:
-#   1. Authelia is up at https://auth.antarctica-engineering.com.
+#   1. Authelia is up at https://auth.${DOMAIN}.
 #   2. You generated a Portainer OIDC client_secret and put its hash in
 #      /opt/stacks/authelia/.env (see authelia/README.md §2). The
 #      plaintext is the value passed to this script via PORTAINER_CLIENT_SECRET.
@@ -13,19 +13,20 @@
 #      OR via the mesh overlay at https://<vps-magicdns>:9443.
 #
 # Usage:
+#   DOMAIN=example.com \
 #   PORTAINER_URL=https://127.0.0.1:9443 \
-#   PORTAINER_USER=sagan \
-#   PORTAINER_PASS='<sagan-portainer-admin-password>' \
+#   PORTAINER_USER=<admin-username> \
+#   PORTAINER_PASS='<admin-portainer-password>' \
 #   PORTAINER_CLIENT_SECRET='<plaintext from authelia step>' \
 #   ./configure-oidc.sh
 #
 # This wraps Portainer's Settings API. UI fields populated:
 #   AuthenticationMethod    = 3 (OAuth)
 #   OAuthSettings.ClientID  = console
-#   OAuthSettings.AuthURL   = https://auth.antarctica-engineering.com/api/oidc/authorization
-#   OAuthSettings.AccessURL = https://auth.antarctica-engineering.com/api/oidc/token
-#   OAuthSettings.ResourceURL = https://auth.antarctica-engineering.com/api/oidc/userinfo
-#   OAuthSettings.RedirectURL = https://console.antarctica-engineering.com
+#   OAuthSettings.AuthURL   = https://auth.${DOMAIN}/api/oidc/authorization
+#   OAuthSettings.AccessURL = https://auth.${DOMAIN}/api/oidc/token
+#   OAuthSettings.ResourceURL = https://auth.${DOMAIN}/api/oidc/userinfo
+#   OAuthSettings.RedirectURL = https://console.${DOMAIN}
 #   OAuthSettings.UserIdentifier = preferred_username
 #   OAuthSettings.Scopes        = openid profile groups email
 #   OAuthSettings.OAuthAutoCreateUsers = true
@@ -40,6 +41,8 @@ require() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 1;
 require curl
 require jq
 
+[[ -n "${DOMAIN:-}" ]] \
+    || { echo "set DOMAIN (apex domain, e.g. example.com)" >&2; exit 1; }
 [[ -n "${PORTAINER_USER:-}" && -n "${PORTAINER_PASS:-}" ]] \
     || { echo "set PORTAINER_USER + PORTAINER_PASS" >&2; exit 1; }
 [[ -n "${PORTAINER_CLIENT_SECRET:-}" ]] \
@@ -59,15 +62,16 @@ curl -sk -X PUT "$PORTAINER_URL/api/settings" \
     -H 'Content-Type: application/json' \
     -d "$(jq -n \
         --arg cs "$PORTAINER_CLIENT_SECRET" \
+        --arg domain "$DOMAIN" \
         '{
             AuthenticationMethod: 3,
             OAuthSettings: {
                 ClientID: "console",
                 ClientSecret: $cs,
-                AccessTokenURI: "https://auth.antarctica-engineering.com/api/oidc/token",
-                AuthorizationURI: "https://auth.antarctica-engineering.com/api/oidc/authorization",
-                ResourceURI: "https://auth.antarctica-engineering.com/api/oidc/userinfo",
-                RedirectURI: "https://console.antarctica-engineering.com",
+                AccessTokenURI: ("https://auth." + $domain + "/api/oidc/token"),
+                AuthorizationURI: ("https://auth." + $domain + "/api/oidc/authorization"),
+                ResourceURI: ("https://auth." + $domain + "/api/oidc/userinfo"),
+                RedirectURI: ("https://console." + $domain),
                 UserIdentifier: "preferred_username",
                 Scopes: "openid profile groups email",
                 OAuthAutoCreateUsers: true,
@@ -80,5 +84,5 @@ curl -sk -X PUT "$PORTAINER_URL/api/settings" \
     | jq -r '.OAuthSettings.AuthorizationURI // "no AuthorizationURI in response"' \
     | sed 's/^/[oidc] /'
 
-echo "[oidc] done. Test by browsing https://console.antarctica-engineering.com/ in an incognito window."
+echo "[oidc] done. Test by browsing https://console.${DOMAIN}/ in an incognito window."
 echo "[oidc] If sign-in via OAuth fails, browse $PORTAINER_URL/#!/settings/auth and inspect the OAuth section."

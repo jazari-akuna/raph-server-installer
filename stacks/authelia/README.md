@@ -1,7 +1,7 @@
 # authelia — SSO portal
 
 Authelia is the SSO gate for the shared VPS. Internally and externally
-the host is `auth.antarctica-engineering.com`. It serves two roles:
+the host is `auth.${DOMAIN}`. It serves two roles:
 
 1. **Forward-auth** for `enrol`, `cloud`, and `console` (NPM does
    `auth_request` against `http://authelia:9091/api/verify`).
@@ -22,7 +22,7 @@ See `DESIGN.md` for the full design rationale.
   Authelia portal — the deploy report includes the enrolment URL /
   ASCII QR for scanning.
 - Memory limit 256 MB. Authelia is small.
-- No public port binding. NPM proxies `auth.antarctica-engineering.com`
+- No public port binding. NPM proxies `auth.${DOMAIN}`
   → `authelia:9091` over the `edge` Docker network.
 
 ## Layout
@@ -31,7 +31,7 @@ See `DESIGN.md` for the full design rationale.
 stacks/authelia/
 ├── docker-compose.yml
 ├── configuration.yml          # main config (committed; no secrets inside)
-├── users_database.yml.example # sagan + marcus shell (no real hash committed)
+├── users_database.yml.example # bootstrap shell (no real hash committed)
 ├── .env.example               # placeholders for secret env vars
 ├── DESIGN.md                  # design doc (committed)
 ├── README.md                  # this file
@@ -52,8 +52,8 @@ stacks/authelia/
 
 ## Deploy runbook
 
-These steps run on the VPS as `sagan` (NOPASSWD sudo). The repo path on
-the VPS is `/opt/stacks/authelia/` (rsynced from the laptop).
+These steps run on the VPS as the bootstrap admin (NOPASSWD sudo). The
+repo path on the VPS is `/opt/stacks/authelia/` (rsynced from the laptop).
 
 ### 1. Generate secrets
 
@@ -144,13 +144,13 @@ that script's `--help`).
 
 ## First-login flow (operator)
 
-1. Browse `https://auth.antarctica-engineering.com/`. Authelia portal
+1. Browse `https://auth.${DOMAIN}/`. Authelia portal
    appears (Authelia handles its own TLS termination via NPM in front).
-2. Log in as `sagan` / `changeme`.
+2. Log in as the bootstrap admin / `changeme`.
 3. The portal demands second-factor enrolment → click "Register device"
    → scan the displayed QR code into Aegis / Google Authenticator /
    1Password / etc., enter the 6-digit code to confirm.
-4. Repeat for `marcus`.
+4. Repeat for any additional admins.
 5. **Rotate `changeme`** for each user. There are two paths:
    - **Portal-driven**: enable `password_reset` (set `disable: false`
      under `authentication_backend.password_reset` in
@@ -184,6 +184,6 @@ OIDC sessions (Portainer logins). Rotate yearly with operator coordination.
 docker compose ps                                      # → "healthy"
 
 # From outside the VPS:
-curl -sI https://auth.antarctica-engineering.com/api/health
+curl -sI https://auth.${DOMAIN}/api/health
 # Expect: HTTP/2 200, body {"status":"OK"}.
 ```

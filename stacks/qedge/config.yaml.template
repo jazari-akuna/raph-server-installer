@@ -13,9 +13,9 @@
 #
 # Camouflage notes:
 #   - The cert presented on this :443/udp endpoint is the wildcard
-#     *.antarctica-engineering.com from NPM. Clients connect with SNI
-#     `cdn.antarctica-engineering.com`. To a passive observer, the TLS
-#     handshake is indistinguishable from an ordinary CDN edge.
+#     *.${DOMAIN} from NPM. Clients connect with SNI `cdn.${DOMAIN}`.
+#     To a passive observer, the TLS handshake is indistinguishable
+#     from an ordinary CDN edge.
 #   - The masquerade block below makes any non-Hysteria HTTP probe of this
 #     endpoint reverse-proxy to www.cloudflare.com — the response looks like
 #     a generic CDN page, not a Hysteria server.

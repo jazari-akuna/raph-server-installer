@@ -2,9 +2,9 @@
 
 File server for the shared VPS. Internally this is
 [copyparty](https://github.com/9001/copyparty); externally and in all
-paths/names it is `cloud`. See `docs/plan.md` step 7.
+paths/names it is `cloud`. See `docs/design.md` step 7.
 
-Reachable only via `ingress` at `cloud.antarctica-engineering.com`.
+Reachable only via `ingress` at `cloud.${DOMAIN}`.
 There are no public port bindings on this service.
 
 **As of the SSO migration, identity is delegated to Authelia.** copyparty
@@ -16,17 +16,17 @@ against Authelia. Per-user passwords are no longer used.
 
 - **No public ports.** This stack never publishes to the host. The only
   way in is through `ingress` over the `edge` Docker network.
-- **ACLs are strictly per-user.** `sagan` has no access to `/u/marcus`
-  and vice versa. The `[/u/${u}]` volume block grants permissions only
-  to `${u}` itself.
+- **ACLs are strictly per-user.** Each user only has access to their
+  own `/u/<u>` path; no cross-user reach. The `[/u/${u}]` volume block
+  grants permissions only to `${u}` itself.
 - **No anonymous access.** Authelia gates the proxy host with policy
   `two_factor`; copyparty itself rejects requests where
   `Remote-User` is absent (defence in depth).
-- **Per-user data lives behind LUKS.** `/srv/store/mnt/sagan` and
-  `/srv/store/mnt/marcus` on the host are LUKS unlock points (see
-  build-sequence step 6). When the blob is unmounted, the path is an
-  empty directory — copyparty then sees an empty volume, which is the
-  desired fail-closed behaviour.
+- **Per-user data lives behind LUKS.** `/srv/store/mnt/<u>` on the
+  host are LUKS unlock points, one per user (see build-sequence
+  step 6). When the blob is unmounted, the path is an empty directory
+  — copyparty then sees an empty volume, which is the desired
+  fail-closed behaviour.
 - **Trust boundary is the docker network.** `xff-src: 172.16.0.0/12`
   in `conf/copyparty.conf` restricts header trust to docker-internal
   upstreams. Anyone reaching `cloud:3923` from outside the docker
@@ -59,16 +59,16 @@ browser → ingress (NPM, :443) ──auth_request──→ authelia:9091/api/ve
                                                         │
                                             ↓ 200 + Remote-* headers
                                                         │
-                                       → cloud:3923 (with Remote-User: sagan)
+                                       → cloud:3923 (with Remote-User: <u>)
                                                         │
-                                       → copyparty serves /u/sagan
+                                       → copyparty serves /u/<u>
 ```
 
 If the user has no Authelia session, the auth_request returns 401, NPM
-issues a 302 to `https://auth.antarctica-engineering.com/?rd=…`, the
+issues a 302 to `https://auth.${DOMAIN}/?rd=…`, the
 user logs in (TOTP-required), Authelia redirects them back, the auth
-cookie is now set on the apex `antarctica-engineering.com` domain so
-`cloud.antarctica-engineering.com` shares it.
+cookie is now set on the apex `${DOMAIN}` so
+`cloud.${DOMAIN}` shares it.
 
 ## Bind-mount semantics (LUKS interaction)
 
@@ -81,12 +81,12 @@ IdP rule resolves the `${u}` placeholder at request time:
   /w/${u}
 ```
 
-So an authenticated request from `sagan` is served from `/w/sagan`
-which is `/srv/store/mnt/sagan` on the host. Adding a new user is
+So an authenticated request from `<u>` is served from `/w/<u>`
+which is `/srv/store/mnt/<u>` on the host. Adding a new user is
 purely a host-side operation — `enrol` creates the LUKS blob, the
 mountpoint, and the Authelia user, and copyparty picks it up on
 the next request without any cloud-side change. (Earlier versions
-used two static per-user bind-mounts and required editing this
+used static per-user bind-mounts and required editing this
 compose every time a user was added; we removed that.)
 
 The bind-mount uses `propagation: rslave` so that subsequent host
@@ -122,7 +122,7 @@ harmless. New per-user volumes are created via the IdP path on first
 hit. Optional: clean up by deleting `data/up2k.snap` and letting
 copyparty rebuild.
 
-The `.env` file (which used to hold `SAGAN_PW_HASH` / `MARCUS_PW_HASH`)
+The `.env` file (which used to hold per-user `<USER>_PW_HASH` values)
 is now obsolete on the VPS; delete it post-migration:
 
 ```sh
@@ -135,7 +135,7 @@ Use the wire-up script in the authelia stack:
 
 ```sh
 NPM_URL=http://127.0.0.1:81 \
-NPM_EMAIL=raphaelcasimir.inge@gmail.com \
+NPM_EMAIL=admin@example.com \
 NPM_PASS=changeme \
 /opt/stacks/authelia/scripts/wire-npm-routes.sh
 ```
@@ -148,8 +148,8 @@ Verify from outside the VPS:
 
 ```sh
 # Without a session: redirect to Authelia portal.
-curl -sIL https://cloud.antarctica-engineering.com | head -20
-# Expect: 302 → https://auth.antarctica-engineering.com/?rd=...
+curl -sIL https://cloud.${DOMAIN} | head -20
+# Expect: 302 → https://auth.${DOMAIN}/?rd=...
 ```
 
 ## Steady state

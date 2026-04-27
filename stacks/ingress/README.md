@@ -8,10 +8,10 @@ public hostname for it.
 
 This runbook covers the first deploy: DNS prerequisites, OVH API
 credentials, initial admin account, wildcard cert via DNS-01, and the first
-proxy host (`cloud.antarctica-engineering.com`).
+proxy host (`cloud.${DOMAIN}`).
 
-DNS for `antarctica-engineering.com` is hosted at **OVH**. We use the
-DNS-01 challenge with the bundled `dns-ovh` certbot plugin against the
+DNS for `${DOMAIN}` is hosted at the `${DNS_PROVIDER}` registrar (default: OVH).
+We use the DNS-01 challenge with the bundled `dns-ovh` certbot plugin against the
 OVH API. No CDN / DNS proxy sits in front of the records (see §5).
 
 ---
@@ -25,22 +25,22 @@ records, no CDN proxy in front.
 
 | Record                                | Type | Target   | Notes  |
 |---------------------------------------|------|----------|--------|
-| `antarctica-engineering.com`          | A    | `VPS_IP` | direct |
-| `*.antarctica-engineering.com`        | A    | `VPS_IP` | direct |
-| `gw.antarctica-engineering.com`       | A    | `VPS_IP` | direct |
-| `cdn.antarctica-engineering.com`      | A    | `VPS_IP` | direct |
+| `${DOMAIN}`          | A    | `VPS_IP` | direct |
+| `*.${DOMAIN}`        | A    | `VPS_IP` | direct |
+| `gw.${DOMAIN}`       | A    | `VPS_IP` | direct |
+| `cdn.${DOMAIN}`      | A    | `VPS_IP` | direct |
 
 The wildcard plus the apex are what the cert request below will cover.
-`gw.` and `cdn.` are required by other stacks (see `docs/plan.md` DNS
+`gw.` and `cdn.` are required by other stacks (see `docs/design.md` DNS
 Layout section) and should be in place at the same time.
 
 Verify before continuing:
 
 ```sh
-dig +short antarctica-engineering.com
-dig +short anything.antarctica-engineering.com   # wildcard
-dig +short gw.antarctica-engineering.com
-dig +short cdn.antarctica-engineering.com
+dig +short ${DOMAIN}
+dig +short anything.${DOMAIN}   # wildcard
+dig +short gw.${DOMAIN}
+dig +short cdn.${DOMAIN}
 ```
 
 All four must return the VPS public IP.
@@ -55,7 +55,7 @@ Create an OVH application token scoped to **only** this single zone.
    - **Europe / .com domains:** <https://eu.api.ovh.com/createToken/>
    - **NA / .ca / .us domains:** <https://api.ovh.com/createToken/>
 2. Fill in:
-   - **Application name:** `antarctica-engineering DNS-01` (anything
+   - **Application name:** `<your-domain> DNS-01` (anything
      descriptive — visible only in your OVH manager).
    - **Validity:** unlimited (we rotate manually).
    - **Rights:** add five rows, scoped tightly to the single zone.
@@ -64,10 +64,10 @@ Create an OVH application token scoped to **only** this single zone.
      when the rest of the grants are zone-scoped — without it, certbot
      fails with `403 Forbidden for url: https://eu.api.ovh.com/1.0/domain/zone/`:
      - `GET    /domain/zone/`
-     - `GET    /domain/zone/antarctica-engineering.com/*`
-     - `PUT    /domain/zone/antarctica-engineering.com/*`
-     - `POST   /domain/zone/antarctica-engineering.com/*`
-     - `DELETE /domain/zone/antarctica-engineering.com/*`
+     - `GET    /domain/zone/${DOMAIN}/*`
+     - `PUT    /domain/zone/${DOMAIN}/*`
+     - `POST   /domain/zone/${DOMAIN}/*`
+     - `DELETE /domain/zone/${DOMAIN}/*`
      Do **not** grant `/domain/zone/*` (all zones).
 3. Submit. OVH shows three values:
    - `application_key`
@@ -79,7 +79,7 @@ Create an OVH application token scoped to **only** this single zone.
 
 Operational rules:
 
-- Scope is **DNS read/write on `antarctica-engineering.com` only**. Nothing else.
+- Scope is **DNS read/write on `${DOMAIN}` only**. Nothing else.
 - **Rotate yearly.** Calendar reminder lives with the admins.
 - **Never commit a real token.** `.env` is gitignored; `.env.example` is
   the only token-shaped file in git, and it holds placeholders.
@@ -108,7 +108,7 @@ If you'd rather not create an OVH application token, the manual mode is:
 ### 3a. Bring the stack up
 
 The `edge` Docker network must already exist (created in Step 3 of
-`docs/plan.md`). Then, on the VPS, either via `console` (Portainer) or
+`docs/design.md`). Then, on the VPS, either via `console` (Portainer) or
 directly:
 
 ```sh
@@ -124,9 +124,7 @@ to 127.0.0.1.
 The admin UI is loopback-only. From an admin laptop:
 
 ```sh
-ssh -L 81:127.0.0.1:81 sagan@<vps>
-# or, for the other admin:
-ssh -L 81:127.0.0.1:81 marcus@<vps>
+ssh -L 81:127.0.0.1:81 <admin>@<vps>
 ```
 
 Then open `http://127.0.0.1:81` in a local browser. (Once `mesh` is up,
@@ -141,8 +139,7 @@ NPM ships with default credentials on first run:
 
 Log in with these once, then **immediately** change both the email and
 the password to a real admin identity. Do this before doing anything
-else. Enable any available 2FA / per-user accounts for both `sagan` and
-`marcus`.
+else. Enable any available 2FA / per-user accounts for the admins.
 
 ### 3d. Request the wildcard cert (DNS-01, OVH provider)
 
@@ -150,9 +147,9 @@ In the admin UI:
 
 1. **SSL Certificates** -> **Add SSL Certificate** -> **Let's Encrypt**.
 2. Domain Names — add **both**:
-   - `*.antarctica-engineering.com`
-   - `antarctica-engineering.com`
-3. Email Address — an admin email both `sagan` and `marcus` can read.
+   - `*.${DOMAIN}`
+   - `${DOMAIN}`
+3. Email Address — an admin email at least one operator can read.
 4. **Use a DNS Challenge** -> ON.
 5. DNS Provider -> **OVH**.
 6. **Credentials File Content** — paste the four values from §2 in INI
@@ -174,14 +171,14 @@ three grants on the zone, issuance takes ~30-90s. The cert covers the
 apex plus every subdomain we'll ever serve via `ingress`, so this is a
 one-time step (plus auto-renewal, which NPM handles).
 
-### 3e. First proxy host: `cloud.antarctica-engineering.com`
+### 3e. First proxy host: `cloud.${DOMAIN}`
 
 This proves the stack works end-to-end and gives `cloud` (copyparty) a
 public HTTPS front.
 
 In the admin UI -> **Hosts** -> **Proxy Hosts** -> **Add Proxy Host**:
 
-- **Domain Names**: `cloud.antarctica-engineering.com`
+- **Domain Names**: `cloud.${DOMAIN}`
 - **Scheme**: `http`
 - **Forward Hostname / IP**: `cloud`  (the container name on the `edge`
   network — Docker DNS resolves it)
@@ -205,7 +202,7 @@ Both NPM and `cloud` must be on the Docker network named `edge`.
 Verify from outside the VPS:
 
 ```sh
-curl -sI https://cloud.antarctica-engineering.com
+curl -sI https://cloud.${DOMAIN}
 # HTTP/2 200, Strict-Transport-Security header present, valid LE cert.
 ```
 
@@ -239,4 +236,4 @@ Putting one in front would:
   MITM.
 
 If proxy-fronting gets re-opened, that's a plan-level decision — go
-back to `docs/plan.md`. Do not flip the toggle quietly.
+back to `docs/design.md`. Do not flip the toggle quietly.

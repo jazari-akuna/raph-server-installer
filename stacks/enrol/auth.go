@@ -47,7 +47,7 @@ func requireAuth(cfg config, requireGroup bool, h http.HandlerFunc) http.Handler
 			http.Error(w,
 				"401 — authentication required. "+
 					"This service must be reached through the SSO portal at "+
-					"https://auth.antarctica-engineering.com/.",
+					"https://auth."+cfg.domain+"/.",
 				http.StatusUnauthorized)
 			return
 		}

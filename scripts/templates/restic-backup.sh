@@ -15,20 +15,20 @@
 #      policy below.
 #
 # Placeholders to substitute when installing this template per laptop:
-#   <USER>      — sagan | marcus  (the VPS account whose .img is being pulled)
+#   <USER>      — VPS account whose .img is being pulled (e.g. alice)
 #   <VPS_HOST>  — the SSH-reachable hostname of the VPS
-#                 (e.g. antarctica-engineering.com)
+#                 (e.g. <your-domain>)
 #
 # Substitute via:
-#   sed "s/<USER>/sagan/g; s|<VPS_HOST>|antarctica-engineering.com|g" \
-#       restic-backup.sh > ~/.local/bin/restic-backup-sagan.sh
-#   chmod 0755 ~/.local/bin/restic-backup-sagan.sh
+#   sed "s/<USER>/alice/g; s|<VPS_HOST>|vps.example.com|g" \
+#       restic-backup.sh > ~/.local/bin/restic-backup-alice.sh
+#   chmod 0755 ~/.local/bin/restic-backup-alice.sh
 #
 # Expected layout on the laptop (created on demand below where reasonable):
 #   ~/.ssh/id_restic_<USER>                       # dedicated keypair (0600)
-#   ~/.config/restic-rarcus/<USER>.passwd         # restic repo password (0600)
-#   ~/.local/share/restic-rarcus/<USER>/          # restic repo (created by `restic init`)
-#   ~/.cache/restic-rarcus/<USER>/                # rsync staging dir
+#   ~/.config/restic-raph/<USER>.passwd         # restic repo password (0600)
+#   ~/.local/share/restic-raph/<USER>/          # restic repo (created by `restic init`)
+#   ~/.cache/restic-raph/<USER>/                # rsync staging dir
 #
 # See docs/backups.md for one-time setup, recovery procedure, and operational
 # rules.
@@ -38,10 +38,10 @@ set -euo pipefail
 USER_NAME="<USER>"
 VPS_HOST="<VPS_HOST>"
 
-STAGING_DIR="${HOME}/.cache/restic-rarcus/${USER_NAME}"
-RESTIC_REPO="${HOME}/.local/share/restic-rarcus/${USER_NAME}"
+STAGING_DIR="${HOME}/.cache/restic-raph/${USER_NAME}"
+RESTIC_REPO="${HOME}/.local/share/restic-raph/${USER_NAME}"
 RESTIC_KEY="${HOME}/.ssh/id_restic_${USER_NAME}"
-PASSWORD_FILE="${HOME}/.config/restic-rarcus/${USER_NAME}.passwd"
+PASSWORD_FILE="${HOME}/.config/restic-raph/${USER_NAME}.passwd"
 
 # --- preconditions ----------------------------------------------------------
 

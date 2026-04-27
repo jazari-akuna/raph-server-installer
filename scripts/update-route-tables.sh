@@ -6,9 +6,9 @@
 # fall back to the system default route. The server is unaware of this split.
 #
 # Modes:
-#   --refresh             (default) ensure ~/.cache/rarcus/chnroutes.txt is
+#   --refresh             (default) ensure ~/.cache/raph/chnroutes.txt is
 #                          fresh (re-fetch only if older than 25 days), then
-#                          recompute the complement → ~/.cache/rarcus/allowed-ips.txt
+#                          recompute the complement → ~/.cache/raph/allowed-ips.txt
 #   --print-allowed-ips    cat the cached complement
 #   --regenerate-peers     rewrite peers/*.conf AllowedIPs lines from the cache
 #
@@ -31,9 +31,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PEERS_DIR="$REPO_ROOT/peers"
 
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-    CACHE_DIR="/var/cache/rarcus"
+    CACHE_DIR="/var/cache/raph"
 else
-    CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rarcus"
+    CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/raph"
 fi
 
 CHNROUTES_FILE="$CACHE_DIR/chnroutes.txt"

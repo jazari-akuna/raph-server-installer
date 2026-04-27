@@ -3,7 +3,8 @@
 This is the load-bearing design doc for adding Single Sign-On to the shared
 VPS. Implementers (A–E) read this first; everything else flows from here.
 Camouflage discipline: nothing user-visible mentions VPN/WG/Amnezia. The
-two co-admins are `sagan` and `marcus`, both fully privileged.
+installer creates a single admin via the wizard; additional admins can be
+added later through enrol's user-management UI.
 
 ## Phase 0 research summary (with citations)
 
@@ -28,7 +29,7 @@ two co-admins are `sagan` and `marcus`, both fully privileged.
   via OIDC group claim.
   <https://docs.portainer.io/admin/settings/authentication/oauth>
 - **Authelia → Portainer integration** (canonical):
-  - `redirect_uris: ['https://console.antarctica-engineering.com']`
+  - `redirect_uris: ['https://console.${DOMAIN}']`
     — bare host, no path. **This contradicts the brief's
     `/api/oauth/authorize` guess.** Adjust accordingly.
   - `scopes: openid profile groups email`
@@ -68,32 +69,32 @@ access_control:
   default_policy: 'deny'
   rules:
     # Authelia portal itself — never gate (would loop).
-    - domain: 'auth.antarctica-engineering.com'
+    - domain: 'auth.${DOMAIN}'
       policy: 'bypass'
 
     # Public file server: 2FA required for everyone.
-    - domain: 'cloud.antarctica-engineering.com'
+    - domain: 'cloud.${DOMAIN}'
       policy: 'two_factor'
 
     # Peer-management UI: 2FA, admins-only group.
-    - domain: 'enrol.antarctica-engineering.com'
+    - domain: 'enrol.${DOMAIN}'
       policy: 'two_factor'
       subject: ['group:admins']
 
     # Portainer: 2FA, admins-only.
-    - domain: 'console.antarctica-engineering.com'
+    - domain: 'console.${DOMAIN}'
       policy: 'two_factor'
       subject: ['group:admins']
 ```
 
-Both `sagan` and `marcus` are members of group `admins`. No other groups
+The bootstrap admin is a member of group `admins`. No other groups
 exist at bootstrap.
 
 ### Forward-auth header conventions
 
 Authelia emits these headers when the auth_request succeeds:
 
-- `Remote-User`         → username (`sagan`, `marcus`)
+- `Remote-User`         → username (e.g. `alice`)
 - `Remote-Groups`       → comma-separated groups (`admins`)
 - `Remote-Email`        → email
 - `Remote-Name`         → display name
@@ -177,18 +178,17 @@ the NPM layer).
   a secret between NPM and copyparty. The `xff-src` constraint plus
   the fact that NPM is the only thing on `edge` → cloud:3923 path is
   sufficient. Document this trade-off in the README.)
-- Replace static `[/sagan]` and `[/marcus]` volume blocks with one
-  templated block:
+- Replace per-user static volume blocks with one templated block:
   ```
   [/u/${u}]
     /w/${u}
     accs:
       rwmda: ${u}
   ```
-  Each user only sees their own URL path, mounted from per-user host
-  bind-mount. The bind-mount list in compose stays static (`/srv/store/mnt/sagan`
-  and `/srv/store/mnt/marcus`); copyparty maps the URL `/u/sagan/`
-  onto `/w/sagan` only when the request authenticates as `sagan`.
+  Each user only sees their own URL path, mounted from a per-user host
+  bind-mount. The bind-mount list in compose maps `/srv/store/mnt/<u>`
+  onto `/w/<u>`, and copyparty maps URL `/u/<u>/` onto `/w/<u>` only
+  when the request authenticates as `<u>`.
 - Admin (group:admins) override: any volume the user owns gets `rwmda`.
   No global admin volume — group-membership only matters for enrol/console.
 
@@ -202,15 +202,15 @@ the NPM layer).
     public: false
     authorization_policy: 'two_factor'
     require_pkce: false
-    redirect_uris: ['https://console.antarctica-engineering.com']
+    redirect_uris: ['https://console.${DOMAIN}']
     scopes: ['openid', 'profile', 'groups', 'email']
     token_endpoint_auth_method: 'client_secret_post'
   ```
 - Portainer side:
-  - Authorization URL: `https://auth.antarctica-engineering.com/api/oidc/authorization`
-  - Access Token URL: `https://auth.antarctica-engineering.com/api/oidc/token`
-  - Resource URL: `https://auth.antarctica-engineering.com/api/oidc/userinfo`
-  - Redirect URL: `https://console.antarctica-engineering.com`
+  - Authorization URL: `https://auth.${DOMAIN}/api/oidc/authorization`
+  - Access Token URL: `https://auth.${DOMAIN}/api/oidc/token`
+  - Resource URL: `https://auth.${DOMAIN}/api/oidc/userinfo`
+  - Redirect URL: `https://console.${DOMAIN}`
   - Client ID: `console`
   - User Identifier: `preferred_username`
   - Scopes: `openid profile groups email`
@@ -228,10 +228,10 @@ config that calls `auth-request` against `http://authelia:9091/api/verify`.
 
 | Hostname                                | Forward         | Forward-auth | Notes |
 |-----------------------------------------|-----------------|--------------|-------|
-| auth.antarctica-engineering.com         | authelia:9091   | NO (loop)    | bypass policy |
-| enrol.antarctica-engineering.com        | enrol:8080      | YES          | admins group |
-| cloud.antarctica-engineering.com        | cloud:3923      | YES          | UPDATE existing host id 1 |
-| console.antarctica-engineering.com      | console:9443    | YES          | scheme=https + skip cert verify |
+| auth.${DOMAIN}         | authelia:9091   | NO (loop)    | bypass policy |
+| enrol.${DOMAIN}        | enrol:8080      | YES          | admins group |
+| cloud.${DOMAIN}        | cloud:3923      | YES          | UPDATE existing host id 1 |
+| console.${DOMAIN}      | console:9443    | YES          | scheme=https + skip cert verify |
 
 NPM container must be on the `edge` network (already is). Authelia
 joins `edge`. enrol joins `edge`.

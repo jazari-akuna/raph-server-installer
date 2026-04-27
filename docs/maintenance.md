@@ -1,9 +1,15 @@
 # Maintenance & Ops Runbook
 
-Day-2 operations playbook for the shared VPS (sagan + marcus). Everything
-in this doc happens **after** initial bring-up — `docs/plan.md` covers
-the build sequence, `docs/verification.md` covers sign-off, this file
-covers keeping the box healthy thereafter.
+Day-2 operations playbook for any VPS provisioned by
+`raph-server-installer`. Everything in this doc happens **after**
+initial bring-up — `docs/design.md` covers the architecture and build
+sequence, `docs/verification.md` covers sign-off, this file covers
+keeping the box healthy thereafter.
+
+The procedures below are written for a generic operator. Substitute
+your own values for the placeholders — `<your-domain>` is your apex,
+`<admin>` is the admin OS account that owns SSH access, `<user>` is
+any account managed through the `enrol` UI.
 
 > Where a procedure is documented in detail elsewhere, this file links
 > rather than copies. Keep cross-cutting operational knowledge here;
@@ -15,7 +21,7 @@ covers keeping the box healthy thereafter.
 
 | Cadence    | Task                                                 | Where it lives                                     |
 |------------|------------------------------------------------------|----------------------------------------------------|
-| Per reboot | `mount-stores.sh` (manual LUKS unlock, every reboot) | `scripts/mount-stores.sh`, `docs/plan.md` step 6   |
+| Per reboot | `mount-stores.sh` (manual per-user LUKS unlock; shared volume auto-mounts via keyfile) | `scripts/mount-stores.sh`, `docs/design.md` Build Sequence |
 | Weekly     | fail2ban sanity, cert validity > 30 days, free RAM   | this doc § Quick health check                      |
 | Weekly     | `docker stats` glance for runaway containers         | this doc § Quick health check                      |
 | Monthly    | chnroutes2 refresh (cron) + verify peer .conf drift  | this doc § Monthly chnroutes2 refresh              |
@@ -24,7 +30,7 @@ covers keeping the box healthy thereafter.
 | Quarterly  | image bump audit (compose tags vs upstream releases) | this doc § Image bump procedure                    |
 | Quarterly  | sysctl review against `host/sysctl/99-host.conf`     | `docs/perf-tuning.md` § Network sysctl rationale   |
 | Quarterly  | qedge cert symlink verification                      | this doc § Cert renewal verification               |
-| Yearly     | OVH DNS-01 token rotation                            | `stacks/ingress/README.md` § 2                     |
+| Yearly     | DNS-01 token rotation (whichever provider was chosen) | `stacks/ingress/README.md` § 2                    |
 | Yearly     | Authelia OIDC key rotation                           | `stacks/authelia/README.md` § Secret rotation      |
 | Yearly     | qedge `QEDGE_PASSWORD` rotation (or post-switchover) | `stacks/qedge/README.md` § Rotating the password   |
 | As-needed  | kernel update + DKMS rebuild                         | this doc § Kernel updates                          |
@@ -42,26 +48,26 @@ Run from an admin's laptop (most) or via SSH on the VPS (where noted).
 
 ```sh
 # 1. fail2ban: any sshd jail bans active right now?
-ssh sagan@antarctica-engineering.com 'sudo fail2ban-client status sshd'
+ssh <admin>@<your-domain> 'sudo fail2ban-client status sshd'
 
 # 2. cert validity (NotAfter must be > 30 days out)
-ssh sagan@antarctica-engineering.com \
+ssh <admin>@<your-domain> \
     'sudo openssl x509 -noout -dates \
         -in /opt/stacks/ingress/letsencrypt/live/npm-*/fullchain.pem'
 
 # 3. public HTTPS reachable + cert chain valid (off-VPS check)
-curl -sI https://cloud.antarctica-engineering.com | head -1
-curl -sI https://auth.antarctica-engineering.com/api/health
+curl -sI https://cloud.<your-domain> | head -1
+curl -sI https://auth.<your-domain>/api/health
 
 # 4. gw0 has at least one peer with a recent handshake
-ssh sagan@antarctica-engineering.com 'sudo awg show gw0 | grep "latest handshake"'
+ssh <admin>@<your-domain> 'sudo awg show gw0 | grep "latest handshake"'
 
 # 5. RAM headroom (target: ≤ 2.5 GB used with qedge stopped)
-ssh sagan@antarctica-engineering.com 'free -m && \
+ssh <admin>@<your-domain> 'free -m && \
     sudo docker stats --no-stream --format "table {{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}"'
 
 # 6. all expected containers Up, no restarts
-ssh sagan@antarctica-engineering.com 'sudo docker ps --format \
+ssh <admin>@<your-domain> 'sudo docker ps --format \
     "table {{.Names}}\t{{.Status}}"'
 ```
 
@@ -88,13 +94,13 @@ recipe is the same for every compose-managed stack:
    ```sh
    git commit -am 'stacks/<name>: bump to <new-tag>'
    ./scripts/deploy.sh
-   ssh sagan@antarctica-engineering.com \
+   ssh <admin>@<your-domain> \
        'cd /opt/stacks/<name> && sudo docker compose pull && sudo docker compose up -d'
    ```
 4. **Verify** with a curl probe matching the stack:
-   - `cloud`: `curl -sIL https://cloud.antarctica-engineering.com | head -20` (expect 302 → Authelia).
+   - `cloud`: `curl -sIL https://cloud.<your-domain> | head -20` (expect 302 → Authelia).
    - `ingress`: same probe — NPM is the proxy on the path.
-   - `authelia`: `curl -sI https://auth.antarctica-engineering.com/api/health` → `200`.
+   - `authelia`: `curl -sI https://auth.<your-domain>/api/health` → `200`.
    - `console`: SSH-tunnel to `127.0.0.1:9443`, log in.
    - `qedge` (only if started for testing): see `stacks/qedge/README.md` § Switchover.
    Then re-run the matching `docs/verification.md` check (1 for
@@ -129,20 +135,20 @@ runs unattended; verify quarterly that it actually works:
 
 ```sh
 # 1. qedge symlinks resolve and point at the live NPM cert dir
-ssh sagan@antarctica-engineering.com \
+ssh <admin>@<your-domain> \
     'sudo ls -la /opt/stacks/qedge/tls/ && \
      sudo ls -la /opt/stacks/ingress/letsencrypt/live/'
 # fullchain.pem and privkey.pem under qedge/tls/ should symlink into
 # the newest npm-N/ dir.
 
 # 2. cert NotAfter > 30 days out
-ssh sagan@antarctica-engineering.com \
+ssh <admin>@<your-domain> \
     'sudo openssl x509 -noout -dates \
          -in /opt/stacks/ingress/letsencrypt/live/npm-*/fullchain.pem'
 
 # 3. watcher journal — should show "no change needed" most of the time,
 #    "repointed ..." after each NPM renewal.
-ssh sagan@antarctica-engineering.com \
+ssh <admin>@<your-domain> \
     'sudo journalctl -u qedge-cert-watcher.service --since "90 days ago"'
 ```
 
@@ -205,7 +211,7 @@ Procedure:
    sudo /root/scripts/mount-stores.sh                # re-unlock LUKS volumes
    ```
    From a peer client, run a quick handshake check (`awg show` on the
-   peer side, or just open `cloud.antarctica-engineering.com` over the
+   peer side, or just open `cloud.<your-domain>` over the
    tunnel). If a peer can't handshake, that's the symptom row in
    § Triage / log locations.
 6. **If DKMS failed for the new kernel**: the `gw0` interface won't
@@ -233,7 +239,7 @@ the laptop (not the VPS — the regenerated `peers/` live in the laptop
 repo). Force a refresh + re-emit peer configs by hand:
 
 ```sh
-cd ~/Projects/rarcus-server
+cd ~/Projects/raph-server-installer
 ./scripts/update-route-tables.sh --refresh
 ./scripts/update-route-tables.sh --regenerate-peers
 ```
@@ -256,27 +262,21 @@ place using the canonical marker comment
 
 ## Authelia user / TOTP / password rotation
 
-User lifecycle operations all flow through the `enrol` UI in steady
-state — TOTP enrolment, password rotation, user add/remove. **At the
-time of writing, the in-flight enrol-transformation is not yet shipped**
-(the legacy `enrol` covers peer/device CRUD only; user-CRUD, TOTP regen,
-and LUKS provisioning land in the transformation). Until then, use the
-manual fallbacks below. After the transformation lands, this section
-becomes "click through enrol UI; CLI fallback as backup."[^enrol]
+User lifecycle operations flow through the `enrol` UI at
+`https://enrol.<your-domain>/` — TOTP enrolment, password rotation,
+user add/remove, LUKS volume create/delete. The CLI invocations below
+are the **fallback** path used only when `enrol` is itself unavailable
+(rare: the service is down, or the operator needs to recover from a
+state the UI cannot represent). See `stacks/enrol/DESIGN.md` for the
+canonical UI flow.
 
-[^enrol]: This section currently documents the manual / CLI paths
-    because the enrol UI for user-CRUD and TOTP regeneration is part of
-    the in-flight `enrol` transformation. See
-    `stacks/enrol/DESIGN.md` for the design. When the transformation
-    ships, the procedures here become "via enrol UI" with the CLI
-    invocations preserved as the backup path.
+### Add user (CLI fallback)
 
-Until the enrol transformation lands, all the following are root-on-VPS
-procedures (or via the deploy → re-render pipeline):
+Via UI: Users → Add. The wizard collects username, email, initial
+password, optional volume size; on submit the UI provisions everything
+atomically.
 
-### Add user (manual fallback)
-
-Steps (post-transformation: via enrol UI; see `stacks/enrol/DESIGN.md`):
+CLI fallback:
 
 1. Generate the argon2id digest for the user's bootstrap password using
    the recipe in `stacks/authelia/README.md` § 3.
@@ -284,14 +284,19 @@ Steps (post-transformation: via enrol UI; see `stacks/enrol/DESIGN.md`):
    (file watch reloads Authelia within a few seconds — `watch: true` is
    set; if reload misfires, `docker exec authelia kill -HUP 1`).
 3. If the user gets a LUKS volume:
-   `sudo /root/scripts/create-store-volume.sh <user> 50` then add to
-   `users=(...)` in `scripts/mount-stores.sh` and redeploy.
-4. The user logs into `https://auth.antarctica-engineering.com/`,
-   gets prompted for TOTP enrolment on first login.
+   `sudo /root/scripts/create-store-volume.sh <user> 50` then ensure
+   the new `<user>.img` is on disk under `/srv/store/data/`. The
+   `mount-stores.sh` script auto-discovers all `*.img` files there
+   (other than `_shared.img`).
+4. The user logs into `https://auth.<your-domain>/` and is prompted for
+   TOTP enrolment on first login (Authelia's built-in flow), if your
+   policy requires `two_factor`.
 
-### Rotate password (manual fallback)
+### Rotate password (CLI fallback)
 
-Post-transformation: enrol UI ("change password" form). Today:
+Via UI: Users → `<user>` → Change password.
+
+CLI fallback:
 
 ```sh
 HASH="$(docker run --rm authelia/authelia:4.39.19 \
@@ -309,9 +314,11 @@ sudo docker logs --tail 20 authelia
 `stacks/authelia/configuration.yml` so Authelia doesn't trigger a
 rehash-on-next-login. See `stacks/enrol/DESIGN.md` § 0.1.)
 
-### Regenerate TOTP (manual fallback)
+### Regenerate TOTP (CLI fallback)
 
-Post-transformation: enrol UI ("reset 2FA"). Today, via Authelia CLI:
+Via UI: Users → `<user>` → Reset 2FA.
+
+CLI fallback (Authelia CLI):
 
 ```sh
 # blow away existing secret + force-regen, gives the operator the
@@ -323,10 +330,12 @@ sudo docker exec -it authelia authelia storage user totp generate \
 echo '<otpauth-uri-from-above>' | qrencode -t ansiutf8
 ```
 
-### Delete user (manual fallback)
+### Delete user (CLI fallback)
 
-Post-transformation: enrol UI ("delete user", with confirmation +
-LUKS-blob disposition prompt). Today:
+Via UI: Users → `<user>` → Delete (confirmation + LUKS-blob
+disposition prompt).
+
+CLI fallback:
 
 ```sh
 # 1. remove from users_database.yml (sed/edit)
@@ -398,8 +407,27 @@ need to triage further.
 
 ## Tailscale (mesh) operations
 
-The `mesh` overlay (Tailscale) is the only external path to admin UIs
-(`console`:9443, `ingress` admin:81). Keep its membership tight.
+Tailscale is **not installed by the wizard.** Operators who want an
+out-of-band path to the `console` (Portainer) port `:9443` and the
+`ingress` (NPM) admin port `:81` install it manually post-setup. The
+admin UIs are otherwise reachable only by SSH-tunnel from an admin's
+laptop.
+
+### Install (one-time)
+
+On the VPS (as the admin OS user):
+
+```sh
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --ssh --hostname=<neutral-name>
+# follow the printed URL; approve in https://login.tailscale.com/admin
+```
+
+Pick a hostname that does not advertise the box's role
+(no "vpn" / "gateway" / etc.) — it is visible to every other tailnet
+node.
+
+### Day-2: keep membership tight
 
 ### Add a node (admin's new device)
 
@@ -527,31 +555,28 @@ upstream of NPM) see `docs/dns-records.md`.
 ## Disaster recovery
 
 Outline only — full procedures live in `docs/backups.md` and
-`docs/plan.md`.
+`docs/design.md`.
 
 ### VPS lost entirely (re-provision from scratch)
 
-1. Provision a fresh Ubuntu 24.04 LTS VPS at LayerStack with the same
-   CN2-GIA HK plan. Note the new public IPv4 if it differs.
-2. Update OVH DNS A records (`docs/dns-records.md` § 1) if the IP
+1. Provision a fresh Ubuntu 24.04 LTS VPS from any provider that
+   supports cloud-init / user-data (LayerStack, Hetzner, Vultr, etc.).
+   Note the new public IPv4.
+2. Update DNS A records (`docs/dns-records.md` § 1) if the IP
    changed; drop TTL to 300 first per § 3.
-3. From the laptop:
-   ```sh
-   ./scripts/deploy.sh
-   ssh sagan@<vps> 'sudo /root/scripts/bootstrap-host.sh && \
-                    sudo /root/scripts/install-docker.sh && \
-                    sudo /root/scripts/install-gw0.sh && \
-                    sudo /root/scripts/install-mesh.sh'
-   ```
-   Then walk Build Sequence steps 4 onward in `docs/plan.md` (Portainer
-   bootstrap → ingress → cert reissue → cloud → authelia → enrol).
+3. Re-paste the bootstrap one-liner into the new VPS's user-data box
+   with the same `DOMAIN` / `ADMIN_EMAIL`. The bootstrap rebuilds the
+   host, brings up enrol in setup mode, and serves the wizard at
+   `http://setup.<your-domain>`. Walk through the wizard exactly as on
+   first install.
 4. **Restore each user's `<user>.img`** from their respective laptop's
-   restic repo into `/srv/store/data/`. Per `docs/backups.md` §
-   Recovery procedure: each admin restores their **own** blob from
-   their **own** laptop's repo.
-5. Re-import peer `.conf` files from the laptop's `peers/` (or
-   regenerate via `scripts/provision-peer.sh` against the new server
-   key — note that regen invalidates all old peer configs).
+   restic repo into `/srv/store/data/` **before** that user's first
+   login. Per `docs/backups.md` § Recovery procedure: each admin
+   restores their **own** blob from their **own** laptop's repo.
+5. Re-import peer `.conf` files from each admin's laptop `peers/` (or
+   regenerate via the `enrol` UI's peer-management screen — note that
+   regen invalidates all old peer configs because the server's
+   AmneziaWG key pair was regenerated by phase 1).
 6. Run the full `docs/verification.md` pass before declaring the
    replacement box "in service."
 
@@ -579,7 +604,7 @@ The "out of scope" list in `claude-readme.md` § Out of scope is the
 canonical list. Briefly:
 
 - Don't add public DNS for any admin UI (`console`, NPM admin).
-- Don't put a CDN / DNS proxy in front of `antarctica-engineering.com`.
+- Don't put a CDN / DNS proxy in front of `<your-domain>`.
 - Don't run `qedge` as the daily driver — it stays stopped.
 - Don't introduce client-side E2EE (Cryptomator etc.) — the threat
   model is encrypted-at-rest only.
@@ -590,5 +615,5 @@ canonical list. Briefly:
   intentional.
 
 If a maintenance request seems to require violating any of the above,
-that's a plan-level decision — re-open `docs/plan.md` first, don't
+that's a design-level decision — re-open `docs/design.md` first, don't
 quietly flip the switch.

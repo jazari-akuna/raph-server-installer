@@ -1,6 +1,6 @@
 # Verification Runbook
 
-Operator-actionable mirror of `docs/plan.md` Verification section. **Canonical sign-off doc** — all 7 checks must be PASS before declaring the box ready.
+Operator-actionable mirror of `docs/design.md` Verification section. **Canonical sign-off doc** — all 7 checks must be PASS before declaring the box ready.
 
 ## Status
 
@@ -23,15 +23,15 @@ Tick all 7 before flipping the box from "bring-up" to "in service." Append a dat
 - **Where to run:** laptop, off-VPS network (not via `mesh`).
 - **Commands:**
   ```
-  curl -sI https://cloud.antarctica-engineering.com
-  curl -sI https://console.antarctica-engineering.com 2>&1 | head -5
+  curl -sI https://cloud.<your-domain>
+  curl -sI https://console.<your-domain> 2>&1 | head -5
   ```
 - **Expected:**
-  - `cloud`: `HTTP/2 200`, `Strict-Transport-Security` header present, valid Let's Encrypt cert covering `*.antarctica-engineering.com`.
+  - `cloud`: `HTTP/2 200`, `Strict-Transport-Security` header present, valid Let's Encrypt cert covering `*.<your-domain>`.
   - `console`: connection refused or DNS NXDOMAIN. Admin UI MUST NOT be public.
 - **If this fails:**
   - Re-check NPM proxy host config in `ingress` admin UI (over `mesh`).
-  - Re-check OVH DNS A record for `cloud` points to `43.228.124.145`.
+  - Re-check DNS A record for `cloud` points to the VPS public IP (`<vps-ip>`).
   - Re-check NPM cert state (DNS-01 token still valid?).
   - **DO NOT** add a public proxy host for `console` to "fix" the second curl — it is supposed to fail.
 
@@ -39,29 +39,29 @@ Tick all 7 before flipping the box from "bring-up" to "in service." Append a dat
 
 ### Check 2 — Encrypted volume round-trip
 
-- **Where to run:** VPS (sagan via SSH) + laptop browser.
+- **Where to run:** VPS (admin via SSH) + laptop browser.
 - **Steps:**
-  1. Unlock store (sagan, on VPS):
+  1. Unlock store on the VPS (substitute `<u>` with your username):
      ```
-     sudo systemctl start store-mount@sagan.service
+     sudo systemctl start store-mount@<u>.service
      ```
      Operator types passphrase at the `systemd-ask-password` prompt.
-  2. From laptop browser, upload `test.bin` via `https://cloud.antarctica-engineering.com` into sagan's volume.
+  2. From laptop browser, upload `test.bin` via `https://cloud.<your-domain>` into `<u>`'s volume.
   3. On VPS, lock the volume:
      ```
-     sudo umount /srv/store/mnt/sagan
-     sudo cryptsetup close store_sagan
+     sudo umount /srv/store/mnt/<u>
+     sudo cryptsetup close store_<u>
      ```
-  4. Reload `cloud` in browser → sagan's volume appears empty / inaccessible (fail-closed).
+  4. Reload `cloud` in browser → `<u>`'s volume appears empty / inaccessible (fail-closed).
   5. Re-run step 1 → `test.bin` reappears.
 - **Expected:** file is visible only when the LUKS volume is unlocked; locked volume = empty directory served by copyparty.
 - **If this fails:**
   ```
-  sudo journalctl -u store-mount@sagan -n 50
+  sudo journalctl -u store-mount@<u> -n 50
   sudo dmesg | grep -i luks
   sudo docker logs cloud
   ```
-  Confirm bind-mount path `/srv/store/mnt/sagan` matches the compose volume mapping in `stacks/cloud/docker-compose.yml`.
+  Confirm bind-mount path `/srv/store/mnt/<u>` matches the compose volume mapping in `stacks/cloud/docker-compose.yml`.
 
 ---
 
@@ -75,7 +75,7 @@ Tick all 7 before flipping the box from "bring-up" to "in service." Append a dat
   iperf3 -s -1
 
   # On client (with gw0 active):
-  iperf3 -c gw.antarctica-engineering.com -t 30
+  iperf3 -c gw.<your-domain> -t 30
   ```
 - **Expected:**
   - Low-filter client: ≥800 Mbps.
@@ -98,7 +98,7 @@ Tick all 7 before flipping the box from "bring-up" to "in service." Append a dat
   mtr -rwc 10 github.com
   ```
 - **Expected:**
-  - `ifconfig.me` → `43.228.124.145` (foreign traffic exits VPS).
+  - `ifconfig.me` → `<vps-ip>` (foreign traffic exits VPS).
   - `mtr baidu.com` → first hop is the **local ISP gateway**, NOT the VPS.
   - `mtr github.com` → first hop is the **VPS**.
 - **If this fails:**
@@ -114,7 +114,7 @@ Tick all 7 before flipping the box from "bring-up" to "in service." Append a dat
 
 ### Check 5 — Alternate-ingress drill
 
-- **Where to run:** VPS (sagan or marcus via SSH) + client with sing-box profile pre-installed.
+- **Where to run:** VPS (admin via SSH) + client with sing-box profile pre-installed.
 - **Steps:**
   1. Stop primary gateway on VPS:
      ```
@@ -132,7 +132,7 @@ Tick all 7 before flipping the box from "bring-up" to "in service." Append a dat
   cd /opt/stacks/qedge && sudo docker compose down
   sudo systemctl start awg-quick@gw0
   ```
-- **If this fails:** check `qedge` cert symlinks (wildcard cert from `ingress` shared into the `qedge` container), `cdn.antarctica-engineering.com` DNS, `:443/udp` open in `ufw`.
+- **If this fails:** check `qedge` cert symlinks (wildcard cert from `ingress` shared into the `qedge` container), `cdn.<your-domain>` DNS, `:443/udp` open in `ufw`.
 
 ---
 
@@ -141,10 +141,10 @@ Tick all 7 before flipping the box from "bring-up" to "in service." Append a dat
 - **Where to run:** laptop.
 - **Commands:**
   ```
-  restic snapshots -r ~/.local/share/restic-rarcus/sagan
-  restic restore latest --target /tmp/recover -r ~/.local/share/restic-rarcus/sagan
+  restic snapshots -r ~/.local/share/restic-raph/<u>
+  restic restore latest --target /tmp/recover -r ~/.local/share/restic-raph/<u>
   ```
-  Then mount-and-verify per `docs/backups.md` recovery procedure: attach restored `sagan.img` as loop device, `cryptsetup open` with the passphrase, mount, confirm the `test.bin` from Check 2 is present.
+  Then mount-and-verify per `docs/backups.md` recovery procedure: attach restored `<u>.img` as loop device, `cryptsetup open` with the passphrase, mount, confirm the `test.bin` from Check 2 is present.
 - **Expected:** recent snapshot exists; restore completes; recovered `.img` unlocks and contains expected files.
 - **If this fails:** see `docs/backups.md` (repo password, SSH key, sftp endpoint, cron / systemd-timer health on laptop).
 
@@ -155,7 +155,7 @@ Tick all 7 before flipping the box from "bring-up" to "in service." Append a dat
 - **Where to run:** VPS (or from laptop via SSH).
 - **Commands:**
   ```
-  ssh sagan@antarctica-engineering.com '
+  ssh <admin>@<your-domain> '
     free -m
     sudo docker stats --no-stream --format "table {{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}"
   '
@@ -176,8 +176,7 @@ Append one row per full pass. Format:
 ```
 | Date       | Operator | C1 | C2 | C3 | C4 | C5 | C6 | C7 | Notes |
 |------------|----------|----|----|----|----|----|----|----|-------|
-| YYYY-MM-DD | sagan    |    |    |    |    |    |    |    |       |
-| YYYY-MM-DD | marcus   |    |    |    |    |    |    |    |       |
+| YYYY-MM-DD | <admin>  |    |    |    |    |    |    |    |       |
 ```
 
 A run with any FAIL is not a sign-off; fix and re-run the affected checks (and any downstream).

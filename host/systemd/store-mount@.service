@@ -1,6 +1,6 @@
 [Unit]
 Description=Unlock and mount store volume for %i
-Documentation=file:///srv/rarcus-server/docs/plan.md
+Documentation=file:///opt/raph-server-installer/docs/design.md
 # Both the blob source and the mountpoint parent must exist before we run.
 RequiresMountsFor=/srv/store/data /srv/store/mnt
 # Manual unlock only — never on boot. This unit is intentionally absent from

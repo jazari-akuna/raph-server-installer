@@ -14,9 +14,25 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-users=(sagan marcus)
 data_dir=/srv/store/data
 mnt_dir=/srv/store/mnt
+
+# Discover users from the *.img files present in $data_dir. The store image
+# filename is the user's login name. This avoids hardcoding admin usernames
+# into the script and stays correct as users are added/removed via the wizard.
+users=()
+shopt -s nullglob
+for img in "$data_dir"/*.img; do
+    bn="$(basename "$img" .img)"
+    [[ "$bn" == "_shared" ]] && continue   # shared volume handled separately
+    users+=("$bn")
+done
+shopt -u nullglob
+
+if [[ ${#users[@]} -eq 0 ]]; then
+    echo "no per-user store images found in $data_dir"
+    exit 0
+fi
 
 # If systemd-tty-ask-password-agent is available and we have a tty, hint that
 # the user can answer prompts here. (The unit uses --no-tty so the prompt

@@ -3,15 +3,17 @@
 #
 # Usage:
 #   scripts/provision-peer.sh <peer-name>
-#       e.g. scripts/provision-peer.sh sagan-phone
-#            scripts/provision-peer.sh marcus-laptop
+#       e.g. scripts/provision-peer.sh phone-1
+#            scripts/provision-peer.sh laptop-2
 #
 # Environment:
 #   AWG_HOST    SSH target for the VPS (user@host or alias). Required when
 #               run from the laptop. If unset and we appear to be on the VPS
 #               (gw0.conf is locally readable), we operate locally.
-#   AWG_ENDPOINT  Public endpoint to put in the client config.
-#               Default: gw.antarctica-engineering.com:51820
+#   AWG_ENDPOINT  Public endpoint to put in the client config. Required.
+#               (Bootstrap writes this into the script's environment via
+#                /etc/server-domain → "gw.${DOMAIN}:51820"; operators can
+#                override if running from outside the installer flow.)
 #   AWG_DIR     Server-side AmneziaWG config dir.
 #               Default: /etc/amnezia/amneziawg
 #   AWG_IFACE   Interface name. Default: gw0
@@ -50,7 +52,16 @@ PEER_NAME="$1"
 
 AWG_DIR="${AWG_DIR:-/etc/amnezia/amneziawg}"
 AWG_IFACE="${AWG_IFACE:-gw0}"
-AWG_ENDPOINT="${AWG_ENDPOINT:-gw.antarctica-engineering.com:51820}"
+# AWG_ENDPOINT is required: hardcoding a public hostname here would leak the
+# operator's domain into the committed source. Bootstrap writes it from $DOMAIN.
+if [[ -z "${AWG_ENDPOINT:-}" ]]; then
+    if [[ -r /etc/server-domain ]]; then
+        AWG_ENDPOINT="gw.$(tr -d '[:space:]' </etc/server-domain):51820"
+    else
+        echo "AWG_ENDPOINT must be set (e.g. gw.example.com:51820)" >&2
+        exit 2
+    fi
+fi
 PEER_SUBNET="${PEER_SUBNET:-10.99.0.0/24}"
 PEER_START="${PEER_START:-10}"
 
@@ -253,7 +264,7 @@ QR_PNG="$PEERS_DIR/${PEER_NAME}.qr.png"
 
 umask 077
 cat > "$CLIENT_CONF" <<EOF
-# rarcus-server peer: ${PEER_NAME}
+# raph-server-installer peer: ${PEER_NAME}
 # generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
 # AllowedIPs = chnroutes2 complement (mainland-CN excluded; refresh monthly
 #   via scripts/update-route-tables.sh --regenerate-peers)

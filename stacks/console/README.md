@@ -1,7 +1,7 @@
 # console
 
 Docker management UI for the shared VPS. Internally this is Portainer CE;
-externally and in all paths/names it is `console`. See `docs/plan.md` step 4.
+externally and in all paths/names it is `console`. See `docs/design.md` step 4.
 
 ## Hard rules
 
@@ -77,7 +77,7 @@ The UI is bound to `127.0.0.1:9443` on the VPS. Two supported paths:
 ### SSH tunnel (always works)
 
 ```sh
-ssh -L 9443:127.0.0.1:9443 sagan@<vps>
+ssh -L 9443:127.0.0.1:9443 <admin>@<vps>
 # then open https://localhost:9443 in a browser
 ```
 
@@ -100,26 +100,27 @@ touch it.
 
 ## Initial admin setup
 
-1. Create the `sagan` admin account within ~5 minutes of first boot.
-2. Create the `marcus` admin account (same admin role; co-admins).
-3. **Enable MFA** for both accounts (`Settings -> Authentication`).
+1. Create the admin account within ~5 minutes of first boot. (The
+   installer wizard provisions a single admin; add additional
+   admins later via Portainer's Users page.)
+2. **Enable MFA** for the account (`Settings -> Authentication`).
    This MFA layer is INDEPENDENT of the Authelia TOTP that protects
    the public hostname; even if Authelia is bypassed, Portainer's
    own MFA still applies.
-4. Connect the local Docker environment (it is auto-detected via the
+3. Connect the local Docker environment (it is auto-detected via the
    mounted socket; no extra setup needed).
-5. Confirm the `edge` network is visible under
+4. Confirm the `edge` network is visible under
    `Environments -> local -> Networks`.
 
 ## SSO via Authelia (OIDC) — public hostname
 
 After bootstrap, expose Portainer publicly at
-`console.antarctica-engineering.com` behind Authelia. Two layers run
+`console.${DOMAIN}` behind Authelia. Two layers run
 back-to-back:
 
 - **Forward-auth at NPM**: Authelia's auth_request runs on the proxy
   host. Without an Authelia session, the user is redirected to
-  `https://auth.antarctica-engineering.com` for username + TOTP.
+  `https://auth.${DOMAIN}` for username + TOTP.
 - **OIDC inside Portainer**: once forward-auth lets the request through,
   Portainer's own login screen is set to OAuth-only and walks the user
   through the OIDC dance with Authelia (user already has the session,
@@ -138,7 +139,7 @@ There are two paths. Use whichever matches your appetite for clicking.
 
 ```sh
 PORTAINER_URL=https://127.0.0.1:9443 \
-PORTAINER_USER=sagan \
+PORTAINER_USER=<admin> \
 PORTAINER_PASS='<your-portainer-admin-password>' \
 PORTAINER_CLIENT_SECRET='<plaintext from authelia/README §2>' \
 /opt/stacks/console/scripts/configure-oidc.sh
@@ -155,17 +156,17 @@ for exact field values). Idempotent.
 |---|---|
 | Client ID | `console` |
 | Client Secret | *plaintext* from `authelia/README.md` §2 |
-| Authorization URL | `https://auth.antarctica-engineering.com/api/oidc/authorization` |
-| Access Token URL  | `https://auth.antarctica-engineering.com/api/oidc/token` |
-| Resource URL      | `https://auth.antarctica-engineering.com/api/oidc/userinfo` |
-| Redirect URL      | `https://console.antarctica-engineering.com` |
+| Authorization URL | `https://auth.${DOMAIN}/api/oidc/authorization` |
+| Access Token URL  | `https://auth.${DOMAIN}/api/oidc/token` |
+| Resource URL      | `https://auth.${DOMAIN}/api/oidc/userinfo` |
+| Redirect URL      | `https://console.${DOMAIN}` |
 | User Identifier   | `preferred_username` |
 | Scopes            | `openid profile groups email` |
 | Auth Style        | In Params |
 | Automatic User Provisioning | enabled |
 | Default Team      | (leave blank) |
 
-Save. Browse to `https://console.antarctica-engineering.com` in an
+Save. Browse to `https://console.${DOMAIN}` in an
 incognito window. Expected flow:
 
 1. NPM redirects to Authelia portal.
@@ -173,7 +174,7 @@ incognito window. Expected flow:
 3. NPM lets the request through; Portainer detects the session and
    redirects to its own OAuth endpoint.
 4. Authelia shows a one-time consent screen (first time only).
-5. Portainer creates a user record for `sagan` (because
+5. Portainer creates a user record for the admin (because
    `OAuthAutoCreateUsers: true`); the user lands on the dashboard.
 
 ### Group → team mapping
@@ -185,9 +186,9 @@ team:
 2. `Settings → Authentication → OAuth → Automatic team membership` →
    On. **Claim name**: `groups`. **Default team**: `admins` (or
    regex-map `admins` → team `admins`).
-3. Manually promote both `sagan` and `marcus` to Portainer-admins
-   under `Users` (this is a one-time RBAC step; OAuth provisioning
-   creates them as standard users by default).
+3. Manually promote each admin to Portainer-admin under `Users`
+   (this is a one-time RBAC step; OAuth provisioning creates them
+   as standard users by default).
 
 ## Operational notes
 

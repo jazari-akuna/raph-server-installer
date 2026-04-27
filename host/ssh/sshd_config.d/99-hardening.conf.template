@@ -1,0 +1,25 @@
+# /etc/ssh/sshd_config.d/99-hardening.conf
+#
+# WARNING: this drop-in disables root login and password auth.
+# Install ONLY after every admin key is confirmed working from a separate
+# session. Locking yourself out is the failure mode here.
+#
+# Verification before installing:
+#   ssh <admin>@<vps>  -- must succeed with key
+# Then: cp /root/host/ssh/sshd_config.d/99-hardening.conf /etc/ssh/sshd_config.d/
+#       sshd -t && systemctl reload ssh
+#
+# This file is rendered from 99-hardening.conf.template at install time —
+# render-templates.sh substitutes ${ADMIN_USERS_SSH} with the space-separated
+# admin usernames written into AllowUsers. The template lives next to this
+# file in the repo; only the template is committed.
+
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+KbdInteractiveAuthentication no
+MaxAuthTries 3
+X11Forwarding no
+AllowUsers ${ADMIN_USERS_SSH}
+ClientAliveInterval 300
+ClientAliveCountMax 2

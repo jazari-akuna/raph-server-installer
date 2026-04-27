@@ -2,23 +2,25 @@
 # wire-npm-routes.sh — create/update the four proxy hosts in NPM.
 #
 # Usage:
+#   DOMAIN=example.com \
 #   NPM_URL=http://127.0.0.1:81 \
-#   NPM_EMAIL=raphaelcasimir.inge@gmail.com \
+#   NPM_EMAIL=admin@example.com \
 #   NPM_PASS=changeme \
 #   ./wire-npm-routes.sh
 #
 # Or pass NPM_TOKEN directly (skips the login step):
-#   NPM_URL=http://127.0.0.1:81 NPM_TOKEN=eyJhbG... ./wire-npm-routes.sh
+#   DOMAIN=example.com NPM_URL=http://127.0.0.1:81 \
+#       NPM_TOKEN=eyJhbG... ./wire-npm-routes.sh
 #
 # Idempotent: if a proxy host with a given domain already exists, the
 # script PUTs an update; otherwise POSTs a creation. The wildcard cert
 # (NPM cert id = $NPM_CERT_ID, default 3) is required for SSL.
 #
-# Hosts created/updated:
-#   1. auth.antarctica-engineering.com   → authelia:9091     (no fwd-auth)
-#   2. enrol.antarctica-engineering.com  → enrol:8080        (fwd-auth)
-#   3. cloud.antarctica-engineering.com  → cloud:3923        (fwd-auth)
-#   4. console.antarctica-engineering.com→ console:9443 https (fwd-auth)
+# Hosts created/updated (all under ${DOMAIN}):
+#   1. auth.${DOMAIN}    → authelia:9091     (no fwd-auth)
+#   2. enrol.${DOMAIN}   → enrol:8080        (fwd-auth)
+#   3. cloud.${DOMAIN}   → cloud:3923        (fwd-auth)
+#   4. console.${DOMAIN} → console:9443 https (fwd-auth)
 #
 # The forward-auth Advanced config is the same for all three protected
 # hosts and references the snippets in /snippets/ (mounted into the NPM
@@ -27,7 +29,14 @@
 set -euo pipefail
 
 NPM_URL="${NPM_URL:-http://127.0.0.1:81}"
-NPM_CERT_ID="${NPM_CERT_ID:-3}"   # wildcard cert id for *.antarctica-engineering.com
+NPM_CERT_ID="${NPM_CERT_ID:-3}"   # wildcard cert id for *.${DOMAIN}
+
+# DOMAIN is the apex (e.g. example.com); fall back to /etc/server-domain
+# for convenience when running the script on the VPS without explicit env.
+if [[ -z "${DOMAIN:-}" && -r /etc/server-domain ]]; then
+    DOMAIN="$(tr -d '[:space:]' </etc/server-domain)"
+fi
+[[ -n "${DOMAIN:-}" ]] || { echo "DOMAIN must be set (apex domain)" >&2; exit 1; }
 
 log()  { printf '[wire-npm-routes] %s\n' "$*" >&2; }
 die()  { printf '[wire-npm-routes] error: %s\n' "$*" >&2; exit 1; }
@@ -76,21 +85,21 @@ ADV_NONE=""
 # and copies the response, so end-user-visible behaviour is unchanged.
 # (172.17.0.1 is the docker0 bridge gateway — that's how the NPM ingress
 # container reaches the host-network-mode enrol service.)
-read -r -d '' ADV_AUTH_PORTAL <<'EOF' || true
+read -r -d '' ADV_AUTH_PORTAL <<EOF || true
 location = / {
-    if ($arg_rd = "") {
-        return 302 /?rd=https://enrol.antarctica-engineering.com/;
+    if (\$arg_rd = "") {
+        return 302 /?rd=https://enrol.${DOMAIN}/;
     }
     include conf.d/include/proxy.conf;
 }
 
 location = /api/firstfactor {
     proxy_pass http://172.17.0.1:8080/login-intercept;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
     proxy_http_version 1.1;
 }
 EOF
@@ -155,19 +164,19 @@ upsert_proxy_host() {
 #    visitors land on the launcher instead of the "Authenticated"
 #    placeholder.
 upsert_proxy_host \
-    "auth.antarctica-engineering.com" \
+    "auth.${DOMAIN}" \
     "authelia" 9091 "http" \
     "$ADV_AUTH_PORTAL"
 
 # 2. enrol — peer manager. Forward-auth.
 upsert_proxy_host \
-    "enrol.antarctica-engineering.com" \
+    "enrol.${DOMAIN}" \
     "enrol" 8080 "http" \
     "$ADV_FWD_AUTH"
 
 # 3. cloud — copyparty. Forward-auth (replaces existing host id 1).
 upsert_proxy_host \
-    "cloud.antarctica-engineering.com" \
+    "cloud.${DOMAIN}" \
     "cloud" 3923 "http" \
     "$ADV_FWD_AUTH"
 
@@ -175,7 +184,7 @@ upsert_proxy_host \
 #    self-signed cert is accepted because NPM hits the upstream at
 #    https://console:9443 inside the docker network).
 upsert_proxy_host \
-    "console.antarctica-engineering.com" \
+    "console.${DOMAIN}" \
     "console" 9443 "https" \
     "$ADV_FWD_AUTH"
 

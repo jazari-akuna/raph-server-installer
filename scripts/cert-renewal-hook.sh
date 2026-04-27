@@ -19,8 +19,8 @@
 # whenever the live/ directory changes, it:
 #   1. Enumerates live/npm-* directories.
 #   2. Picks the newest one whose fullchain.pem actually covers
-#      *.antarctica-engineering.com (defensive: NPM may grow other certs
-#      later if we add more sites under different roots).
+#      *.${DOMAIN} (defensive: NPM may grow other certs later if we add
+#      more sites under different roots).
 #   3. Re-points qedge's two symlinks at that dir if they don't already.
 #   4. If qedge is currently running, lets the change pick up naturally
 #      — Hysteria 2 (>= v2.2.3) re-reads local TLS files on every
@@ -45,8 +45,18 @@ set -euo pipefail
 LIVE_DIR="/opt/stacks/ingress/letsencrypt/live"
 QEDGE_DIR="/opt/stacks/qedge"
 QEDGE_TLS="${QEDGE_DIR}/tls"
-WILDCARD_DOMAIN="*.antarctica-engineering.com"
+# DOMAIN is written by bootstrap to /etc/server-domain. Allow override via env
+# (useful for tests). Hardcoding a real domain here would leak it into the
+# committed source — instead we fail loudly if neither source is available.
+if [[ -z "${DOMAIN:-}" ]]; then
+    if [[ -r /etc/server-domain ]]; then
+        DOMAIN="$(tr -d '[:space:]' </etc/server-domain)"
+    fi
+fi
+WILDCARD_DOMAIN="*.${DOMAIN:-}"
 TAG="cert-renewal-hook"
+
+[[ -n "${DOMAIN:-}" ]] || { echo "${TAG}: DOMAIN unset and /etc/server-domain unreadable" >&2; exit 1; }
 
 # --- logging --------------------------------------------------------------
 log() { logger -t "${TAG}" -- "$*"; printf '%s: %s\n' "${TAG}" "$*"; }

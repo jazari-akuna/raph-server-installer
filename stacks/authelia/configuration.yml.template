@@ -1,11 +1,18 @@
 # Authelia configuration TEMPLATE — see DESIGN.md for rationale.
 #
-# This file ends in .template because it contains one $-style placeholder
-# (`${AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH}`) that is rendered by
-# envsubst at deploy time:
+# This file ends in .template because it contains $-style placeholders
+# rendered by envsubst at deploy time:
 #
+#   - ${DOMAIN}: apex domain, written by bootstrap to /etc/server-domain.
+#     Used for cookie scope, access-control rules, and Authelia URLs.
+#   - ${AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH}: the pbkdf2-sha512 hash
+#     of the OIDC client secret for the console (Portainer) integration.
+#
+# Render via:
+#
+#   set -a; . /opt/stacks/.env; set +a   # provides DOMAIN
 #   AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH='$pbkdf2-sha512$...' \
-#       envsubst '$AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH' \
+#       envsubst '$DOMAIN $AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH' \
 #       < configuration.yml.template > configuration.yml
 #   sudo chmod 0600 configuration.yml
 #
@@ -37,7 +44,7 @@ log:
 ###############################################################################
 totp:
   disable: false
-  issuer: 'antarctica-engineering.com'
+  issuer: '${DOMAIN}'
   algorithm: 'sha1'    # Authy/Google Authenticator compat
   digits: 6
   period: 30
@@ -92,21 +99,21 @@ access_control:
 
   rules:
     # Authelia portal itself — never gate (would loop).
-    - domain: 'auth.antarctica-engineering.com'
+    - domain: 'auth.${DOMAIN}'
       policy: 'bypass'
 
     # Public file server: password-only for both admins.
-    - domain: 'cloud.antarctica-engineering.com'
+    - domain: 'cloud.${DOMAIN}'
       policy: 'one_factor'
 
     # Peer-management UI: password-only, admins-only group.
-    - domain: 'enrol.antarctica-engineering.com'
+    - domain: 'enrol.${DOMAIN}'
       policy: 'one_factor'
       subject:
         - 'group:admins'
 
     # Portainer: password-only, admins-only group.
-    - domain: 'console.antarctica-engineering.com'
+    - domain: 'console.${DOMAIN}'
       policy: 'one_factor'
       subject:
         - 'group:admins'
@@ -122,9 +129,9 @@ session:
   remember_me: '1M'
 
   cookies:
-    - domain: 'antarctica-engineering.com'
-      authelia_url: 'https://auth.antarctica-engineering.com'
-      default_redirection_url: 'https://enrol.antarctica-engineering.com/'
+    - domain: '${DOMAIN}'
+      authelia_url: 'https://auth.${DOMAIN}'
+      default_redirection_url: 'https://enrol.${DOMAIN}/'
 
 ###############################################################################
 # Regulation — brute-force lockout (5 attempts / 15 min)
@@ -192,7 +199,7 @@ identity_providers:
         authorization_policy: 'one_factor'
         require_pkce: false
         redirect_uris:
-          - 'https://console.antarctica-engineering.com'
+          - 'https://console.${DOMAIN}'
         scopes:
           - 'openid'
           - 'profile'

@@ -3,13 +3,13 @@
 # Drop into ~/.config/systemd/user/ on the admin's laptop alongside the
 # .service unit. Substitute the <USER> placeholder before installing:
 #
-#   sed "s/<USER>/sagan/g" restic-backup.timer \
-#       > ~/.config/systemd/user/restic-backup-sagan.timer
+#   sed "s/<USER>/alice/g" restic-backup.timer \
+#       > ~/.config/systemd/user/restic-backup-alice.timer
 #   systemctl --user daemon-reload
-#   systemctl --user enable --now restic-backup-sagan.timer
+#   systemctl --user enable --now restic-backup-alice.timer
 #
 # Placeholders:
-#   <USER>  — sagan | marcus. Must match the .service file's <USER>.
+#   <USER>  — VPS account name. Must match the .service file's <USER>.
 #
 # Schedule: daily at 03:00 laptop-local, with up to 30 minutes of
 # randomized delay so two laptops backing up the same VPS don't collide
@@ -22,7 +22,7 @@
 
 [Unit]
 Description=Daily timer for restic-backup-<USER>.service
-Documentation=file:///%h/Projects/rarcus-server/docs/backups.md
+Documentation=file:///%h/Projects/raph-server-installer/docs/backups.md
 
 [Timer]
 Unit=restic-backup-<USER>.service

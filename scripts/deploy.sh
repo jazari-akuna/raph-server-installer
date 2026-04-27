@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy.sh — laptop -> VPS sync for rarcus-server.
+# deploy.sh — laptop -> VPS sync for raph-server-installer.
 #
 # Edit on the laptop, commit, run this. Never edit files on the server.
 # Source of truth lives at <repo>/ and is rsync'd to the VPS over SSH.
@@ -7,7 +7,7 @@
 #
 # Usage: ./scripts/deploy.sh [<vps-host>]
 #        DEPLOY_HOST=foo.example   ./scripts/deploy.sh
-#        DEPLOY_USER=marcus        ./scripts/deploy.sh   # login as marcus
+#        DEPLOY_USER=<admin>       ./scripts/deploy.sh   # login as <admin>
 #        DEPLOY_KEY=~/.ssh/id_foo  ./scripts/deploy.sh   # use a specific key
 #        DEPLOY_DIRTY=1            ./scripts/deploy.sh   # skip dirty-tree check
 #
@@ -16,8 +16,8 @@
 # fire only on real change.
 #
 # Auth model: root SSH is disabled on the VPS. We log in as a non-root
-# admin (sagan or marcus, both NOPASSWD-sudo) and use sudo on the remote
-# end so rsync and the apply script can write under /root and /opt.
+# admin (NOPASSWD-sudo) and use sudo on the remote end so rsync and the
+# apply script can write under /root and /opt.
 
 set -euo pipefail
 
@@ -33,20 +33,17 @@ USAGE
     ./scripts/deploy.sh [<vps-host>]
 
 ARGUMENTS
-    <vps-host>      SSH host (<user>@<vps-host>). Defaults to:
-                      $DEPLOY_HOST  if set
-                      antarctica-engineering.com  otherwise
+    <vps-host>      SSH host (<user>@<vps-host>). Defaults to $DEPLOY_HOST.
+                    Either argv or $DEPLOY_HOST is required.
 
 ENVIRONMENT
-    DEPLOY_HOST     Default VPS host if no argv given.
-    DEPLOY_USER     SSH login user. Default: sagan.
-                    Accepts: sagan | marcus | root.
+    DEPLOY_HOST     Default VPS host if no argv given. (Required if no argv.)
+    DEPLOY_USER     SSH login user. Required.
                     (root only useful if hardening is rolled back —
-                    PermitRootLogin no is currently in force.)
+                    PermitRootLogin no is the default in this installer.)
     DEPLOY_KEY      Identity file path passed to ssh/rsync as -i.
-                    If unset and DEPLOY_USER=marcus, defaults to
-                    ~/.ssh/id_marcus_server. Otherwise SSH picks the
-                    default key (typically ~/.ssh/id_ed25519).
+                    If unset, SSH picks the default key (typically
+                    ~/.ssh/id_ed25519).
     DEPLOY_DIRTY=1  Skip the "uncommitted changes" check. Use only when
                     you really mean it (e.g. mid-bisection).
 
@@ -84,12 +81,17 @@ case "${1:-}" in
     -h|--help|help) print_help; exit 0 ;;
 esac
 
-HOST="${1:-${DEPLOY_HOST:-antarctica-engineering.com}}"
-DEPLOY_USER="${DEPLOY_USER:-sagan}"
-
-# Default key for marcus iff none was explicitly provided.
-if [[ -z "${DEPLOY_KEY:-}" && "${DEPLOY_USER}" == "marcus" ]]; then
-    DEPLOY_KEY="${HOME}/.ssh/id_marcus_server"
+HOST="${1:-${DEPLOY_HOST:-}}"
+if [[ -z "${HOST}" ]]; then
+    echo "deploy.sh: VPS host not given (argv) and DEPLOY_HOST is unset." >&2
+    echo "           Run: ./scripts/deploy.sh <vps-host>" >&2
+    echo "           or:  DEPLOY_HOST=<vps-host> ./scripts/deploy.sh" >&2
+    exit 1
+fi
+DEPLOY_USER="${DEPLOY_USER:-}"
+if [[ -z "${DEPLOY_USER}" ]]; then
+    echo "deploy.sh: DEPLOY_USER must be set (the SSH login admin)." >&2
+    exit 1
 fi
 
 SSH_TARGET="${DEPLOY_USER}@${HOST}"
@@ -118,16 +120,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Locate repo root: walk up from script dir until we find docs/plan.md
+# 1. Locate repo root: walk up from script dir until we find docs/design.md
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_ROOT="${SCRIPT_DIR}"
-while [[ "${REPO_ROOT}" != "/" && ! -f "${REPO_ROOT}/docs/plan.md" ]]; do
+while [[ "${REPO_ROOT}" != "/" && ! -f "${REPO_ROOT}/docs/design.md" ]]; do
     REPO_ROOT="$( dirname "${REPO_ROOT}" )"
 done
-if [[ ! -f "${REPO_ROOT}/docs/plan.md" ]]; then
-    echo "deploy.sh: could not locate repo root (no docs/plan.md found)" >&2
+if [[ ! -f "${REPO_ROOT}/docs/design.md" ]]; then
+    echo "deploy.sh: could not locate repo root (no docs/design.md found)" >&2
     exit 1
 fi
 cd "${REPO_ROOT}"

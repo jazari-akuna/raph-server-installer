@@ -1,6 +1,6 @@
 # gw0 Performance Tuning
 
-Operator-facing reference for the AmneziaWG gateway (`gw0`). Companion to `docs/plan.md` Step 8 and `scripts/install-gw0.sh`. Target: **>=50 Mbps per peer sustained, <=20% throughput overhead** vs raw VPS bandwidth.
+Operator-facing reference for the AmneziaWG gateway (`gw0`). Companion to `docs/design.md` Step 8 and `scripts/install-gw0.sh`. Target: **>=50 Mbps per peer sustained, <=20% throughput overhead** vs raw VPS bandwidth.
 
 ## TL;DR
 

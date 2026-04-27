@@ -6,10 +6,10 @@
 # `store-mount@<user>.service` is what unlocks it on demand thereafter.
 #
 # Usage:  sudo create-store-volume.sh <username> <size-GB>
-# Example: sudo create-store-volume.sh sagan 50
+# Example: sudo create-store-volume.sh alice 50
 #
 # Pattern derived from <https://ocv.me/doc/unix/portable-luks.sh>, adjusted to
-# the cipher/KDF choices recorded in docs/plan.md.
+# the cipher/KDF choices recorded in docs/design.md.
 
 set -euo pipefail
 

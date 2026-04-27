@@ -13,7 +13,7 @@ reference for everything inside the `enrol` service from this revision
 forward.
 
 > **Camouflage.** "enrol" is the operator-facing service name. The
-> public hostname is `enrol.antarctica-engineering.com`. Nothing in
+> public hostname is `enrol.${DOMAIN}` (e.g. `enrol.example.com`). Nothing in
 > URL paths, container names, audit-log paths, or the UI mentions
 > luks/wireguard/amnezia/vault. See `claude-readme.md` § "Camouflage
 > naming."
@@ -37,7 +37,7 @@ upstream docs at the dates indicated.
       disabled: false                   # bool
       displayname: 'Sagan'              # str
       password: '$argon2id$v=19$m=...'  # argon2id PHC string
-      email: 'sagan@…'                  # str
+      email: 'alice@…'                  # str
       groups: ['admins']                # []str
       # OIDC claims also accepted:
       #   given_name, family_name, middle_name, nickname,
@@ -84,10 +84,9 @@ upstream docs at the dates indicated.
   copyparty does **not** auto-create on-disk paths; the destination
   must exist or the volume serves empty / 404.
 
-- The current production layout uses two static per-user bind-mounts
-  (`/srv/store/mnt/sagan:/w/sagan` + `/srv/store/mnt/marcus:/w/marcus`).
-  Adding a third user requires editing compose + recreating the
-  container.
+- A naive layout uses one static per-user bind-mount in compose
+  (`/srv/store/mnt/<u>:/w/<u>`). Adding a new user requires editing
+  compose + recreating the container.
 
 - **Decision**: replace with a single bind-mount
   `/srv/store/mnt:/w` so any new on-disk subdirectory under
@@ -181,16 +180,15 @@ Filesystem: ext4 with label `store_<u>`. Mountpoint: `/srv/store/mnt/<u>`,
 
 2. **LUKS storage** per user — create / change-passphrase / unlock
    (mount) / lock (unmount) / delete. Volumes follow the layout in
-   `docs/plan.md` § Filesystem Layout: 50 GB sparse blob at
+   `docs/design.md` § Filesystem Layout: 50 GB sparse blob at
    `/srv/store/data/<u>.img`, mountpoint `/srv/store/mnt/<u>`, mapper
    `store_<u>`. Volume creation is one of the steps in user-create;
    volume deletion is part of user-delete (`shred -uvz` then `rm`).
 
 3. **Devices (peers)** — same model as the original `enrol` (gw0 peer
    list, AmneziaWG keys, AllowedIPs management). Device naming is
-   constrained to `<user>-<tag>` so the UI can group devices by their
-   owning user; the existing four peers (`sagan-laptop`, `sagan-phone`,
-   `marcus-laptop`, `marcus-phone`) follow this convention already.
+   constrained to `<user>-<tag>` (e.g. `alice-laptop`, `alice-phone`)
+   so the UI can group devices by their owning user.
 
 4. **Audit log** — append-only JSON-line log on host disk
    (`/etc/amnezia/amneziawg/peers-audit.log`, kept under that path
@@ -272,7 +270,7 @@ Filesystem: ext4 with label `store_<u>`. Mountpoint: `/srv/store/mnt/<u>`,
     access or compromise of the enrol Go binary itself.
 
 - **What this does NOT defend against:**
-  - A co-admin going rogue (out of scope per `docs/plan.md` threat
+  - A co-admin going rogue (out of scope per `docs/design.md` threat
     model — co-admins can already read each other's data).
   - Compromise of the Authelia portal (would let an attacker into
     enrol with admin role).
@@ -318,9 +316,8 @@ type Volume struct {
 ```
 
 - Existence is determined by file stat (`<.img>` exists ⇒ volume
-  exists). Adoption of pre-existing volumes (`sagan.img`, `marcus.img`)
-  is automatic — enrol does not have a "register existing volume"
-  step.
+  exists). Adoption of pre-existing volumes is automatic — enrol does
+  not have a "register existing volume" step.
 
 ### 4.3 Device (peer)
 
@@ -482,9 +479,8 @@ On first run after deploy:
 3. It enumerates peers from gw0.conf + sidecar JSON, groups them by
    user prefix as described in § 4.3, and renders.
 
-There is no separate "import" step. The existing two users
-(`sagan`, `marcus`) and their four peers and two LUKS blobs appear
-exactly as if enrol had created them.
+There is no separate "import" step. Any users, peers, and LUKS blobs
+that pre-date the wizard appear exactly as if enrol had created them.
 
 ---
 

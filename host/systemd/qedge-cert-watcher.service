@@ -3,7 +3,7 @@
 # Oneshot triggered by qedge-cert-watcher.path whenever NPM's
 # letsencrypt live/ directory changes. Runs the rotation hook, which
 # repoints /opt/stacks/qedge/tls/{fullchain,privkey}.pem at the newest
-# npm-N/ dir whose cert covers *.antarctica-engineering.com.
+# npm-N/ dir whose cert covers *.${DOMAIN} (read from /etc/server-domain).
 #
 # Deliberately NOT WantedBy any target — this unit is activated only
 # by the .path unit (or manually for testing). Enabling it directly

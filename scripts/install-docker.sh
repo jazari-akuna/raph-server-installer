@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
-# install-docker.sh — Step 3 of docs/plan.md
+# install-docker.sh — Step 3 of docs/design.md
 #
 # Installs Docker CE from the official Docker APT repo on Ubuntu 24.04 (noble),
-# adds the two co-admins to the `docker` group, writes a conservative
-# /etc/docker/daemon.json (json-file logging with rotation, live-restore), and
-# creates the shared `edge` Docker network that all ingress-fronted stacks join.
+# adds admins (taken from ADMIN_USERS env var) to the `docker` group, writes a
+# conservative /etc/docker/daemon.json (json-file logging with rotation,
+# live-restore), and creates the shared `edge` Docker network that all
+# ingress-fronted stacks join.
 #
 # Idempotent. Safe to re-run. Run as root on the VPS.
 #
@@ -31,7 +32,9 @@ if [[ "${VERSION_CODENAME:-}" != "noble" ]]; then
     echo "WARNING: expected Ubuntu 24.04 'noble', found '${VERSION_CODENAME:-unknown}'." >&2
 fi
 
-ADMINS=(sagan marcus)
+# ADMIN_USERS is provided by the bootstrap orchestrator (whitespace-separated).
+# Empty is acceptable here — we'll just skip the docker-group step.
+read -r -a ADMINS <<<"${ADMIN_USERS:-}"
 KEYRING=/etc/apt/keyrings/docker.asc
 SOURCES_LIST=/etc/apt/sources.list.d/docker.list
 DAEMON_JSON=/etc/docker/daemon.json
