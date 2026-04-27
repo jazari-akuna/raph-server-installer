@@ -274,8 +274,13 @@ type loginRequest struct {
 }
 
 type loginResponse struct {
-	Token   string `json:"token"`
-	Expires int64  `json:"expires"`
+	Token string `json:"token"`
+	// NPM 2.14 changed `expires` from a Unix epoch int64 to an ISO-8601
+	// datetime string (e.g. "2026-04-28T11:29:11.068Z"). Decode as a raw
+	// json.RawMessage so the schema change doesn't blow up bootstrap; we
+	// don't actually use the field — the JWT's own exp claim is what
+	// matters for refresh decisions.
+	Expires json.RawMessage `json:"expires"`
 }
 
 // Login obtains an admin bearer token by POSTing to /api/tokens. The
