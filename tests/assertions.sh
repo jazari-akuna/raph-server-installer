@@ -187,6 +187,74 @@ assert_http_status() {
   fi
 }
 
+# assert_http_303_to URL EXPECTED_LOCATION_SUFFIX [DESC] [CURL_EXTRA_ARGS...]
+# Verifies a request to URL returns HTTP 303 and the Location header ends
+# with the supplied suffix. The wizard's step transitions all 303 to the
+# next route, and the canonical assertion is "did we land on the right
+# next page?" rather than the full URL (the host/port may be 127.0.0.1
+# in tests but example.com in production).
+assert_http_303_to() {
+  local url="$1" want_suffix="$2" desc="${3:-303 to $2 from $1}"
+  if [[ $# -ge 3 ]]; then shift 3; else shift $#; fi
+  # The remaining args are extra curl flags (e.g. --cookie, -d).
+  local headers
+  headers="$(curl -sS -o /dev/null -D - --max-time 5 "$@" "$url" 2>/dev/null || true)"
+  local code loc
+  code="$(printf '%s\n' "$headers" | awk 'NR==1 {print $2; exit}')"
+  loc="$(printf '%s\n' "$headers" \
+    | awk 'BEGIN{IGNORECASE=1} /^location:/ {sub(/^[Ll]ocation:[[:space:]]*/, ""); sub(/\r$/,""); print; exit}')"
+  if [[ "$code" != "303" ]]; then
+    _fail "$desc — got HTTP ${code:-000}, headers: $(printf '%s' "$headers" | tr '\n' ' ' | head -c 200)"
+    return 1
+  fi
+  if [[ "$loc" == *"$want_suffix" ]]; then
+    _pass "$desc — Location: $loc"
+  else
+    _fail "$desc — Location='$loc', wanted suffix '$want_suffix'"
+  fi
+}
+
+# assert_http_cookie_set URL COOKIE_NAME [DESC] [CURL_EXTRA_ARGS...]
+# Verifies that a request returns a Set-Cookie for the given name.
+# Used to confirm the wizard's first-GET cookie handshake.
+assert_http_cookie_set() {
+  local url="$1" name="$2" desc="${3:-Set-Cookie $2 on $1}"
+  if [[ $# -ge 3 ]]; then shift 3; else shift $#; fi
+  local headers
+  headers="$(curl -sS -o /dev/null -D - --max-time 5 "$@" "$url" 2>/dev/null || true)"
+  if printf '%s\n' "$headers" \
+       | awk -v n="$name" 'BEGIN{IGNORECASE=1} /^set-cookie:/ { sub(/^[Ss]et-[Cc]ookie:[[:space:]]*/,""); print }' \
+       | grep -q "^${name}="; then
+    _pass "$desc"
+  else
+    _fail "$desc — no Set-Cookie for '$name' in headers"
+  fi
+}
+
+# assert_sse_event_within FILE EVENT_NAME TIMEOUT_SECS [DESC]
+# Polls FILE (a captured SSE response body) for `event: EVENT_NAME` and
+# passes if it appears within TIMEOUT_SECS. The caller is expected to be
+# running `curl -N ... > FILE &` in the background; this function watches
+# FILE grow. Returns 0 on first observation; never blocks past the deadline.
+assert_sse_event_within() {
+  local file="$1" event="$2" timeout="$3"
+  local desc="${4:-SSE 'event: $event' within ${timeout}s in $(basename "$file")}"
+  local deadline=$(( $(date +%s) + timeout ))
+  while (( $(date +%s) < deadline )); do
+    if [[ -f "$file" ]] && grep -qE "^event:[[:space:]]*${event}\b" "$file"; then
+      _pass "$desc"
+      return 0
+    fi
+    sleep 1
+  done
+  local tail_lines=""
+  if [[ -f "$file" ]]; then
+    tail_lines="$(tail -20 "$file" 2>/dev/null | tr '\n' '|')"
+  fi
+  _fail "$desc — last lines: ${tail_lines:-<file empty or missing>}"
+  return 1
+}
+
 # assert_setup_token_format [PATH]
 # Default path /etc/raph-installer/setup-token. Verifies 32 chars, [A-Za-z0-9].
 assert_setup_token_format() {

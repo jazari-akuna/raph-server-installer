@@ -54,11 +54,41 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && apt-get clean
 
+# Go 1.23 — needed by the wizard_walkthrough scenario (Wave 4B), which
+# builds stacks/enrol/ inside the container and runs the binary so it
+# can curl through the setup wizard's HTTP routes. Ubuntu 24.04's
+# golang-go package is 1.22, which is older than enrol's go.mod
+# (`go 1.23`); install the upstream tarball instead.
+ARG GO_VERSION=1.23.4
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) goarch=amd64 ;; \
+      arm64) goarch=arm64 ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${goarch}.tar.gz" \
+      -o /tmp/go.tgz; \
+    tar -C /usr/local -xzf /tmp/go.tgz; \
+    rm /tmp/go.tgz; \
+    /usr/local/go/bin/go version
+ENV PATH="/usr/local/go/bin:${PATH}"
+# /tmp/go is writable by every user inside the container — the harness
+# runs scenarios as root but the wizard scenario could run anything; a
+# shared cache path keeps the second `go build` instant without forcing
+# the caller to think about ownership.
+ENV GOPATH=/tmp/go
+ENV GOCACHE=/tmp/go-cache
+
 # Non-root tester user for ssh-probe scenarios. Locked password (key only).
+# Wave 4B: ensure /tmp/go and /tmp/go-cache exist with permissive perms so
+# the wizard_walkthrough scenario's `go build` can write its cache
+# regardless of which user the harness runs scenarios as.
 RUN useradd -m -s /bin/bash tester \
  && mkdir -p /home/tester/.ssh \
  && chown -R tester:tester /home/tester/.ssh \
- && chmod 700 /home/tester/.ssh
+ && chmod 700 /home/tester/.ssh \
+ && install -d -m 1777 /tmp/go /tmp/go-cache
 
 # /run/sshd needs to exist for sshd to start.
 RUN mkdir -p /run/sshd

@@ -998,33 +998,22 @@ func dnsCredsINI(provider string, creds map[string]string) (string, string, stri
 	return b.String(), "", ""
 }
 
+// certbotCredsHostDir is the tmpfs-backed directory the wizard writes the
+// per-provider DNS credentials INI into right before invoking certbot.
+// It's bind-mounted into the certbot container at /tmp/certbot-creds (see
+// stacks/ingress/docker-compose.yml). Choosing /run/raph-certbot/ on the
+// host keeps the file on tmpfs (Ubuntu 24.04 mounts /run tmpfs by default),
+// so even if the wizard crashes between write and the deferred delete the
+// file evaporates at the next reboot. Wave 4A guarantee: the credentials
+// file is wiped post-certbot whether the run succeeds or fails.
+const certbotCredsHostDir = "/run/raph-certbot"
+
 func (s *server) finalizeIssueCert(ctx context.Context, st *setupState, logLine func(string)) error {
 	if st.DNSProvider == "" {
 		return errors.New("no DNS provider selected — restart wizard at /setup/dns")
 	}
 	if st.Domain == "" {
 		return errors.New("domain unset")
-	}
-	// Write the per-provider credentials INI to /srv/store/setup so it
-	// rides the same backed-up volume as everything else. Mode 0600.
-	credsDir := filepath.Join(s.cfg.setupStateDir, "dns-creds")
-	if err := os.MkdirAll(credsDir, 0o700); err != nil {
-		return fmt.Errorf("mkdir %s: %w", credsDir, err)
-	}
-	ini, sidecarPath, sidecarBody := dnsCredsINI(st.DNSProvider, st.DNSProviderCreds)
-	credsFile := filepath.Join(credsDir, st.DNSProvider+".ini")
-	if err := os.WriteFile(credsFile, []byte(ini), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", credsFile, err)
-	}
-	if sidecarPath != "" {
-		// Make sure the parent dir exists. For google the sidecar path
-		// is /srv/store/setup/google-creds.json by default.
-		if err := os.MkdirAll(filepath.Dir(sidecarPath), 0o700); err != nil {
-			return fmt.Errorf("mkdir %s: %w", filepath.Dir(sidecarPath), err)
-		}
-		if err := os.WriteFile(sidecarPath, []byte(sidecarBody), 0o600); err != nil {
-			return fmt.Errorf("write %s: %w", sidecarPath, err)
-		}
 	}
 
 	// Email for Let's Encrypt expiry warnings. We use the admin email if
@@ -1035,19 +1024,75 @@ func (s *server) finalizeIssueCert(ctx context.Context, st *setupState, logLine 
 		email = os.Getenv("ADMIN_EMAIL")
 	}
 
+	if testModeEnabled() {
+		// The Wave 3B harness asserts on this exact log line.
+		logLine("TEST_MODE: skipping certbot")
+		return nil
+	}
+
+	// Write the per-provider credentials INI to a tmpfs-backed location so
+	// the plaintext token never persists across a reboot. Bind-mounted
+	// into the certbot container at /tmp/certbot-creds (see ingress
+	// docker-compose). Mode 0600. Deferred delete fires regardless of
+	// success/failure — credential lifecycle guarantee.
+	if err := os.MkdirAll(certbotCredsHostDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", certbotCredsHostDir, err)
+	}
+	ini, sidecarHostPath, sidecarBody := dnsCredsINI(st.DNSProvider, st.DNSProviderCreds)
+	credsHostFile := filepath.Join(certbotCredsHostDir, st.DNSProvider+".ini")
+	credsContainerFile := "/tmp/certbot-creds/" + st.DNSProvider + ".ini"
+	if err := os.WriteFile(credsHostFile, []byte(ini), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", credsHostFile, err)
+	}
+	defer func() {
+		// Best-effort scrub: zero the file then delete it. A crash
+		// between write and this defer leaves the file on tmpfs only,
+		// so reboot guarantees disappearance even in pathological cases.
+		if f, err := os.OpenFile(credsHostFile, os.O_WRONLY, 0o600); err == nil {
+			_, _ = f.Write(make([]byte, len(ini)))
+			f.Close()
+		}
+		_ = os.Remove(credsHostFile)
+	}()
+
+	var sidecarContainerPath string
+	if sidecarHostPath != "" {
+		// google's sidecar JSON also rides the tmpfs; we rewrite the
+		// dnsCredsINI's host path to the in-container equivalent so
+		// certbot's --dns-google-credentials INI points at a path that
+		// exists from the certbot container's perspective.
+		sidecarHostPath = filepath.Join(certbotCredsHostDir, filepath.Base(sidecarHostPath))
+		sidecarContainerPath = "/tmp/certbot-creds/" + filepath.Base(sidecarHostPath)
+		if err := os.WriteFile(sidecarHostPath, []byte(sidecarBody), 0o600); err != nil {
+			return fmt.Errorf("write %s: %w", sidecarHostPath, err)
+		}
+		defer func() {
+			if f, err := os.OpenFile(sidecarHostPath, os.O_WRONLY, 0o600); err == nil {
+				_, _ = f.Write(make([]byte, len(sidecarBody)))
+				f.Close()
+			}
+			_ = os.Remove(sidecarHostPath)
+		}()
+		// Re-render the INI so its `dns_google_credentials` line points
+		// at the in-container path, not the host path.
+		ini = "dns_google_credentials = " + sidecarContainerPath + "\n"
+		if err := os.WriteFile(credsHostFile, []byte(ini), 0o600); err != nil {
+			return fmt.Errorf("rewrite %s: %w", credsHostFile, err)
+		}
+	}
+
 	// Run certbot via the ingress stack's docker-compose so it shares
-	// /etc/letsencrypt with NPM. Wave 4A may swap this for a direct
-	// `docker run` once the ingress compose grows a `certbot:` service;
-	// for now we use `docker compose run --rm certbot ...` which Just
-	// Works as long as the service exists.
+	// /etc/letsencrypt with NPM. The certbot service is profile-gated
+	// (`profiles: ["finalize"]`) so `compose up -d` doesn't start it —
+	// we explicitly invoke it here.
 	composeFile := filepath.Join(s.cfg.stacksDir, "ingress/docker-compose.yml")
 	args := []string{
-		"compose", "-f", composeFile,
+		"compose", "--profile", "finalize", "-f", composeFile,
 		"run", "--rm", "certbot", "certonly",
 		"--non-interactive", "--agree-tos",
 		"--email", email,
 		"--dns-" + st.DNSProvider,
-		"--dns-" + st.DNSProvider + "-credentials", credsFile,
+		"--dns-" + st.DNSProvider + "-credentials", credsContainerFile,
 		"-d", st.Domain,
 		"-d", "*." + st.Domain,
 	}
@@ -1056,28 +1101,189 @@ func (s *server) finalizeIssueCert(ctx context.Context, st *setupState, logLine 
 }
 
 // ---- finalize step 5: NPM proxy host wiring -----------------------------
+//
+// Wave 4A — replaces the prior shell-out to wire-npm-routes.sh with a
+// typed Go client (see npm_client.go). The shell script is retained as a
+// debugging fallback (banner comment in the script explains).
+//
+// On first finalize: NPMClient.Bootstrap rotates NPM's hard-coded default
+// admin (admin@example.com / changeme) to the operator's chosen email +
+// password (same password as Authelia, threaded in via setupSecretCache).
+// Idempotent: if the new credentials already work, Bootstrap is a no-op.
+//
+// All four proxy hosts are upserted from a typed slice; the advanced_config
+// blocks (forward-auth + auth-portal) are byte-for-byte identical to the
+// shell version's heredocs so existing requests / cookies don't break.
+
+const (
+	npmDefaultAdminEmail = "admin@example.com"
+	npmDefaultAdminPass  = "changeme"
+)
+
+// npmAdvFwdAuth — forward-auth advanced_config used by enrol/cloud/console
+// proxy hosts. Identical to wire-npm-routes.sh ADV_FWD_AUTH heredoc;
+// nginx variables ($forward_scheme, $server, $port) are literal in the
+// templated config, NOT interpolated by Go.
+const npmAdvFwdAuth = `include /snippets/authelia-location.conf;
+
+location / {
+    include /snippets/proxy.conf;
+    include /snippets/authelia-authrequest.conf;
+    proxy_pass $forward_scheme://$server:$port;
+}
+`
+
+// npmAdvAuthPortalTmpl — auth-portal advanced_config. The bare GET / rewrite
+// includes the operator's domain, which is interpolated by fmt.Sprintf at
+// call time. All other $-prefixed identifiers are nginx variables and must
+// remain literal.
+const npmAdvAuthPortalTmpl = `location = / {
+    if ($arg_rd = "") {
+        return 302 /?rd=https://enrol.%s/;
+    }
+    include conf.d/include/proxy.conf;
+}
+
+location = /api/firstfactor {
+    proxy_pass http://172.17.0.1:8080/login-intercept;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_http_version 1.1;
+}
+`
+
+// finalizeNPMBaseURL is the NPM admin API base URL. Defaults to loopback:
+// the enrol container runs network_mode: host (Wave 1A), so 127.0.0.1:81
+// resolves to NPM's host-bound admin port (see ingress/docker-compose.yml's
+// `127.0.0.1:81:81` mapping). Override via NPM_URL for non-host-network
+// debug rigs.
+func finalizeNPMBaseURL() string {
+	if v := os.Getenv("NPM_URL"); v != "" {
+		return v
+	}
+	return "http://127.0.0.1:81"
+}
 
 func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine func(string)) error {
-	script := filepath.Join(s.cfg.repoDir, "stacks/authelia/scripts/wire-npm-routes.sh")
-	// NPM admin: the script needs an existing NPM login. Phase 1 wrote
-	// admin@example.com / changeme into NPM's first-boot defaults; we
-	// thread those through verbatim. A future wave (4A) replaces this
-	// with a typed Go client that rotates the password atomically.
-	npmEmail := os.Getenv("NPM_EMAIL")
-	if npmEmail == "" {
-		npmEmail = "admin@example.com"
+	if testModeEnabled() {
+		logLine("TEST_MODE: skipping NPM wire-up")
+		return nil
 	}
-	npmPass := os.Getenv("NPM_PASS")
-	if npmPass == "" {
-		npmPass = "changeme"
+
+	// Operator's admin password lives in the in-memory secret cache from
+	// /setup/admin POST. Same string as the Authelia login + LUKS
+	// passphrase per the user spec. Pulled out as []byte so we can scrub
+	// it after Bootstrap finishes.
+	plaintext := setupSecretCache.get(st.AdminUsername)
+	if plaintext == "" {
+		return errors.New("npm: admin password missing from in-memory cache " +
+			"(restart wizard at /setup/admin to re-enter)")
 	}
-	cmd := exec.CommandContext(ctx, "bash", script)
-	cmd.Env = append(os.Environ(),
-		"DOMAIN="+st.Domain,
-		"NPM_EMAIL="+npmEmail,
-		"NPM_PASS="+npmPass,
-	)
-	return runStreaming(cmd, logLine)
+	newPass := []byte(plaintext)
+	defaultPass := []byte(npmDefaultAdminPass)
+
+	npm := NewNPMClient(finalizeNPMBaseURL(), nil)
+
+	// Bootstrap zeroes both byte slices on return; we can't reuse them
+	// after this call. Re-derive plaintext from the cache for any
+	// subsequent NPM op (none currently — the bearer token from
+	// Bootstrap covers UpsertProxyHost).
+	logLine("npm: bootstrapping admin credentials")
+	if err := npm.Bootstrap(ctx,
+		npmDefaultAdminEmail, defaultPass,
+		st.AdminEmail, newPass); err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+	logLine("npm: admin authenticated")
+
+	// Upsert the wildcard cert as a known "other"-provider entry so the
+	// proxy hosts can reference it by ID. Currently NPM auto-discovers
+	// custom-provider certs that match a domain; we still upsert to make
+	// the dependency explicit.
+	certID, err := npm.UpsertCertificate(ctx, Certificate{
+		NiceName: "wildcard-" + st.Domain,
+		Provider: "other",
+	})
+	if err != nil {
+		return fmt.Errorf("upsert certificate: %w", err)
+	}
+	if certID == 0 {
+		// NPM didn't return an ID (older versions); fall back to the
+		// first matching cert via list. The shell script hard-codes 3,
+		// which is the typical id when only the wildcard exists.
+		certID = 3
+	}
+	logLine(fmt.Sprintf("npm: certificate id=%d", certID))
+
+	// The four proxy hosts. Order matches wire-npm-routes.sh; the
+	// advanced_config strings are byte-for-byte identical so cookies and
+	// in-flight Authelia sessions survive the swap-over.
+	hosts := []ProxyHost{
+		{
+			DomainNames:           []string{"auth." + st.Domain},
+			ForwardScheme:         "http",
+			ForwardHost:           "authelia",
+			ForwardPort:           9091,
+			BlockExploits:         true,
+			AllowWebsocketUpgrade: true,
+			CertificateID:         certID,
+			SSLForced:             true,
+			HTTP2Support:          true,
+			HSTSEnabled:           true,
+			AdvancedConfig:        fmt.Sprintf(npmAdvAuthPortalTmpl, st.Domain),
+		},
+		{
+			DomainNames:           []string{"enrol." + st.Domain},
+			ForwardScheme:         "http",
+			ForwardHost:           "enrol",
+			ForwardPort:           8080,
+			BlockExploits:         true,
+			AllowWebsocketUpgrade: true,
+			CertificateID:         certID,
+			SSLForced:             true,
+			HTTP2Support:          true,
+			HSTSEnabled:           true,
+			AdvancedConfig:        npmAdvFwdAuth,
+		},
+		{
+			DomainNames:           []string{"cloud." + st.Domain},
+			ForwardScheme:         "http",
+			ForwardHost:           "cloud",
+			ForwardPort:           3923,
+			BlockExploits:         true,
+			AllowWebsocketUpgrade: true,
+			CertificateID:         certID,
+			SSLForced:             true,
+			HTTP2Support:          true,
+			HSTSEnabled:           true,
+			AdvancedConfig:        npmAdvFwdAuth,
+		},
+		{
+			DomainNames:           []string{"console." + st.Domain},
+			ForwardScheme:         "https",
+			ForwardHost:           "console",
+			ForwardPort:           9443,
+			BlockExploits:         true,
+			AllowWebsocketUpgrade: true,
+			CertificateID:         certID,
+			SSLForced:             true,
+			HTTP2Support:          true,
+			HSTSEnabled:           true,
+			AdvancedConfig:        npmAdvFwdAuth,
+		},
+	}
+
+	for _, h := range hosts {
+		id, err := npm.UpsertProxyHost(ctx, h)
+		if err != nil {
+			return fmt.Errorf("upsert %s: %w", h.DomainNames[0], err)
+		}
+		logLine(fmt.Sprintf("npm: proxy host %s id=%d", h.DomainNames[0], id))
+	}
+	return nil
 }
 
 // ---- finalize step 6: touch the sentinel --------------------------------

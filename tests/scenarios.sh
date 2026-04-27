@@ -376,6 +376,261 @@ test_phase2_brings_up_stacks() {
   end_scenario
 }
 
+# ---- wizard walkthrough (Wave 4B) --------------------------------------
+
+# _wizard_setup_phases — ensure phase1 + phase2 have run for the current
+# scenario name. Mirrors the on-demand prereq pattern used by
+# test_phase2_brings_up_stacks; factored here because the wizard scenario
+# needs both sentinels and a fully-rendered /opt/stacks tree.
+_wizard_setup_phases() {
+  local scenario="$1"
+  if [[ ! -f "$PHASE1_DONE" || ! -f "$ENV_FILE" ]]; then
+    reset_state
+    if ! run_phase1 "${scenario}_phase1"; then
+      _fail "phase1 prerequisite failed"
+      return 1
+    fi
+  fi
+  if [[ ! -f "$PHASE2_DONE" ]]; then
+    if ! run_phase2 "${scenario}_phase2"; then
+      _fail "phase2 prerequisite failed"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# _wizard_kill_enrol — best-effort SIGTERM on a child PID file written by
+# the scenario; falls back to pkill on the binary path. Idempotent.
+_wizard_kill_enrol() {
+  local pidfile="$1"
+  if [[ -f "$pidfile" ]]; then
+    local pid
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidfile"
+  fi
+  pkill -f '/tmp/enrol-wizard' 2>/dev/null || true
+}
+
+# test_wizard_walkthrough — exercise setup.go's full HTTP route table by
+# running an enrol binary directly inside the harness container and
+# curling through every step from /setup → /setup/done. Verifies:
+#
+#   - GET /setup with ?token= 303s to /setup/<step> AND drops a
+#     setup_token cookie (handleSetupRoot's resume logic + setSetupCookie)
+#   - GET /setup/domain returns 200 and contains the operator's DOMAIN
+#   - POST /setup/domain (cookie + dummy form) 303s to /setup/dns
+#   - POST /setup/dns (provider=rfc2136 + dummy creds) 303s to /setup/admin
+#   - POST /setup/admin (alice/12-char-password) 303s to /setup/finalize
+#   - GET /setup/finalize returns 200
+#   - GET /setup/events emits `event: done` within 30 s (every shell-out
+#     in runFinalize either no-ops in TEST_MODE or hits a stub that
+#     returns 0 — the assertion is the SSE done event itself)
+#   - After finalize, /srv/store/.setup-complete exists and a fresh
+#     GET /setup is now gated by setupRouteGate to a 404 wizard surface
+test_wizard_walkthrough() {
+  begin_scenario "wizard_walkthrough"
+
+  if ! _wizard_setup_phases "wizard_walkthrough"; then
+    end_scenario
+    return
+  fi
+
+  local scenario_dir="$RUN_DIR_BASE/wizard_walkthrough"
+  mkdir -p "$scenario_dir"
+  local enrol_log="$scenario_dir/enrol.log"
+  local enrol_pid="$scenario_dir/enrol.pid"
+  local sse_body="$scenario_dir/finalize-sse.log"
+  local cookie_jar="$scenario_dir/cookies.txt"
+  : > "$enrol_log"
+  : > "$sse_body"
+  : > "$cookie_jar"
+
+  # Read the setup token bootstrap wrote during phase1.
+  if [[ ! -s "$TOKEN_FILE" ]]; then
+    _fail "setup token file missing or empty: $TOKEN_FILE"
+    end_scenario
+    return
+  fi
+  local token
+  token="$(tr -d '\n' < "$TOKEN_FILE")"
+  if [[ ${#token} -lt 16 ]]; then
+    _fail "setup token implausibly short: ${#token} chars"
+    end_scenario
+    return
+  fi
+
+  # Build enrol from the bind-mounted source. Use a unique output path
+  # under /tmp so a flaky build doesn't fight a stale binary on rerun.
+  local src_dir="$REPO_SRC/stacks/enrol"
+  local bin="/tmp/enrol-wizard"
+  rm -f "$bin"
+  if ! (cd "$src_dir" && go build -buildvcs=false -o "$bin" .) >>"$enrol_log" 2>&1; then
+    _fail "go build of stacks/enrol failed (see $enrol_log)"
+    [[ "$TESTS_VERBOSE" == "1" ]] && tail -40 "$enrol_log"
+    end_scenario
+    return
+  fi
+  _pass "go build of stacks/enrol succeeded"
+
+  # Pick a high port unlikely to clash. The harness container has full
+  # control of its loopback so any port works; 18080 is convention.
+  local port="18080"
+  local base="http://127.0.0.1:${port}"
+
+  # Pre-create dirs the wizard's finalize step writes into. Without these,
+  # finalizeWriteAdmin's MkdirAll fails when we point usersDB into a
+  # tempdir tree.
+  mkdir -p /tmp/wizard-state /tmp/wizard-authelia
+  rm -f /srv/store/.setup-complete   # belt-and-braces: ensure setup mode
+
+  # Spawn enrol. ENROL_DOMAIN is required at startup. The other env vars
+  # redirect every output path into a writable tmp tree so the harness
+  # doesn't need root + isn't allowed to clobber /etc/authelia (that's
+  # a bind-mounted target on the real VPS but a regular dir here).
+  SETUP_TOKEN="$token" \
+  ENROL_DOMAIN="$DOMAIN" \
+  ENROL_LISTEN="127.0.0.1:${port}" \
+  ENROL_TEMPLATES="$src_dir/web/templates" \
+  ENROL_STATIC="$src_dir/web/static" \
+  ENROL_USERS_DB="/tmp/wizard-authelia/users_database.yml" \
+  ENROL_SETUP_STATE_DIR="/tmp/wizard-state" \
+  ENROL_SETUP_COMPLETE="/srv/store/.setup-complete" \
+  ENROL_SETUP_TOKEN_FILE="$TOKEN_FILE" \
+  ENROL_STACKS_DIR="/opt/stacks" \
+  ENROL_REPO_DIR="/opt/raph-server-installer" \
+  ENROL_LAUNCHER_DIR="/tmp/wizard-launcher" \
+  ENROL_PEERS_ARCHIVE_DIR="/tmp/wizard-peers-archive" \
+  ENROL_AWG_DIR="/tmp/wizard-awg" \
+  TEST_MODE=1 \
+  TEST_STUB_LOG="$STUB_LOG" \
+  TEST_COMPOSE_LOG="$COMPOSE_LOG" \
+  "$bin" >>"$enrol_log" 2>&1 &
+  echo $! > "$enrol_pid"
+
+  # Trap so kill happens even if a later assertion bails via `return`.
+  # (bash function returns don't unwind ERR traps cleanly; the explicit
+  # _wizard_kill_enrol at the end is the actual cleanup.)
+  # Wait for the listener to come up.
+  local up=0
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if curl -fsS -o /dev/null --max-time 1 "$base/healthz" 2>/dev/null; then
+      up=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$up" != "1" ]]; then
+    _fail "enrol did not bind $base/healthz within 7.5s"
+    [[ "$TESTS_VERBOSE" == "1" ]] && tail -40 "$enrol_log"
+    _wizard_kill_enrol "$enrol_pid"
+    end_scenario
+    return
+  fi
+  _pass "enrol listening on $base/healthz"
+
+  # ----- a. GET /setup?token=... → 303 + Set-Cookie -------------------
+  assert_http_303_to "$base/setup?token=$token" "/setup/" \
+    "GET /setup with token 303s to /setup/" -c "$cookie_jar"
+  assert_http_cookie_set "$base/setup?token=$token" "setup_token" \
+    "GET /setup with token sets setup_token cookie" -c "$cookie_jar"
+
+  # ----- b. GET /setup/domain (cookie) → 200 + body contains DOMAIN ---
+  local domain_body="$scenario_dir/domain.html"
+  curl -sS -b "$cookie_jar" --max-time 5 -o "$domain_body" -w '%{http_code}' \
+    "$base/setup/domain" > "$scenario_dir/domain.code" 2>/dev/null || true
+  if [[ "$(cat "$scenario_dir/domain.code")" == "200" ]]; then
+    _pass "GET /setup/domain returned 200"
+  else
+    _fail "GET /setup/domain returned $(cat "$scenario_dir/domain.code")"
+  fi
+  if grep -qF "$DOMAIN" "$domain_body"; then
+    _pass "/setup/domain body contains '$DOMAIN'"
+  else
+    _fail "/setup/domain body does not contain '$DOMAIN'"
+  fi
+
+  # ----- c. POST /setup/domain → 303 to /setup/dns --------------------
+  assert_http_303_to "$base/setup/domain" "/setup/dns" \
+    "POST /setup/domain 303s to /setup/dns" \
+    -b "$cookie_jar" -X POST -d "confirmed=yes"
+
+  # ----- d. POST /setup/dns (rfc2136) → 303 to /setup/admin -----------
+  # rfc2136 has the simplest field shape that's not the multi-line google
+  # provider. All five fields (server/port/name/secret/algorithm) must be
+  # non-empty or handleSetupDNS re-renders with an error.
+  assert_http_303_to "$base/setup/dns" "/setup/admin" \
+    "POST /setup/dns (rfc2136) 303s to /setup/admin" \
+    -b "$cookie_jar" -X POST \
+    -d "provider=rfc2136" \
+    -d "dns_rfc2136_server=ns1.${DOMAIN}" \
+    -d "dns_rfc2136_port=53" \
+    -d "dns_rfc2136_name=tsig-key" \
+    -d "dns_rfc2136_secret=dGVzdC10c2lnLXNlY3JldA==" \
+    -d "dns_rfc2136_algorithm=HMAC-SHA512"
+
+  # ----- e. POST /setup/admin (alice/12-char-password) → /setup/finalize
+  assert_http_303_to "$base/setup/admin" "/setup/finalize" \
+    "POST /setup/admin (alice) 303s to /setup/finalize" \
+    -b "$cookie_jar" -X POST \
+    -d "name=alice" \
+    -d "displayname=Alice" \
+    -d "email=$ADMIN_EMAIL" \
+    -d "password=alice-pw-1234" \
+    -d "password_confirm=alice-pw-1234"
+
+  # ----- f. GET /setup/finalize → 200 ----------------------------------
+  local final_code
+  final_code="$(curl -sS -b "$cookie_jar" --max-time 5 -o "$scenario_dir/finalize.html" \
+    -w '%{http_code}' "$base/setup/finalize" 2>/dev/null || echo 000)"
+  if [[ "$final_code" == "200" ]]; then
+    _pass "GET /setup/finalize returned 200"
+  else
+    _fail "GET /setup/finalize returned $final_code"
+  fi
+
+  # ----- g. GET /setup/events → SSE; expect `event: done` within 30s --
+  # The handler runs the finalize pipeline synchronously and emits `event:
+  # done` only after sentinel-touch (step 6). Stream into a file so we can
+  # poll for the event marker; cap at 30s so a hung step doesn't block
+  # the entire harness past its 5-min budget.
+  curl -sS -N -b "$cookie_jar" --max-time 35 "$base/setup/events" \
+    > "$sse_body" 2>>"$enrol_log" &
+  local sse_pid=$!
+  assert_sse_event_within "$sse_body" "done" 30 \
+    "SSE 'event: done' arrives within 30s of /setup/events"
+  # The curl will exit naturally when the handler returns after `done`
+  # (the pipeline finished). Reap it explicitly so we don't leave a
+  # zombie; the kill is a no-op if it already exited.
+  kill "$sse_pid" 2>/dev/null || true
+  wait "$sse_pid" 2>/dev/null || true
+
+  # ----- h. After finalize: sentinel exists, /setup is 404 -------------
+  assert_file_exists "/srv/store/.setup-complete" \
+    "/srv/store/.setup-complete created by finalize"
+  # setupRouteGate flips behaviour the moment the sentinel exists.
+  # GET /setup with the cookie should now 404 (gate matches /setup
+  # exactly + /setup/* — see server.go's setupRouteGate).
+  local post_code
+  post_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+    -b "$cookie_jar" "$base/setup" 2>/dev/null || echo 000)"
+  if [[ "$post_code" == "404" ]]; then
+    _pass "GET /setup returns 404 after finalize completes"
+  else
+    _fail "GET /setup returned $post_code after finalize (wanted 404)"
+  fi
+
+  # ----- cleanup --------------------------------------------------------
+  _wizard_kill_enrol "$enrol_pid"
+
+  end_scenario
+}
+
 # ---- driver -------------------------------------------------------------
 
 run_all() {
@@ -386,4 +641,5 @@ run_all() {
   test_render_preserves_nginx_vars
   test_phase2_skip_gw0_default
   test_phase2_brings_up_stacks
+  test_wizard_walkthrough
 }

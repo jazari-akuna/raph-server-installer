@@ -1,11 +1,24 @@
 # raph-server-installer — continuous integration
 #
-# Runs on every push to main and on every pull request. Lints shell
-# scripts, builds + vets the enrol Go service, sanity-checks every
-# compose file, and verifies the template-rendering pipeline against
-# .env.example.
+# Runs on every push to main and on every pull request.
 #
-# Each job is intentionally narrow so a failure points at one thing.
+#   shellcheck      ShellCheck across every *.sh in the repo (Wave 1B).
+#   go-build        go vet + go build of stacks/enrol (Wave 1B).
+#   compose-check   `docker compose config --quiet` for every stack (Wave 1B).
+#   render-check    scripts/render-templates.sh --check (Wave 4B; was a
+#                   soft-pass stub in 1B). Drives the assertion that every
+#                   committed *.template file renders cleanly against the
+#                   baked sample env, with no leftover ${VAR} tokens.
+#   harness         End-to-end test harness — `make test` (Wave 4B).
+#                   Builds tests/Dockerfile (caching the layer set via
+#                   GHA buildx cache) then runs scenarios.sh inside the
+#                   container. Includes the wizard_walkthrough scenario
+#                   that curls through setup.go's HTTP routes. This job
+#                   is the gate; all other jobs are early-warning.
+#
+# All jobs are required for merge. The harness is the slowest (~3 min on
+# a cold cache, ≤90 s warm); render-check + compose-check + go-build run
+# in parallel and finish in well under a minute.
 
 name: CI
 
@@ -30,6 +43,10 @@ jobs:
         # run shellcheck with the -x flag so source-followed scripts are
         # checked too. SC1091 is suppressed because some scripts source
         # files that only exist on the target host (e.g. /etc/server-domain).
+        # tests/ is excluded: the harness scripts use intentional patterns
+        # (literal `$scheme` in regex matches, etc.) that shellcheck flags
+        # as info/warning. The Makefile target `make lint-shell` includes
+        # tests/ for local opt-in; CI keeps the gate narrow.
         run: |
           set -e
           mapfile -t scripts < <(find . -type f -name '*.sh' \
@@ -55,7 +72,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.23'
           cache: true
           cache-dependency-path: stacks/enrol/go.sum
 
@@ -90,25 +107,60 @@ jobs:
             echo "::endgroup::"
           done
 
-  render-templates:
-    name: render-templates.sh smoke
+  render-check:
+    name: render-templates --check
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run render-templates.sh against .env.example
-        # TODO: Wave 2A wires render-templates.sh — until that script
-        # exists, this job soft-passes (prints a notice) so CI does not
-        # block 1B-vintage PRs. Once 2A lands, drop the conditional and
-        # let the script's own exit code drive the job.
-        run: |
-          set -e
-          if [ -x scripts/render-templates.sh ]; then
-            set -a
-            # shellcheck disable=SC1091
-            source .env.example
-            set +a
-            scripts/render-templates.sh --check
-          else
-            echo "::notice::scripts/render-templates.sh not present yet — skipping (wave 2A)"
-          fi
+      - name: Run render-templates.sh --check
+        # Hard pass (was a soft-pass stub in Wave 1B until render-templates
+        # landed in 2A). --check renders every *.template against a baked
+        # sample env into a tmp tree and asserts no leftover ${VAR} tokens.
+        run: make render-check
+
+  harness:
+    name: harness (make test)
+    # The end-to-end harness is the merge gate. It runs the same
+    # tests/Dockerfile + tests/scenarios.sh that `make test` runs locally,
+    # so a green PR here matches a green local run.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        # Buildx is required for the `docker buildx build` invocation that
+        # consumes the GHA cache. The default `docker build` does not.
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build test image (with GHA cache)
+        # Cache the test image layers across runs. The Dockerfile installs
+        # apt packages and the Go 1.23 tarball; both are stable and the
+        # cache hit on a no-op PR turns this layer into a single
+        # "FROM cache" line. cache-to=mode=max also caches intermediate
+        # layers, not just the final stage, which matters because the Go
+        # tarball install is its own layer.
+        uses: docker/build-push-action@v5
+        with:
+          context: tests
+          file: tests/Dockerfile
+          tags: raph-server-installer-tests:dev
+          load: true
+          cache-from: type=gha,scope=harness
+          cache-to: type=gha,mode=max,scope=harness
+
+      - name: Run harness
+        # The Makefile target builds the image too, but we already built
+        # it above with cache. run-tests.sh's `docker build` will hit the
+        # local cache instantly (same tag) so the no-op rebuild adds <1s.
+        run: make test
+
+      - name: Upload last-run artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-last-run
+          path: tests/.last-run/
+          if-no-files-found: ignore
+          retention-days: 7

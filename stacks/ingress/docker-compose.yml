@@ -34,6 +34,40 @@ services:
       - "host.docker.internal:host-gateway"
     mem_limit: 2g
 
+  # certbot — wildcard cert issuer (Parcel 4A).
+  #
+  # Profile-gated so `docker compose up -d` does NOT start it; only the
+  # wizard's finalize handler (or an operator running `docker compose
+  # --profile finalize run --rm certbot ...`) brings it up. After the
+  # cert is issued the container exits and is removed by --rm.
+  #
+  # The credentials file lives on a tmpfs at /tmp/certbot-creds. The
+  # wizard writes the operator's DNS API token there (mode 0600) just
+  # before invoking certbot and defers a delete; the file never lands on
+  # persistent storage. /etc/letsencrypt is shared with the ingress
+  # container so the issued cert is immediately usable by NPM.
+  certbot:
+    build:
+      context: ./certbot
+    profiles:
+      - finalize
+    container_name: certbot
+    volumes:
+      - ./letsencrypt:/etc/letsencrypt
+      # Pass the wizard-written creds file in by bind from the host
+      # tmpfs path. The wizard writes /run/raph-certbot/<provider>.ini
+      # (host /run is tmpfs by default on Ubuntu 24.04) at mode 0600 and
+      # deletes it immediately after certbot exits.
+      - /run/raph-certbot:/tmp/certbot-creds:ro
+    tmpfs:
+      # In-container scratch for certbot's own state. Certbot writes
+      # account JSON, lockfiles, etc., to /var/lib/letsencrypt during a
+      # run; we want that scoped to the container's lifetime, not the
+      # bind-mounted /etc/letsencrypt.
+      - /var/lib/letsencrypt
+    networks:
+      - edge
+
 networks:
   edge:
     external: true
