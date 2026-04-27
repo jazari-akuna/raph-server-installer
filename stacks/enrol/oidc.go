@@ -1,0 +1,256 @@
+// oidc.go — OIDC client_secret rotation for the Authelia<->console (Portainer)
+// integration.
+//
+// Background. bootstrap.sh stamps a literal placeholder into /opt/stacks/.env:
+//
+//   AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH='$pbkdf2-sha512$bootstrap-placeholder'
+//
+// This is necessary so render-templates.sh can run during Phase-2 (the
+// envsubst scope includes that var, and the script aborts if any var in
+// scope is empty). The placeholder is NOT a valid pbkdf2 hash, though, so
+// Authelia restart-loops as soon as it actually tries to load the rendered
+// configuration.yml. Finalize is the place that's supposed to:
+//
+//   1. Generate a fresh ~32-char plaintext client_secret.
+//   2. Compute Authelia's pbkdf2-sha512 hash of it.
+//   3. Persist the plaintext somewhere safe so the operator can paste it
+//      into Portainer's OIDC settings post-finalize.
+//   4. Replace the placeholder in /opt/stacks/.env with the real hash.
+//
+// Then the templates step re-renders configuration.yml with the real hash
+// and Authelia stays up.
+//
+// Hash format. Authelia 4.39 emits
+//   $pbkdf2-sha512$<rounds>$<salt-b64>$<hash-b64>
+// where <rounds>=310000, salt is 16 random bytes, hash is 64 bytes (SHA-512
+// output length). Both salt and hash use standard base64 (A-Za-z0-9+/) WITHOUT
+// padding ("=") — Authelia's parser rejects padded forms. Confirmed against
+// `authelia crypto hash generate pbkdf2 --variant sha512 --password ...`
+// output (see oidc_test.go for the round-trip property test).
+//
+// Stdlib + golang.org/x/crypto/pbkdf2 only. No shell-out — deterministic,
+// no docker-in-docker, no race against the authelia container coming up.
+
+package main
+
+import (
+	"crypto/rand"
+	"crypto/sha512"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"golang.org/x/crypto/pbkdf2"
+)
+
+const (
+	// oidcPBKDF2Rounds matches Authelia's CLI default for SHA-512.
+	// (`authelia crypto hash generate pbkdf2 --variant sha512` emits 310000.)
+	// Authelia accepts any positive integer, but matching the CLI default
+	// keeps `--check` fixtures and operator-side regenerations consistent.
+	oidcPBKDF2Rounds = 310000
+
+	// oidcPBKDF2SaltLen is 16 bytes, matching Authelia's CLI default.
+	oidcPBKDF2SaltLen = 16
+
+	// oidcPBKDF2KeyLen is 64 bytes (SHA-512 output length). Matches CLI.
+	oidcPBKDF2KeyLen = 64
+
+	// oidcPlaintextLen is the byte length of the random plaintext secret.
+	// 32 bytes → 43 base64-no-pad chars; comfortably above any OIDC client
+	// secret entropy guideline.
+	oidcPlaintextLen = 32
+
+	// oidcEnvVar is the .env key whose value we replace with the real hash.
+	oidcEnvVar = "AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH"
+
+	// oidcPlaintextDefaultPath is where the rotated plaintext is written
+	// for the operator to paste into Portainer. Mode 0600 root:root. Lives
+	// under /etc/raph-installer alongside the NPM bootstrap pass, NOT on
+	// the LUKS-backed /srv/store/ tree (the operator may need it before
+	// any user volume is unlocked, e.g. on a freshly-rebooted host).
+	oidcPlaintextDefaultPath = "/etc/raph-installer/oidc-console-client-secret"
+)
+
+// oidcBase64 is base64.StdEncoding without padding — matches Authelia's
+// pbkdf2 hash format exactly. Using a package-level alias keeps both the
+// encode (in finalizeOIDCRotate) and decode (in tests / verifications)
+// paths consistent.
+var oidcBase64 = base64.RawStdEncoding
+
+// pbkdf2HashRe matches a syntactically-valid Authelia pbkdf2-sha512 hash.
+// Used by the templates-step verification to reject the bootstrap placeholder
+// without re-deriving from a known secret. We don't validate that the
+// rounds/salt/hash byte-lengths match our defaults — operators are free to
+// regenerate with different params via the authelia CLI; what we MUST reject
+// is the literal "bootstrap-placeholder" or any other non-base64 garbage.
+var pbkdf2HashRe = regexp.MustCompile(
+	`^\$pbkdf2-sha512\$[0-9]+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+$`,
+)
+
+// generateOIDCPlaintext returns a cryptographically-random base64-no-pad
+// string of oidcPlaintextLen raw bytes. ~43 ASCII chars; safe to embed in
+// a JSON config without escaping.
+func generateOIDCPlaintext() (string, error) {
+	buf := make([]byte, oidcPlaintextLen)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("oidc: read random plaintext: %w", err)
+	}
+	return oidcBase64.EncodeToString(buf), nil
+}
+
+// pbkdf2SHA512Hash computes Authelia's pbkdf2-sha512 hash format over
+// plaintext. salt MUST be exactly oidcPBKDF2SaltLen bytes; supply a fresh
+// random salt per rotation. Returns the full
+// `$pbkdf2-sha512$<rounds>$<salt-b64>$<hash-b64>` string.
+//
+// Exposed (lowercase but package-scoped) so the test suite can pin a salt
+// and assert deterministic output.
+func pbkdf2SHA512Hash(plaintext string, salt []byte) string {
+	derived := pbkdf2.Key([]byte(plaintext), salt, oidcPBKDF2Rounds, oidcPBKDF2KeyLen, sha512.New)
+	return fmt.Sprintf("$pbkdf2-sha512$%d$%s$%s",
+		oidcPBKDF2Rounds,
+		oidcBase64.EncodeToString(salt),
+		oidcBase64.EncodeToString(derived))
+}
+
+// rotateOIDCConsoleSecret performs the full rotation:
+//   1. Generate plaintext + salt.
+//   2. Compute the hash.
+//   3. Write the plaintext to plaintextPath (mode 0600).
+//   4. Replace AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH=... in envFilePath
+//      with the new hash. The line is rewritten in-place; if the key is
+//      absent we append it.
+//
+// Idempotent guard: if the env file already contains a hash that matches
+// pbkdf2HashRe AND the plaintext file already exists, this is a no-op
+// (returns nil, no-rotation). Re-running finalize MUST NOT churn the
+// secret on every retry — that would require the operator to reconfigure
+// Portainer every time a downstream step (NPM, cert) failed.
+//
+// envFilePath is typically /opt/stacks/.env. plaintextPath defaults to
+// oidcPlaintextDefaultPath when empty.
+func rotateOIDCConsoleSecret(envFilePath, plaintextPath string) error {
+	if envFilePath == "" {
+		return errors.New("oidc: env file path empty")
+	}
+	if plaintextPath == "" {
+		plaintextPath = oidcPlaintextDefaultPath
+	}
+
+	envBytes, err := os.ReadFile(envFilePath)
+	if err != nil {
+		return fmt.Errorf("oidc: read %s: %w", envFilePath, err)
+	}
+	currentHash := readEnvVar(string(envBytes), oidcEnvVar)
+
+	// Idempotency: a real-looking hash + existing plaintext = no rotation.
+	// We deliberately don't try to *verify* the on-disk plaintext matches
+	// the hash; pbkdf2 is one-way. Trust the pair if both look healthy.
+	if pbkdf2HashRe.MatchString(currentHash) {
+		if info, statErr := os.Stat(plaintextPath); statErr == nil && info.Size() > 0 {
+			return nil
+		}
+	}
+
+	plaintext, err := generateOIDCPlaintext()
+	if err != nil {
+		return err
+	}
+	salt := make([]byte, oidcPBKDF2SaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return fmt.Errorf("oidc: read random salt: %w", err)
+	}
+	hash := pbkdf2SHA512Hash(plaintext, salt)
+
+	// Write plaintext first (atomic via tmp+rename). If the env-file
+	// rewrite fails afterwards, finalize will re-run this step on retry
+	// and the idempotency check above will re-use the same plaintext only
+	// if the hash also already looks good — which it won't, because the
+	// rewrite failed. So we'll regenerate. That's fine: the plaintext was
+	// never published anywhere yet.
+	if err := os.MkdirAll(filepath.Dir(plaintextPath), 0o700); err != nil {
+		return fmt.Errorf("oidc: mkdir for plaintext: %w", err)
+	}
+	if err := atomicWriteFile(plaintextPath, []byte(plaintext+"\n"), 0o600); err != nil {
+		return fmt.Errorf("oidc: write plaintext: %w", err)
+	}
+
+	// Replace (or append) the env var. Quoting matches bootstrap.sh's
+	// rendering style — single-quoted so the literal `$pbkdf2-…` survives
+	// being sourced by bash. (Compose's env-file parser strips the quotes.)
+	newLine := fmt.Sprintf("%s='%s'", oidcEnvVar, hash)
+	updated := replaceOrAppendEnvLine(string(envBytes), oidcEnvVar, newLine)
+	if err := atomicWriteFile(envFilePath, []byte(updated), 0o600); err != nil {
+		return fmt.Errorf("oidc: rewrite %s: %w", envFilePath, err)
+	}
+	return nil
+}
+
+// readEnvVar returns the raw value (post `=`, strip surrounding single or
+// double quotes) of the named key in a sourced-bash-style env file. Returns
+// "" if the key is absent. Tolerates leading whitespace + `export ` prefix.
+func readEnvVar(content, key string) string {
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		line = strings.TrimPrefix(line, "export ")
+		if !strings.HasPrefix(line, key+"=") {
+			continue
+		}
+		val := strings.TrimPrefix(line, key+"=")
+		// Strip a single layer of matching quotes.
+		if len(val) >= 2 {
+			if (val[0] == '\'' && val[len(val)-1] == '\'') ||
+				(val[0] == '"' && val[len(val)-1] == '"') {
+				val = val[1 : len(val)-1]
+			}
+		}
+		return val
+	}
+	return ""
+}
+
+// replaceOrAppendEnvLine rewrites the line beginning with `key=` in content
+// to newLine; if no such line exists, appends newLine (with a leading
+// newline if content doesn't already end in one). Comments + blank lines
+// are preserved verbatim. Only the FIRST matching line is replaced; later
+// duplicates are left as-is so a hand-edited env file with duplicates
+// surfaces visibly.
+func replaceOrAppendEnvLine(content, key, newLine string) string {
+	lines := strings.Split(content, "\n")
+	prefix := key + "="
+	exportPrefix := "export " + prefix
+	replaced := false
+	for i, raw := range lines {
+		trim := strings.TrimSpace(raw)
+		if !replaced && (strings.HasPrefix(trim, prefix) || strings.HasPrefix(trim, exportPrefix)) {
+			lines[i] = newLine
+			replaced = true
+		}
+	}
+	out := strings.Join(lines, "\n")
+	if replaced {
+		return out
+	}
+	// Append. Ensure exactly one trailing newline before the new line.
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	out += newLine + "\n"
+	return out
+}
+
+// atomicWriteFile writes data to path via a tmp-file + rename so a partial
+// write can never leave a half-rendered env file (which would brick every
+// future render-templates run). Mode applies to the final file.
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}

@@ -429,6 +429,33 @@ type proxyHostListEntry struct {
 	DomainNames []string `json:"domain_names"`
 }
 
+// ListProxyHosts returns every (non-deleted) proxy host visible to the
+// authenticated admin. Used by the finalize verification to assert the
+// four wizard-managed hosts actually exist post-wireup, rather than
+// trusting that UpsertProxyHost's nil-error meant the row landed.
+//
+// Failure modes the verification specifically defends against:
+//   - Bearer token silently expired between hosts (shouldn't happen with
+//     a 24h NPM token, but a clock skew or container restart between
+//     UpsertCertificate and the proxy-hosts loop would surface as 401s
+//     that an earlier version of the loop misclassified as success).
+//   - JSON-decode tolerated a wrong-typed `enabled` field and skipped
+//     rows. ListProxyHosts uses the same proxyHostListEntry shape as the
+//     internal upsert listing — kept narrow on purpose.
+func (c *NPMClient) ListProxyHosts(ctx context.Context) ([]proxyHostListEntry, error) {
+	if testModeEnabled() {
+		return nil, nil
+	}
+	if c.token == "" {
+		return nil, errors.New("npm: not logged in")
+	}
+	var out []proxyHostListEntry
+	if err := c.do(ctx, http.MethodGet, "/api/nginx/proxy-hosts", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // UpsertProxyHost creates the proxy host if no host with the same primary
 // domain exists, else updates the existing record. Returns the host's ID.
 //

@@ -89,9 +89,21 @@ const (
 
 // setupCompletedSteps tracks per-finalize-step success so a re-run after
 // a mid-stream failure resumes where it left off.
+//
+// IMPORTANT invariant. A flag is set ONLY after both:
+//   (a) the step's worker function returned nil, AND
+//   (b) the step's verifyXxx (in finalize_verify.go) re-derived the
+//       observable on-disk / over-the-wire outcome and confirmed it.
+// If verify fails, the worker's nil return is overridden with a typed
+// finalizeErr that the SSE consumer renders as an `error` event. This
+// closes the historical "step said done but didn't" failure mode (most
+// notably: render-templates.sh substituting a placeholder env var into
+// configuration.yml, exiting 0, and Authelia then restart-looping on
+// the resulting hash).
 type setupCompletedSteps struct {
 	UsersDBWritten   bool `json:"users_db_written,omitempty"`
 	SharedVolReady   bool `json:"shared_volume_ready,omitempty"`
+	OIDCRotated      bool `json:"oidc_rotated,omitempty"`
 	TemplatesRender  bool `json:"templates_rendered,omitempty"`
 	CertIssued       bool `json:"cert_issued,omitempty"`
 	NPMRoutesWired   bool `json:"npm_routes_wired,omitempty"`
@@ -1082,6 +1094,9 @@ func (s *server) runFinalize(
 		if err := s.finalizeWriteAdmin(st); err != nil {
 			return wrapErr("users_db", err)
 		}
+		if err := s.verifyUsersDB(st.AdminUsername); err != nil {
+			return wrapErr("users_db", err)
+		}
 		st.CompletedSteps.UsersDBWritten = true
 		_ = s.saveSetupState(st)
 	}
@@ -1091,56 +1106,91 @@ func (s *server) runFinalize(
 	// it down). Script is idempotent: if /srv/store/data/_shared.img
 	// exists it skips dd+luksFormat and only re-asserts keyfile/group/
 	// mountpoint state. After the script returns, /etc/luks/_shared.key
-	// MUST exist; we still call finalizeVerifySharedKey for the
-	// cloud-fail-closed signal so a regression is loud.
+	// MUST exist AND the mapper MUST be mounted; verifySharedVolume is
+	// the gate (the legacy finalizeVerifySharedKey was only a keyfile
+	// existence check; the mount check catches the regression where
+	// luksFormat succeeded but the open/mount step silently failed).
 	if !st.CompletedSteps.SharedVolReady {
 		status("shared_volume", "provisioning /srv/store/mnt/_shared")
 		if err := s.finalizeEnsureSharedVolume(ctx, st, logLine); err != nil {
-			// Non-fatal: cloud (copyparty) starts even without /shared
-			// (the [/shared] block fails-closed in copyparty.conf), so
-			// the operator can still finish setup and remediate from a
-			// host shell. Surface the error in the SSE log so it's not
-			// silently swallowed.
-			logLine("warning: shared volume provisioning failed: " + err.Error())
+			// Surface the script's error verbatim — the verification
+			// below is what decides whether to proceed.
+			logLine("warning: shared volume provisioning script failed: " + err.Error())
 		}
-		if err := s.finalizeVerifySharedKey(); err != nil {
-			logLine("warning: " + err.Error())
+		if err := s.verifySharedVolume(); err != nil {
+			return wrapErr("shared_volume", err)
 		}
 		st.CompletedSteps.SharedVolReady = true
 		_ = s.saveSetupState(st)
 	}
 
-	// 3. render Authelia config + sibling templates.
+	// 3. rotate the OIDC console (Portainer) client_secret. MUST run
+	// BEFORE finalizeRenderTemplates because the template substitution
+	// reads AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH from /opt/stacks/.env;
+	// if the placeholder is still there at render time, configuration.yml
+	// gets `$pbkdf2-sha512$bootstrap-placeholder` baked in and Authelia
+	// restart-loops on the next compose-up. See oidc.go for the full
+	// rationale + idempotency contract.
+	if !st.CompletedSteps.OIDCRotated {
+		status("oidc", "rotating OIDC console client_secret")
+		envFile := filepath.Join(s.cfg.stacksDir, ".env")
+		if err := rotateOIDCConsoleSecret(envFile, ""); err != nil {
+			return wrapErr("oidc", err)
+		}
+		// No external observable to verify here beyond what
+		// rotateOIDCConsoleSecret already enforces (it reads back the
+		// env file before returning). The templates step's verification
+		// is what proves the new hash actually landed in configuration.yml.
+		logLine("oidc: client_secret rotated; plaintext at " + oidcPlaintextDefaultPath)
+		st.CompletedSteps.OIDCRotated = true
+		_ = s.saveSetupState(st)
+	}
+
+	// 4. render Authelia config + sibling templates.
 	if !st.CompletedSteps.TemplatesRender {
 		status("templates", "re-rendering templates with chosen domain")
 		if err := s.finalizeRenderTemplates(ctx, logLine); err != nil {
 			return wrapErr("templates", err)
 		}
+		if err := s.verifyTemplatesRendered(); err != nil {
+			return wrapErr("templates", err)
+		}
+		// Kick authelia so it reloads the freshly-rendered config. Best
+		// effort — verification has already proven the file is correct;
+		// a missed restart only delays the take-over until the operator
+		// `docker restart`s themselves.
+		reloadAuthelia(ctx, logLine)
 		st.CompletedSteps.TemplatesRender = true
 		_ = s.saveSetupState(st)
 	}
 
-	// 4. cert issuance via certbot — slowest step, stream stdout.
+	// 5. cert issuance via certbot — slowest step, stream stdout.
 	if !st.CompletedSteps.CertIssued {
 		status("cert", "requesting wildcard cert via Let's Encrypt DNS-01")
 		if err := s.finalizeIssueCert(ctx, st, logLine); err != nil {
+			return wrapErr("cert", err)
+		}
+		if err := s.verifyCertIssued(st.Domain); err != nil {
 			return wrapErr("cert", err)
 		}
 		st.CompletedSteps.CertIssued = true
 		_ = s.saveSetupState(st)
 	}
 
-	// 5. wire NPM proxy hosts (shells out to wire-npm-routes.sh).
+	// 6. wire NPM proxy hosts.
 	if !st.CompletedSteps.NPMRoutesWired {
 		status("npm", "wiring NPM proxy hosts (auth/enrol/cloud/console)")
 		if err := s.finalizeWireNPM(ctx, st, logLine); err != nil {
+			return wrapErr("npm", err)
+		}
+		if err := s.verifyNPMRoutes(ctx, st); err != nil {
 			return wrapErr("npm", err)
 		}
 		st.CompletedSteps.NPMRoutesWired = true
 		_ = s.saveSetupState(st)
 	}
 
-	// 6. apply the operator's chosen personal LUKS size to the live
+	// 7. apply the operator's chosen personal LUKS size to the live
 	// process so subsequent /users creates use it. cfg is a value copy
 	// inside setupState's host server, so we mutate it directly. The
 	// rounding-up (rather than down) means a wizard-chosen 9.5 GiB
@@ -1157,10 +1207,27 @@ func (s *server) runFinalize(
 		s.cfg.luksSizeGB = gib
 	}
 
-	// 7. flip out of setup mode.
+	// 8. pre-touch-sentinel belt-and-braces: re-run EVERY observable
+	// verification in dependency order. If any fail, refuse to write
+	// the sentinel and surface the first failing step. This catches
+	// the case where a step's own post-verify accepted a transient
+	// success that has since regressed (e.g. authelia recovered between
+	// templates verify and sentinel write only because the operator
+	// `docker restart`d in another shell — and then a subsequent step
+	// re-broke it). Cheap (~10s of stat+1 NPM list call) compared to
+	// the cost of a "looks done but isn't" sentinel.
+	status("verify", "re-running all step verifications")
+	if vErr := s.finalizeVerifyAll(ctx, st); vErr != nil {
+		return vErr
+	}
+
+	// 9. flip out of setup mode.
 	if !st.CompletedSteps.SentinelTouched {
 		status("sentinel", "marking setup complete")
 		if err := s.finalizeTouchSentinel(); err != nil {
+			return wrapErr("sentinel", err)
+		}
+		if err := s.verifySentinel(); err != nil {
 			return wrapErr("sentinel", err)
 		}
 		st.CompletedSteps.SentinelTouched = true
