@@ -7,12 +7,20 @@
     is not enabled on this server. AmneziaWG is opt-in: a default install
     skips it because most operators don't need a per-user split tunnel.
   </p>
+  {{if .ViewerIsAdmin}}
   <p>
     To enable it, run <code>scripts/install-gw0.sh</code> on the host
     (or set <code>SKIP_GW0=0</code> before re-running
     <code>scripts/bootstrap-phase2.sh</code>). Once gw0 is up, this page
-    will list peer devices grouped by user and let you add new ones.
+    will let every user enrol their own devices.
   </p>
+  {{else}}
+  <p>
+    Ask the server admin to enable AmneziaWG (the install script
+    requires root on the host). Once it's up, you'll be able to enrol
+    your own devices from this page.
+  </p>
+  {{end}}
   <p class="hint">
     No peers exist yet — there is nothing to migrate or back up before
     enabling. Existing user accounts and storage volumes are unaffected.

@@ -43,16 +43,30 @@
 <section>
   <h2>add device</h2>
   <p class="hint">
-    Pick the user the device belongs to, then a device tag. The peer
-    name is built as <code>&lt;user&gt;-&lt;tag&gt;</code> automatically.
+    {{if .ViewerIsAdmin}}
+      Pick the user the device belongs to, then a device tag. The peer
+      name is built as <code>&lt;user&gt;-&lt;tag&gt;</code> automatically.
+    {{else}}
+      Pick a device tag — the peer name is built as
+      <code>{{.User}}-&lt;tag&gt;</code> automatically. After creating,
+      download the <code>.conf</code> (or scan the QR) into AmneziaWG
+      on your laptop or phone.
+    {{end}}
   </p>
   <form method="POST" action="/peers">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
+    {{if .ViewerIsAdmin}}
     <label>user
       <select name="user" required>
         {{range .Users}}<option value="{{.}}">{{.}}</option>{{end}}
       </select>
     </label>
+    {{else}}
+    {{/* Non-admins can only enrol devices for themselves; the
+         handler enforces this server-side too — this hidden input is
+         just so the form posts something familiar. */}}
+    <input type="hidden" name="user" value="{{.User}}">
+    {{end}}
     <label>device tag
       <select name="device_tag" required>
         {{range .Tags}}<option value="{{.}}">{{.}}</option>{{end}}

@@ -190,8 +190,12 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/users/", requireAdmin(s.cfg, s.withCSRF(s.handleUserSub)))
 
 	// Peers (devices) — admin-only. Mirrors /users.
-	mux.HandleFunc("/peers", requireAdmin(s.cfg, s.withCSRF(s.handlePeers)))
-	mux.HandleFunc("/peers/", requireAdmin(s.cfg, s.withCSRF(s.handlePeerSub)))
+	// /peers is open to every authenticated user — each user manages
+	// their own devices. Admins see all peers (current behaviour) via the
+	// per-handler scope check (viewerIsAdmin), regular users only see/
+	// modify peers whose name starts with `<username>-`.
+	mux.HandleFunc("/peers", requireAuth(s.cfg, false, s.withCSRF(s.handlePeers)))
+	mux.HandleFunc("/peers/", requireAuth(s.cfg, false, s.withCSRF(s.handlePeerSub)))
 
 	return s.setupRouteGate(mux)
 }
@@ -989,7 +993,7 @@ func (s *server) renderPeersDisabled(w http.ResponseWriter, r *http.Request) {
 		Title:         "devices",
 		User:          r.Header.Get("X-Enrol-User"),
 		CSRF:          csrf,
-		ViewerIsAdmin: true, // requireAdmin gates this route
+		ViewerIsAdmin: viewerIsAdmin(r, s.cfg),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "peers-disabled.html", data); err != nil {
@@ -1041,15 +1045,32 @@ func (s *server) renderPeerList(w http.ResponseWriter, r *http.Request, flash st
 		http.Error(w, "load users: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	viewer := r.Header.Get("X-Enrol-User")
+	isAdmin := viewerIsAdmin(r, s.cfg)
+
+	// Admins see everyone; regular users see only their own peers (and
+	// their username is the only option in the create-peer dropdown).
 	knownUsers := db.listSorted()
+	if !isAdmin {
+		knownUsers = []string{viewer}
+		filtered := all[:0]
+		prefix := viewer + "-"
+		for _, p := range all {
+			if strings.HasPrefix(p.Name, prefix) {
+				filtered = append(filtered, p)
+			}
+		}
+		all = filtered
+	}
 
 	groups := groupPeersByUser(all, knownUsers)
 
 	data := peersListData{
 		Title:         "devices",
-		User:          r.Header.Get("X-Enrol-User"),
+		User:          viewer,
 		CSRF:          csrf,
-		ViewerIsAdmin: true, // requireAdmin gates this route
+		ViewerIsAdmin: isAdmin,
 		Groups:        groups,
 		Users:         knownUsers,
 		Tags:          []string{"laptop", "phone", "tablet", "other"},
@@ -1100,12 +1121,17 @@ func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 	}
 	user := strings.TrimSpace(r.Form.Get("user"))
 	tag := strings.TrimSpace(r.Form.Get("device_tag"))
+	actor := r.Header.Get("X-Enrol-User")
+	// Non-admins can only enrol devices for themselves: ignore whatever
+	// the form posts and pin user=actor. Admins keep the dropdown.
+	if !viewerIsAdmin(r, s.cfg) {
+		user = actor
+	}
 	name, err := peerNameFor(user, tag)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	actor := r.Header.Get("X-Enrol-User")
 	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
 
 	s.mu.Lock()
@@ -1197,7 +1223,7 @@ func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 		Title:         "device added",
 		User:          actor,
 		CSRF:          csrf,
-		ViewerIsAdmin: true, // requireAdmin gates this route
+		ViewerIsAdmin: viewerIsAdmin(r, s.cfg),
 		Peer:          p,
 		ClientConf:    clientConf,
 		ReloadNote:    reloadNote,
@@ -1253,6 +1279,16 @@ func (s *server) handlePeerSub(w http.ResponseWriter, r *http.Request) {
 	if !validName(name) {
 		http.Error(w, "invalid peer name", http.StatusBadRequest)
 		return
+	}
+	// Per-user scoping: non-admins can only see/modify peers whose name
+	// starts with `<their-username>-`. 404 (not 403) so the existence of
+	// other users' peers isn't probeable.
+	if !viewerIsAdmin(r, s.cfg) {
+		viewer := r.Header.Get("X-Enrol-User")
+		if !strings.HasPrefix(name, viewer+"-") {
+			http.NotFound(w, r)
+			return
+		}
 	}
 	action := ""
 	if len(parts) == 2 {
@@ -1313,7 +1349,7 @@ func (s *server) handlePeerDetail(w http.ResponseWriter, r *http.Request, name s
 		Title:         "peer " + p.Name,
 		User:          r.Header.Get("X-Enrol-User"),
 		CSRF:          csrf,
-		ViewerIsAdmin: true, // requireAdmin gates this route
+		ViewerIsAdmin: viewerIsAdmin(r, s.cfg),
 		Peer:          p,
 		ClientConf:    clientConf,
 		ArchiveExists: archiveExists(s.cfg, p.Name),

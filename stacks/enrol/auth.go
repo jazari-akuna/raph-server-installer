@@ -82,8 +82,23 @@ func requireAuth(cfg config, requireGroup bool, h http.HandlerFunc) http.Handler
 // group (cfg.requiredGroup, default `admins`). Returns 401 on missing
 // Remote-User and 403 on a non-admin authenticated user. Use this on
 // every "create user" / "edit user" / "delete user" / launcher mutation
-// / audit / peers / wizard-day-2 surface — anything that should be
-// invisible to a regular user.
+// / audit / wizard-day-2 surface — anything that should be invisible to
+// a regular user. NOT used on /peers anymore: every authenticated user
+// can manage their own devices (per-user scoping inside the handler).
 func requireAdmin(cfg config, h http.HandlerFunc) http.HandlerFunc {
 	return requireAuth(cfg, true, h)
+}
+
+// viewerIsAdmin returns true iff the X-Enrol-Groups header (set by
+// requireAuth) names cfg.requiredGroup. Use this inside handlers reached
+// via requireAuth(cfg, false, ...) when the rendered surface differs
+// between admins and regular users (e.g. /peers shows all groups for
+// admins, only the viewer's own peers for non-admins).
+func viewerIsAdmin(r *http.Request, cfg config) bool {
+	for _, g := range strings.Split(r.Header.Get("X-Enrol-Groups"), ",") {
+		if strings.TrimSpace(g) == cfg.requiredGroup {
+			return true
+		}
+	}
+	return false
 }

@@ -24,9 +24,13 @@
     <h1><a href="/">enrol</a></h1>
     <nav>
       <a href="/">apps</a>
+      {{/* devices is open to every signed-in user (each manages their
+           own peers via per-handler scope); the link is shown
+           unconditionally and the page itself renders an empty-state
+           when AmneziaWG isn't installed. users + audit stay admin-only. */}}
+      <a href="/peers">devices</a>
       {{if .ViewerIsAdmin}}
         <a href="/users">users</a>
-        {{if awgEnabled}}<a href="/peers">devices</a>{{end}}
         <a href="/audit">audit</a>
       {{end}}
     </nav>
