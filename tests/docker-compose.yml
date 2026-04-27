@@ -1,0 +1,70 @@
+# tests/docker-compose.yml — orchestrates the test container plus a mock
+# DNS provider sidecar.
+#
+# Usage:
+#   docker compose -f tests/docker-compose.yml run --rm tester
+#
+# tests/run-tests.sh prefers a plain `docker run` for finer-grained control
+# of the container name + log capture. This compose file is here for the
+# `make test-shell` target and for the future scenario where the wizard's
+# cert-issuance flow is exercised end-to-end against the mock-dns sidecar.
+
+services:
+  tester:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: raph-server-installer-tests:dev
+    container_name: raph-server-installer-tester
+    environment:
+      TESTS_VERBOSE: "${TESTS_VERBOSE:-0}"
+      TEST_MODE: "1"
+      TEST_REPO_SRC: /opt/raph-server-installer-src
+      TEST_STUB_LOG: /tmp/test-stubs.log
+      TEST_COMPOSE_LOG: /tmp/test-compose.log
+      MOCK_DNS_URL: "http://mock-dns:8053"
+    volumes:
+      # Bind the working tree READ-WRITE so render-templates.sh can write
+      # its rendered siblings (gitignored) into stacks/ while tests run.
+      - ../:/opt/raph-server-installer-src:rw
+    depends_on:
+      - mock-dns
+    networks:
+      - testnet
+
+  mock-dns:
+    # A tiny Python HTTP server that satisfies certbot's `--dns-rfc2136`
+    # challenge by returning a self-signed cert. Wave 4B's wizard tests will
+    # extend this; today it just needs to exist so depends_on/healthcheck
+    # work and the harness has somewhere to point cert flows.
+    image: python:3.12-slim
+    container_name: raph-server-installer-mock-dns
+    command:
+      - python3
+      - -c
+      - |
+        import http.server, socketserver, json, sys
+        class H(http.server.BaseHTTPRequestHandler):
+            def _send(self, code, body):
+                self.send_response(code)
+                self.send_header('Content-Type','application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode())
+            def do_GET(self):
+                if self.path == '/healthz':
+                    return self._send(200, {'ok': True})
+                return self._send(404, {'error':'not found'})
+            def do_POST(self):
+                # Accept any "DNS update" and pretend it succeeded.
+                ln = int(self.headers.get('Content-Length','0'))
+                _ = self.rfile.read(ln)
+                return self._send(200, {'ok': True, 'mock': True})
+        with socketserver.TCPServer(("", 8053), H) as httpd:
+            sys.stderr.write('mock-dns listening on :8053\n')
+            httpd.serve_forever()
+    networks:
+      - testnet
+
+networks:
+  testnet:
+    driver: bridge

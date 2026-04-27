@@ -47,44 +47,52 @@ warn() { printf '[install-docker] WARNING: %s\n' "$*" >&2; }
 
 log "installing prerequisites (ca-certificates, curl)"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y ca-certificates curl
-
-log "ensuring /etc/apt/keyrings exists"
-install -d -m 0755 /etc/apt/keyrings
-
-if [[ ! -s "$KEYRING" ]]; then
-    log "fetching Docker GPG key into $KEYRING"
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o "$KEYRING"
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+    log "TEST_MODE: skipping apt-get install (ca-certificates curl) and Docker repo + install"
+    install -d -m 0755 /etc/apt/keyrings
+    : > "$KEYRING"
     chmod 0644 "$KEYRING"
+    install -d -m 0755 /etc/docker
 else
-    log "Docker GPG key already present at $KEYRING"
-    chmod 0644 "$KEYRING"
-fi
-
-ARCH="$(dpkg --print-architecture)"
-DESIRED_LIST_LINE="deb [arch=${ARCH} signed-by=${KEYRING}] https://download.docker.com/linux/ubuntu noble stable"
-
-if [[ ! -f "$SOURCES_LIST" ]] || ! grep -qxF "$DESIRED_LIST_LINE" "$SOURCES_LIST"; then
-    log "writing $SOURCES_LIST"
-    printf '%s\n' "$DESIRED_LIST_LINE" > "$SOURCES_LIST"
-    chmod 0644 "$SOURCES_LIST"
     apt-get update -y
-else
-    log "$SOURCES_LIST already up to date"
+    apt-get install -y ca-certificates curl
+
+    log "ensuring /etc/apt/keyrings exists"
+    install -d -m 0755 /etc/apt/keyrings
+
+    if [[ ! -s "$KEYRING" ]]; then
+        log "fetching Docker GPG key into $KEYRING"
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o "$KEYRING"
+        chmod 0644 "$KEYRING"
+    else
+        log "Docker GPG key already present at $KEYRING"
+        chmod 0644 "$KEYRING"
+    fi
+
+    ARCH="$(dpkg --print-architecture)"
+    DESIRED_LIST_LINE="deb [arch=${ARCH} signed-by=${KEYRING}] https://download.docker.com/linux/ubuntu noble stable"
+
+    if [[ ! -f "$SOURCES_LIST" ]] || ! grep -qxF "$DESIRED_LIST_LINE" "$SOURCES_LIST"; then
+        log "writing $SOURCES_LIST"
+        printf '%s\n' "$DESIRED_LIST_LINE" > "$SOURCES_LIST"
+        chmod 0644 "$SOURCES_LIST"
+        apt-get update -y
+    else
+        log "$SOURCES_LIST already up to date"
+    fi
+
+    # ---------- 2. install Docker --------------------------------------------
+
+    log "installing docker-ce + plugins"
+    apt-get install -y \
+        docker-ce \
+        docker-ce-cli \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-compose-plugin
+
+    systemctl enable --now docker
 fi
-
-# ---------- 2. install Docker --------------------------------------------
-
-log "installing docker-ce + plugins"
-apt-get install -y \
-    docker-ce \
-    docker-ce-cli \
-    containerd.io \
-    docker-buildx-plugin \
-    docker-compose-plugin
-
-systemctl enable --now docker
 
 # ---------- 3. add admins to docker group --------------------------------
 
@@ -92,6 +100,12 @@ for u in "${ADMINS[@]}"; do
     if id -u "$u" >/dev/null 2>&1; then
         if id -nG "$u" | tr ' ' '\n' | grep -qx docker; then
             log "user '$u' already in docker group"
+        elif ! getent group docker >/dev/null 2>&1; then
+            if [[ "${TEST_MODE:-0}" == "1" ]]; then
+                log "TEST_MODE: skipping usermod -aG docker $u (docker group absent)"
+            else
+                warn "docker group missing — Docker install must have failed; cannot add '$u'"
+            fi
         else
             log "adding '$u' to docker group"
             usermod -aG docker "$u"
@@ -149,13 +163,19 @@ else
 fi
 
 if [[ "$daemon_changed" -eq 1 ]]; then
-    log "restarting docker (daemon.json changed)"
-    systemctl restart docker
+    if [[ "${TEST_MODE:-0}" == "1" ]]; then
+        log "TEST_MODE: skipping systemctl restart docker"
+    else
+        log "restarting docker (daemon.json changed)"
+        systemctl restart docker
+    fi
 fi
 
 # ---------- 5. edge network ----------------------------------------------
 
-if docker network inspect "$EDGE_NET" >/dev/null 2>&1; then
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+    log "TEST_MODE: skipping docker network create '$EDGE_NET'"
+elif docker network inspect "$EDGE_NET" >/dev/null 2>&1; then
     log "docker network '$EDGE_NET' already exists"
 else
     log "creating docker network '$EDGE_NET' (bridge)"
@@ -164,14 +184,18 @@ fi
 
 # ---------- 6. verification ----------------------------------------------
 
-echo
-echo "===== docker version ====="
-docker version || true
-echo
-echo "===== docker network ls ====="
-docker network ls
-echo
-echo "===== docker info | grep -i 'logging driver' ====="
-docker info 2>/dev/null | grep -i 'logging driver' || true
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+    log "TEST_MODE: skipping docker version / network ls / info verification"
+else
+    echo
+    echo "===== docker version ====="
+    docker version || true
+    echo
+    echo "===== docker network ls ====="
+    docker network ls
+    echo
+    echo "===== docker info | grep -i 'logging driver' ====="
+    docker info 2>/dev/null | grep -i 'logging driver' || true
+fi
 echo
 log "done."

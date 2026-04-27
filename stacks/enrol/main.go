@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -70,6 +71,21 @@ type config struct {
 	// files (with private keys), used to re-serve downloads after the
 	// initial creation page is gone. See peers_archive.go.
 	peersArchiveDir string // /srv/store/enrol-peers-archive
+
+	// Setup wizard (Parcel 3A). The wizard is the only UI the operator
+	// sees from VPS creation until install completion; it is gated by the
+	// ABSENCE of `setupCompleteSentinel`. The token is the out-of-band
+	// proof of operator identity (no Authelia until the wizard finishes).
+	//
+	// setupStateDir holds the per-step persisted JSON (state.json plus
+	// any provider creds we don't want spread across .env). setupToken is
+	// validated on every /setup/* request.
+	setupStateDir         string // /srv/store/setup
+	setupCompleteSentinel string // /srv/store/.setup-complete
+	setupTokenFile        string // /etc/raph-installer/setup-token
+	setupToken            string // resolved at startup; preferred over file reads per-request
+	stacksDir             string // /opt/stacks (compose root for finalize shell-outs)
+	repoDir               string // /opt/raph-server-installer (for wire-npm-routes.sh, render-templates.sh)
 }
 
 func loadConfig() config {
@@ -114,7 +130,38 @@ func loadConfig() config {
 		luksSizeGB:        luksSize,
 		launcherDir:       envOr("ENROL_LAUNCHER_DIR", "/srv/store/enrol-launcher"),
 		peersArchiveDir:   envOr("ENROL_PEERS_ARCHIVE_DIR", "/srv/store/enrol-peers-archive"),
+
+		// Setup wizard wiring. Defaults match Wave 2A's bootstrap layout:
+		// token file is at /etc/raph-installer/setup-token (persisted on
+		// the host across reboots), state lives under /srv/store, and
+		// the sentinel that flips us out of wizard mode is a peer file.
+		setupStateDir:         envOr("ENROL_SETUP_STATE_DIR", "/srv/store/setup"),
+		setupCompleteSentinel: envOr("ENROL_SETUP_COMPLETE", "/srv/store/.setup-complete"),
+		setupTokenFile:        envOr("ENROL_SETUP_TOKEN_FILE", "/etc/raph-installer/setup-token"),
+		setupToken:            resolveSetupToken(),
+		stacksDir:             envOr("ENROL_STACKS_DIR", "/opt/stacks"),
+		repoDir:               envOr("ENROL_REPO_DIR", "/opt/raph-server-installer"),
 	}
+}
+
+// resolveSetupToken prefers the explicit env var (useful for tests + Parcel 3B
+// harness) and falls back to reading /etc/raph-installer/setup-token. An
+// empty token is tolerated at startup — setupModeActive() returns false once
+// the operator finishes the wizard, so the token becomes irrelevant. Setup
+// mode + missing token surfaces as a 503 in the wizard middleware.
+func resolveSetupToken() string {
+	if v := strings.TrimSpace(os.Getenv("SETUP_TOKEN")); v != "" {
+		return v
+	}
+	path := os.Getenv("ENROL_SETUP_TOKEN_FILE")
+	if path == "" {
+		path = "/etc/raph-installer/setup-token"
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // ---------------------------------------------------------------------------

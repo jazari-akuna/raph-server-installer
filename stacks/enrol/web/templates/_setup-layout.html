@@ -1,0 +1,53 @@
+{{/*
+   _setup-layout.html — shared chrome for the setup wizard.
+
+   Pages render one of:  setup-welcome / setup-domain / setup-dns /
+   setup-admin / setup-finalize / setup-done. Each defines its own
+   inner block but pulls the {{template "setup-head"}} and
+   {{template "setup-tail"}} chrome from here.
+
+   Page data is setupPageData (see setup.go):
+     .Title            string
+     .Step             setupStepName  (welcome / domain / dns / admin / finalize / done)
+     .State            *setupState
+     .Domain           string
+     .Providers        []dnsProviderSpec  (only on /setup/dns)
+     .SelectedProvider dnsProviderSpec    (only on /setup/dns)
+     .Err              string  (validation feedback)
+     .Flash            string  (info notices)
+*/}}
+
+{{define "setup-head"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} — setup</title>
+  <link rel="stylesheet" href="/static/setup.css">
+</head>
+<body class="setup">
+  <header class="setup-header">
+    <h1>server setup</h1>
+    {{template "setup-progress" .}}
+  </header>
+  <main class="setup-main">
+    {{if .Err}}<div class="setup-err">{{.Err}}</div>{{end}}
+    {{if .Flash}}<div class="setup-flash">{{.Flash}}</div>{{end}}
+{{end}}
+
+{{define "setup-tail"}}
+  </main>
+</body>
+</html>
+{{end}}
+
+{{define "setup-progress"}}
+<ol class="setup-progress" aria-label="setup progress">
+  <li class="{{if eq (printf "%s" .Step) "welcome"}}is-current{{end}}{{if setupStepDone .Step "welcome"}} is-done{{end}}">welcome</li>
+  <li class="{{if eq (printf "%s" .Step) "domain"}}is-current{{end}}{{if setupStepDone .Step "domain"}} is-done{{end}}">domain</li>
+  <li class="{{if eq (printf "%s" .Step) "dns"}}is-current{{end}}{{if setupStepDone .Step "dns"}} is-done{{end}}">dns</li>
+  <li class="{{if eq (printf "%s" .Step) "admin"}}is-current{{end}}{{if setupStepDone .Step "admin"}} is-done{{end}}">admin</li>
+  <li class="{{if eq (printf "%s" .Step) "finalize"}}is-current{{end}}{{if setupStepDone .Step "finalize"}} is-done{{end}}">finalize</li>
+  <li class="{{if eq (printf "%s" .Step) "done"}}is-current{{end}}">done</li>
+</ol>
+{{end}}

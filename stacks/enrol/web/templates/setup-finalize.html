@@ -1,0 +1,128 @@
+{{template "setup-head" .}}
+
+<section class="setup-step">
+  <h2>finalize</h2>
+  <p>
+    Click <em>Run setup</em> to execute the configuration in this order:
+  </p>
+  <ol class="setup-summary">
+    <li><strong>users_database.yml</strong> &mdash; write
+      <code>{{.State.AdminUsername}}</code> with the argon2id-hashed password.</li>
+    <li><strong>shared LUKS keyfile</strong> &mdash; verify
+      <code>/etc/luks/_shared.key</code> from Wave 2B is in place.</li>
+    <li><strong>render templates</strong> &mdash; re-run
+      <code>scripts/render-templates.sh</code> so the chosen domain
+      flows through Authelia config + nginx snippets.</li>
+    <li><strong>wildcard certificate</strong> &mdash; certbot DNS-01 against
+      <code>{{.State.DNSProvider}}</code> for
+      <code>*.{{.Domain}}</code>. This is the slowest step (1&ndash;3
+      minutes); progress streams below.</li>
+    <li><strong>NPM proxy hosts</strong> &mdash; create the four
+      proxy hosts (auth/enrol/cloud/console) via
+      <code>wire-npm-routes.sh</code>.</li>
+    <li><strong>setup sentinel</strong> &mdash; touch
+      <code>/srv/store/.setup-complete</code>. From this moment the
+      wizard is locked and the launcher takes over.</li>
+  </ol>
+
+  <div class="setup-actions" id="setup-kickoff">
+    <a class="setup-back" href="/setup/admin">&larr; back</a>
+    <button type="button" class="primary" id="run-setup-btn">Run setup</button>
+  </div>
+
+  <div class="setup-finalize-stream" id="finalize-stream" hidden>
+    <h3>progress</h3>
+    <ol class="setup-step-list" id="finalize-steps">
+      <li data-step="users_db">write users_database.yml</li>
+      <li data-step="shared_key">verify shared LUKS keyfile</li>
+      <li data-step="templates">render templates</li>
+      <li data-step="cert">issue wildcard certificate</li>
+      <li data-step="npm">wire NPM proxy hosts</li>
+      <li data-step="sentinel">touch setup-complete sentinel</li>
+    </ol>
+    <h3>log</h3>
+    <pre class="setup-log" id="finalize-log" aria-live="polite"></pre>
+    <div class="setup-finalize-foot" id="finalize-foot"></div>
+  </div>
+</section>
+
+<script>
+  (function() {
+    var btn = document.getElementById('run-setup-btn');
+    var stream = document.getElementById('finalize-stream');
+    var stepsEl = document.getElementById('finalize-steps');
+    var logEl = document.getElementById('finalize-log');
+    var footEl = document.getElementById('finalize-foot');
+
+    function appendLog(line) {
+      logEl.textContent += line + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function markStep(id, state, msg) {
+      var li = stepsEl.querySelector('li[data-step="' + id + '"]');
+      if (!li) return;
+      li.classList.add('is-' + state);
+      if (msg) li.textContent = li.textContent.replace(/\s*—.*$/, '') + ' — ' + msg;
+    }
+
+    btn.addEventListener('click', function() {
+      btn.disabled = true;
+      btn.textContent = 'Running…';
+      stream.hidden = false;
+
+      // POST is acknowledgment; the SSE on /setup/events is what
+      // actually runs finalize. Fire-and-forget.
+      fetch('/setup/finalize', { method: 'POST', credentials: 'same-origin' });
+
+      var es = new EventSource('/setup/events');
+      es.addEventListener('status', function(ev) {
+        try {
+          var d = JSON.parse(ev.data);
+          markStep(d.step, 'running', d.msg);
+        } catch (e) { appendLog('[parse status] ' + ev.data); }
+      });
+      es.addEventListener('log', function(ev) {
+        try {
+          var d = JSON.parse(ev.data);
+          appendLog(d.line);
+        } catch (e) { appendLog(ev.data); }
+      });
+      es.addEventListener('error', function(ev) {
+        // EventSource emits an unnamed `error` for both protocol-level
+        // disconnects (no payload) AND server-emitted "event: error"
+        // (with payload). Distinguish.
+        if (ev.data) {
+          try {
+            var d = JSON.parse(ev.data);
+            markStep(d.step, 'failed', d.msg);
+            footEl.innerHTML =
+              '<div class="setup-err">Setup failed at <code>' +
+              d.step + '</code>: ' + d.msg +
+              '</div><a class="setup-back" href="/setup/' +
+              (d.step === 'cert' ? 'dns' :
+               d.step === 'users_db' ? 'admin' :
+               'finalize') +
+              '">&larr; back to fix and retry</a>';
+          } catch (e) { appendLog('[error] ' + ev.data); }
+          es.close();
+        } else {
+          // Bare error means the connection dropped. SSE auto-retries
+          // by spec; nothing to do unless the server is gone.
+          appendLog('(reconnecting…)');
+        }
+      });
+      es.addEventListener('done', function(ev) {
+        try {
+          var d = JSON.parse(ev.data);
+          markStep('sentinel', 'done', 'complete');
+          footEl.innerHTML =
+            '<div class="setup-flash">Setup complete. Redirecting…</div>';
+          es.close();
+          setTimeout(function() { window.location.href = '/setup/done'; }, 1500);
+        } catch (e) { appendLog('[done] ' + ev.data); }
+      });
+    });
+  })();
+</script>
+
+{{template "setup-tail" .}}

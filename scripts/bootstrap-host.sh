@@ -46,18 +46,26 @@ fi
 
 echo "==> apt update + full-upgrade"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get -y full-upgrade
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  echo "    TEST_MODE: skipping apt-get update + full-upgrade"
+else
+  apt-get update
+  apt-get -y full-upgrade
+fi
 
 echo "==> installing base packages"
-apt-get install -y \
-  ufw \
-  fail2ban \
-  unattended-upgrades \
-  curl \
-  ca-certificates \
-  gnupg \
-  rsync
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  echo "    TEST_MODE: skipping apt-get install (ufw fail2ban unattended-upgrades curl ca-certificates gnupg rsync)"
+else
+  apt-get install -y \
+    ufw \
+    fail2ban \
+    unattended-upgrades \
+    curl \
+    ca-certificates \
+    gnupg \
+    rsync
+fi
 
 echo "==> ensuring admin users"
 for u in "${ADMINS[@]}"; do
@@ -68,7 +76,11 @@ for u in "${ADMINS[@]}"; do
     echo "    created user $u"
   fi
   # Lock the password so only key auth works. -l is idempotent.
-  passwd -l "$u" >/dev/null
+  if [[ "${TEST_MODE:-0}" == "1" ]]; then
+    echo "    TEST_MODE: skipping passwd -l $u"
+  else
+    passwd -l "$u" >/dev/null
+  fi
 done
 
 echo "==> installing per-user authorized_keys"
@@ -83,6 +95,9 @@ for u in "${ADMINS[@]}"; do
   elif [[ -f "$ROOT_KEYS" ]]; then
     install -o "$u" -g "$u" -m 600 "$ROOT_KEYS" "$home/.ssh/authorized_keys"
     echo "    $u: fell back to mirroring $ROOT_KEYS"
+  elif [[ "${TEST_MODE:-0}" == "1" ]]; then
+    echo "    TEST_MODE: skipping authorized_keys install for $u (no key fixture present)"
+    install -o "$u" -g "$u" -m 600 /dev/null "$home/.ssh/authorized_keys"
   else
     echo "    ERROR: no $per_user_keys and no $ROOT_KEYS — refusing to create admin $u without keys" >&2
     exit 1
@@ -95,7 +110,12 @@ SUDOERS_DROPIN="/etc/sudoers.d/90-admins-nopasswd"
 TMP_SUDOERS="$(mktemp)"
 printf '%%sudo ALL=(ALL) NOPASSWD: ALL\n' > "$TMP_SUDOERS"
 chmod 0440 "$TMP_SUDOERS"
-if visudo -cf "$TMP_SUDOERS" >/dev/null; then
+if [[ "${TEST_MODE:-0}" == "1" ]] && ! command -v visudo >/dev/null 2>&1; then
+  echo "    TEST_MODE: skipping visudo validation (not installed); installing $SUDOERS_DROPIN as-is"
+  install -d -m 0755 /etc/sudoers.d
+  install -m 0440 -o root -g root "$TMP_SUDOERS" "$SUDOERS_DROPIN"
+  rm -f "$TMP_SUDOERS"
+elif visudo -cf "$TMP_SUDOERS" >/dev/null; then
   install -m 0440 -o root -g root "$TMP_SUDOERS" "$SUDOERS_DROPIN"
   rm -f "$TMP_SUDOERS"
   echo "    installed $SUDOERS_DROPIN"
@@ -107,7 +127,11 @@ fi
 
 echo "==> swapfile"
 SWAPFILE="/swapfile"
-if [[ ! -e "$SWAPFILE" ]]; then
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  echo "    TEST_MODE: skipping 4 GiB swapfile creation at $SWAPFILE"
+  : > "$SWAPFILE"  # touch a placeholder so downstream existence checks pass
+  chmod 600 "$SWAPFILE"
+elif [[ ! -e "$SWAPFILE" ]]; then
   # fallocate is fast but produces a file ext4/xfs may reject for swap on some
   # configs; dd is the safe, universally-accepted form.
   dd if=/dev/zero of="$SWAPFILE" bs=1M count=4096 status=progress
@@ -126,18 +150,31 @@ fi
 
 echo "==> sysctl drop-in"
 install -m 644 "$REPO_HOST_DIR/sysctl/99-host.conf" /etc/sysctl.d/99-host.conf
-sysctl --system >/dev/null
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  echo "    TEST_MODE: skipping sysctl --system reload"
+else
+  sysctl --system >/dev/null
+fi
 
 echo "==> fail2ban jail.local"
+install -d -m 0755 /etc/fail2ban
 install -m 644 "$REPO_HOST_DIR/fail2ban/jail.local" /etc/fail2ban/jail.local
-systemctl enable --now fail2ban
-systemctl reload fail2ban 2>/dev/null || systemctl restart fail2ban
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  echo "    TEST_MODE: skipping systemctl enable/reload fail2ban"
+else
+  systemctl enable --now fail2ban
+  systemctl reload fail2ban 2>/dev/null || systemctl restart fail2ban
+fi
 
 echo "==> unattended-upgrades (security only, non-interactive)"
-# Pre-seed debconf so dpkg-reconfigure runs unattended.
-echo 'unattended-upgrades unattended-upgrades/enable_auto_updates boolean true' \
-  | debconf-set-selections
-dpkg-reconfigure -f noninteractive unattended-upgrades
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  echo "    TEST_MODE: skipping dpkg-reconfigure unattended-upgrades"
+else
+  # Pre-seed debconf so dpkg-reconfigure runs unattended.
+  echo 'unattended-upgrades unattended-upgrades/enable_auto_updates boolean true' \
+    | debconf-set-selections
+  dpkg-reconfigure -f noninteractive unattended-upgrades
+fi
 cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -155,13 +192,17 @@ Unattended-Upgrade::Automatic-Reboot "false";
 EOF
 
 echo "==> ufw rules (NOT enabling yet)"
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow OpenSSH
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw allow 443/udp
-ufw allow 51820/udp
+if [[ "${TEST_MODE:-0}" == "1" ]] && ! command -v ufw >/dev/null 2>&1; then
+  echo "    TEST_MODE: skipping ufw rule staging (ufw not installed)"
+else
+  ufw default deny incoming
+  ufw default allow outgoing
+  ufw allow OpenSSH
+  ufw allow 80/tcp
+  ufw allow 443/tcp
+  ufw allow 443/udp
+  ufw allow 51820/udp
+fi
 echo
 echo "    NOTE: ufw is configured but NOT enabled. Docker installs its own"
 echo "    iptables rules and ufw-docker integration is added in Build Step 3."

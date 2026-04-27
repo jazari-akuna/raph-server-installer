@@ -1,0 +1,1157 @@
+// setup.go — Parcel 3A: setup wizard handlers + state machine.
+//
+// The wizard is the only UI an operator sees from VPS creation until
+// /srv/store/.setup-complete exists. It collects everything cloud-init
+// couldn't safely capture (admin password, DNS provider creds, TOTP
+// preference) then runs the configuration steps end-to-end:
+//
+//     welcome → domain-confirm → dns-provider → admin-account
+//             → finalize → done
+//
+// Each GET renders a step template. Each POST validates input, persists
+// the new fields into /srv/store/setup/state.json, and redirects to the
+// next step. The /setup/finalize POST kicks off a long-running pipeline
+// streamed back to the browser via Server-Sent Events on /setup/events.
+//
+// AUTHENTICATION MODEL:
+//
+//   The wizard runs over PLAINTEXT HTTP (no cert yet). The only guard is
+//   the SETUP_TOKEN written by Phase 1 of bootstrap.sh into
+//   /etc/raph-installer/setup-token. The operator received it printed on
+//   the bootstrap completion banner. Every wizard request must carry it
+//   in either ?token= or the setup_token cookie (set by /setup on first
+//   visit). Once setup completes the token becomes useless — all
+//   /setup/* routes return 404 from then on (handled by setupRouteGate
+//   in server.go, not in the handlers themselves).
+//
+//   This is identical in spirit to NPM's first-boot admin: an out-of-band
+//   secret that flips to dead code on first successful use.
+//
+// STATE FILE LAYOUT (/srv/store/setup/state.json):
+//
+//   {
+//     "step": "admin-account",
+//     "domain": "example.com",
+//     "dns_provider": "cloudflare",
+//     "dns_provider_creds": {"CF_API_TOKEN": "..."},
+//     "admin_username": "alice",
+//     "admin_email": "alice@example.com",
+//     "admin_display_name": "Alice",
+//     "admin_password_hash": "$argon2id$...",
+//     "enable_totp": false,
+//     "started_at": "2026-04-27T10:00:00Z",
+//     "updated_at": "2026-04-27T10:05:13Z",
+//     "completed_steps": {"admin_db_written": true, "cert_issued": false, ...}
+//   }
+//
+//   The plaintext admin password and the LUKS passphrase are NEVER
+//   persisted. They live in memory only while finalize is running; if
+//   the operator refreshes the finalize page after a partial failure,
+//   the wizard surfaces a "we need your passphrase again" prompt rather
+//   than silently re-trying with a blank.
+
+package main
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+// ---------------------------------------------------------------------------
+// state file
+
+// setupStepName is one of: welcome, domain, dns, admin, finalize, done.
+// Persisted in state.json; drives default redirects on bare GET /setup.
+type setupStepName string
+
+const (
+	stepWelcome  setupStepName = "welcome"
+	stepDomain   setupStepName = "domain"
+	stepDNS      setupStepName = "dns"
+	stepAdmin    setupStepName = "admin"
+	stepFinalize setupStepName = "finalize"
+	stepDone     setupStepName = "done"
+)
+
+// setupCompletedSteps tracks per-finalize-step success so a re-run after
+// a mid-stream failure resumes where it left off.
+type setupCompletedSteps struct {
+	UsersDBWritten   bool `json:"users_db_written,omitempty"`
+	SharedKeyVerify  bool `json:"shared_key_verified,omitempty"`
+	TemplatesRender  bool `json:"templates_rendered,omitempty"`
+	CertIssued       bool `json:"cert_issued,omitempty"`
+	NPMRoutesWired   bool `json:"npm_routes_wired,omitempty"`
+	SentinelTouched  bool `json:"sentinel_touched,omitempty"`
+}
+
+type setupState struct {
+	Step             setupStepName       `json:"step"`
+	Domain           string              `json:"domain,omitempty"`
+	DNSProvider      string              `json:"dns_provider,omitempty"`
+	DNSProviderCreds map[string]string   `json:"dns_provider_creds,omitempty"`
+	AdminUsername    string              `json:"admin_username,omitempty"`
+	AdminDisplayName string              `json:"admin_display_name,omitempty"`
+	AdminEmail       string              `json:"admin_email,omitempty"`
+	AdminPasswordHash string             `json:"admin_password_hash,omitempty"`
+	EnableTOTP       bool                `json:"enable_totp,omitempty"`
+	StartedAt        time.Time           `json:"started_at,omitempty"`
+	UpdatedAt        time.Time           `json:"updated_at,omitempty"`
+	CompletedSteps   setupCompletedSteps `json:"completed_steps,omitempty"`
+
+}
+
+// (The operator's plaintext password is never persisted onto setupState.
+// It rides in setupSecretCache during finalize and is wiped at the end.
+// The LUKS passphrase is the same string per the user spec; auto-unlock
+// at login is handled by loginintercept.go.)
+
+// supportedDNSProviders lists the certbot DNS plugins the wizard exposes.
+// Each entry maps the provider id (URL-safe) to the credentials shape the
+// step-3 form collects. The values are env-var names the user-supplied
+// secrets get written under in dns_provider_creds; the same names are
+// expected by the matching certbot plugin's --dns-${provider}-credentials
+// INI file (see dnsCredsINI for the rendering).
+var supportedDNSProviders = []dnsProviderSpec{
+	{
+		ID: "cloudflare", Label: "Cloudflare",
+		Help: "https://dash.cloudflare.com/profile/api-tokens — token with Zone:DNS:Edit on the apex zone.",
+		Fields: []dnsField{
+			{Name: "dns_cloudflare_api_token", Label: "API Token", Help: "Zone DNS Edit token."},
+		},
+	},
+	{
+		ID: "ovh", Label: "OVH",
+		Help: "https://eu.api.ovh.com/createApp/ — three values; scope to the single zone.",
+		Fields: []dnsField{
+			{Name: "dns_ovh_endpoint", Label: "Endpoint", Help: "ovh-eu / ovh-ca / ovh-us"},
+			{Name: "dns_ovh_application_key", Label: "Application Key"},
+			{Name: "dns_ovh_application_secret", Label: "Application Secret"},
+			{Name: "dns_ovh_consumer_key", Label: "Consumer Key"},
+		},
+	},
+	{
+		ID: "route53", Label: "Route53 (AWS)",
+		Help: "IAM user with route53:ChangeResourceRecordSets on the hosted zone.",
+		Fields: []dnsField{
+			{Name: "aws_access_key_id", Label: "AWS Access Key ID"},
+			{Name: "aws_secret_access_key", Label: "AWS Secret Access Key"},
+		},
+	},
+	{
+		ID: "digitalocean", Label: "DigitalOcean",
+		Help: "https://cloud.digitalocean.com/account/api/tokens — Personal Access Token (write).",
+		Fields: []dnsField{
+			{Name: "dns_digitalocean_token", Label: "API Token"},
+		},
+	},
+	{
+		ID: "google", Label: "Google Cloud DNS",
+		Help: "Service account JSON key with roles/dns.admin on the project.",
+		Fields: []dnsField{
+			// Special: this is a JSON blob, rendered into a key file at
+			// finalize time rather than an INI line. Render the field as
+			// a textarea via Multiline=true.
+			{Name: "dns_google_credentials", Label: "Service Account JSON", Multiline: true},
+		},
+	},
+	{
+		ID: "linode", Label: "Linode",
+		Help: "https://cloud.linode.com/profile/tokens — Personal Access Token with Domains:Read/Write.",
+		Fields: []dnsField{
+			{Name: "dns_linode_key", Label: "API Key"},
+			{Name: "dns_linode_version", Label: "API Version", Help: "Default 4."},
+		},
+	},
+	{
+		ID: "rfc2136", Label: "RFC 2136 (BIND / dynamic DNS)",
+		Help: "Use when you run your own authoritative nameserver supporting TSIG dynamic updates.",
+		Fields: []dnsField{
+			{Name: "dns_rfc2136_server", Label: "Server"},
+			{Name: "dns_rfc2136_port", Label: "Port", Help: "Default 53."},
+			{Name: "dns_rfc2136_name", Label: "TSIG Key Name"},
+			{Name: "dns_rfc2136_secret", Label: "TSIG Secret"},
+			{Name: "dns_rfc2136_algorithm", Label: "TSIG Algorithm", Help: "e.g. HMAC-SHA512."},
+		},
+	},
+}
+
+type dnsProviderSpec struct {
+	ID     string
+	Label  string
+	Help   string
+	Fields []dnsField
+}
+
+type dnsField struct {
+	Name      string // form field + creds map key
+	Label     string
+	Help      string
+	Multiline bool
+}
+
+func dnsProviderByID(id string) (dnsProviderSpec, bool) {
+	for _, p := range supportedDNSProviders {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return dnsProviderSpec{}, false
+}
+
+// ---------------------------------------------------------------------------
+// state I/O
+
+// setupStateMu protects state.json reads/writes — the wizard is operator-
+// driven so contention is irrelevant in practice, but a SSE finalize plus a
+// background refresh can race otherwise. Same pattern as server.mu.
+var setupStateMu sync.Mutex
+
+func (s *server) setupStatePath() string {
+	return filepath.Join(s.cfg.setupStateDir, "state.json")
+}
+
+func (s *server) loadSetupState() (*setupState, error) {
+	setupStateMu.Lock()
+	defer setupStateMu.Unlock()
+	return s.loadSetupStateLocked()
+}
+
+func (s *server) loadSetupStateLocked() (*setupState, error) {
+	path := s.setupStatePath()
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		// Fresh install — bootstrap a state file rooted at "welcome" with
+		// the operator-supplied DOMAIN already populated (it's in cfg).
+		st := &setupState{
+			Step:      stepWelcome,
+			Domain:    s.cfg.domain,
+			StartedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+		}
+		return st, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	st := &setupState{}
+	if err := json.Unmarshal(b, st); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if st.Domain == "" {
+		st.Domain = s.cfg.domain
+	}
+	return st, nil
+}
+
+func (s *server) saveSetupState(st *setupState) error {
+	setupStateMu.Lock()
+	defer setupStateMu.Unlock()
+	return s.saveSetupStateLocked(st)
+}
+
+func (s *server) saveSetupStateLocked(st *setupState) error {
+	if err := os.MkdirAll(s.cfg.setupStateDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", s.cfg.setupStateDir, err)
+	}
+	st.UpdatedAt = time.Now().UTC()
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal state: %w", err)
+	}
+	path := s.setupStatePath()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename %s: %w", tmp, err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// setup-mode gate
+
+// setupModeActive returns true while the wizard should be the only UI.
+// The check is cheap (one os.Stat) so we call it on every request from
+// the middleware in server.go. The sentinel is created by the finalize
+// pipeline as its very last step — once it exists the wizard locks
+// permanently.
+//
+// Using fileExists semantics rather than caching deliberately: the
+// finalize handler creates the sentinel inline and we want subsequent
+// requests in the same process to see the flip without a restart.
+func (s *server) setupModeActive() bool {
+	_, err := os.Stat(s.cfg.setupCompleteSentinel)
+	return os.IsNotExist(err)
+}
+
+// ---------------------------------------------------------------------------
+// token check
+
+const setupCookieName = "setup_token"
+
+// requireSetupToken validates either ?token=... or the setup_token cookie.
+// On the very first GET /setup the token MUST come via query string; we
+// accept it, set an HttpOnly cookie, and redirect to /setup/domain so the
+// token doesn't linger in the browser address bar.
+//
+// Constant-time compare to avoid trivial timing oracles — irrelevant at
+// our threat-model scale but cheap discipline.
+func (s *server) requireSetupToken(w http.ResponseWriter, r *http.Request) bool {
+	expected := s.cfg.setupToken
+	if expected == "" {
+		http.Error(w, "503 — setup token not configured. Re-run bootstrap (Phase 1).",
+			http.StatusServiceUnavailable)
+		return false
+	}
+	// Query string wins so the operator can paste a fresh URL after the
+	// cookie expires (or after a browser-clear).
+	got := r.URL.Query().Get("token")
+	if got == "" {
+		if c, err := r.Cookie(setupCookieName); err == nil {
+			got = c.Value
+		}
+	}
+	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+		http.Error(w, "401 — setup token missing or wrong. Append "+
+			"?token=<token-from-bootstrap-banner> to the URL.",
+			http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+// setSetupCookie persists the token for the rest of the wizard flow so
+// subsequent POSTs don't need ?token= on every form. HttpOnly + SameSite
+// strict; Secure intentionally OFF because the wizard runs over plain
+// HTTP until the wildcard cert is issued.
+func setSetupCookie(w http.ResponseWriter, value string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     setupCookieName,
+		Value:    value,
+		Path:     "/setup",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   60 * 60 * 4, // 4h — finalize cert issuance + buffer
+	})
+}
+
+// ---------------------------------------------------------------------------
+// route registration
+
+// registerSetupRoutes is called from server.routes() when setup mode is
+// active. The mux returned ONLY exposes wizard endpoints + /healthz +
+// /static/. Every other path 302s to /setup. See setupRouteGate.
+func (s *server) registerSetupRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/setup", s.handleSetupRoot)
+	mux.HandleFunc("/setup/", s.handleSetupSub)
+	mux.HandleFunc("/setup/events", s.handleSetupEvents)
+}
+
+func (s *server) handleSetupRoot(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSetupToken(w, r) {
+		return
+	}
+	if t := r.URL.Query().Get("token"); t != "" {
+		setSetupCookie(w, t)
+		// Strip the token from the URL so it doesn't sit in history /
+		// referrers; rely on the cookie from here on.
+		http.Redirect(w, r, "/setup/", http.StatusSeeOther)
+		return
+	}
+	st, err := s.loadSetupState()
+	if err != nil {
+		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Resume at the recorded step so a refresh/back doesn't stall the user.
+	target := "/setup/welcome"
+	switch st.Step {
+	case stepDomain:
+		target = "/setup/domain"
+	case stepDNS:
+		target = "/setup/dns"
+	case stepAdmin:
+		target = "/setup/admin"
+	case stepFinalize:
+		target = "/setup/finalize"
+	case stepDone:
+		target = "/setup/done"
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+// handleSetupSub dispatches /setup/<step> + /setup/<step> POSTs.
+func (s *server) handleSetupSub(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSetupToken(w, r) {
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/setup/")
+	// /setup/events is registered on the mux directly; everything else
+	// dispatches here.
+	switch rest {
+	case "":
+		s.handleSetupRoot(w, r)
+	case "welcome":
+		s.handleSetupWelcome(w, r)
+	case "domain":
+		s.handleSetupDomain(w, r)
+	case "dns":
+		s.handleSetupDNS(w, r)
+	case "admin":
+		s.handleSetupAdmin(w, r)
+	case "finalize":
+		s.handleSetupFinalize(w, r)
+	case "done":
+		s.handleSetupDone(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// step 0 — welcome
+
+type setupPageData struct {
+	Title     string
+	Step      setupStepName
+	State     *setupState
+	Domain    string
+	Providers []dnsProviderSpec
+	// Selected provider spec for re-rendering /setup/dns with a chosen
+	// provider's fields visible.
+	SelectedProvider dnsProviderSpec
+	Flash            string
+	Err              string
+}
+
+func (s *server) renderSetup(w http.ResponseWriter, name string, data setupPageData) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil {
+		log.Printf("template %s: %v", name, err)
+	}
+}
+
+func (s *server) handleSetupWelcome(w http.ResponseWriter, r *http.Request) {
+	st, err := s.loadSetupState()
+	if err != nil {
+		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.renderSetup(w, "setup-welcome.html", setupPageData{
+			Title: "setup — welcome", Step: stepWelcome, State: st, Domain: st.Domain,
+		})
+	case http.MethodPost:
+		st.Step = stepDomain
+		if err := s.saveSetupState(st); err != nil {
+			http.Error(w, "save state: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/setup/domain", http.StatusSeeOther)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// step 1 — domain confirm
+
+func (s *server) handleSetupDomain(w http.ResponseWriter, r *http.Request) {
+	st, err := s.loadSetupState()
+	if err != nil {
+		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.renderSetup(w, "setup-domain.html", setupPageData{
+			Title: "setup — domain", Step: stepDomain, State: st, Domain: st.Domain,
+		})
+	case http.MethodPost:
+		// We deliberately ignore any submitted "domain" field — the
+		// operator confirms only. Domain editing post-bootstrap requires
+		// re-running Phase 1 (DOMAIN is baked into too many places).
+		st.Step = stepDNS
+		if err := s.saveSetupState(st); err != nil {
+			http.Error(w, "save state: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/setup/dns", http.StatusSeeOther)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// step 2 — DNS provider
+
+func (s *server) handleSetupDNS(w http.ResponseWriter, r *http.Request) {
+	st, err := s.loadSetupState()
+	if err != nil {
+		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		sel, _ := dnsProviderByID(st.DNSProvider)
+		s.renderSetup(w, "setup-dns.html", setupPageData{
+			Title: "setup — DNS provider", Step: stepDNS, State: st, Domain: st.Domain,
+			Providers: supportedDNSProviders, SelectedProvider: sel,
+		})
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		provID := strings.TrimSpace(r.Form.Get("provider"))
+		spec, ok := dnsProviderByID(provID)
+		if !ok {
+			s.renderSetup(w, "setup-dns.html", setupPageData{
+				Title: "setup — DNS provider", Step: stepDNS, State: st, Domain: st.Domain,
+				Providers: supportedDNSProviders, Err: "pick a provider",
+			})
+			return
+		}
+		creds := map[string]string{}
+		var missing []string
+		for _, f := range spec.Fields {
+			v := strings.TrimSpace(r.Form.Get(f.Name))
+			if v == "" {
+				missing = append(missing, f.Label)
+				continue
+			}
+			creds[f.Name] = v
+		}
+		if len(missing) > 0 {
+			s.renderSetup(w, "setup-dns.html", setupPageData{
+				Title: "setup — DNS provider", Step: stepDNS, State: st, Domain: st.Domain,
+				Providers: supportedDNSProviders, SelectedProvider: spec,
+				Err: "missing required field(s): " + strings.Join(missing, ", "),
+			})
+			return
+		}
+		st.DNSProvider = provID
+		st.DNSProviderCreds = creds
+		st.Step = stepAdmin
+		if err := s.saveSetupState(st); err != nil {
+			http.Error(w, "save state: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/setup/admin", http.StatusSeeOther)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// step 3 — first admin account
+
+func (s *server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
+	st, err := s.loadSetupState()
+	if err != nil {
+		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.renderSetup(w, "setup-admin.html", setupPageData{
+			Title: "setup — first admin", Step: stepAdmin, State: st, Domain: st.Domain,
+		})
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		name := strings.ToLower(strings.TrimSpace(r.Form.Get("name")))
+		display := strings.TrimSpace(r.Form.Get("displayname"))
+		email := strings.TrimSpace(r.Form.Get("email"))
+		pw := r.Form.Get("password")
+		pwc := r.Form.Get("password_confirm")
+		enableTOTP := r.Form.Get("enable_totp") == "on"
+
+		errMsg := ""
+		switch {
+		case !validUsername(name):
+			errMsg = "username: lowercase a-z then a-z0-9_-, 1..32 chars"
+		case !validDisplayName(display):
+			errMsg = "display name: 1..64 letters/digits/space/.-_'"
+		case !validEmail(email):
+			errMsg = "email: not a valid address"
+		case len(pw) < 12:
+			errMsg = "password: at least 12 characters"
+		case pw != pwc:
+			errMsg = "password: confirmation does not match"
+		}
+		if errMsg != "" {
+			st.AdminUsername = name
+			st.AdminDisplayName = display
+			st.AdminEmail = email
+			st.EnableTOTP = enableTOTP
+			s.renderSetup(w, "setup-admin.html", setupPageData{
+				Title: "setup — first admin", Step: stepAdmin, State: st, Domain: st.Domain,
+				Err: errMsg,
+			})
+			return
+		}
+
+		hash, err := argon2idHash(pw)
+		if err != nil {
+			http.Error(w, "argon2 hash: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		st.AdminUsername = name
+		st.AdminDisplayName = display
+		st.AdminEmail = email
+		st.AdminPasswordHash = hash
+		st.EnableTOTP = enableTOTP
+		st.Step = stepFinalize
+		if err := s.saveSetupState(st); err != nil {
+			http.Error(w, "save state: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Stash the plaintext password into the in-memory finalize cache
+		// (key = admin username). The finalize handler reads it and uses
+		// it as the LUKS passphrase. If the operator refreshes between
+		// /setup/admin and /setup/finalize, the cache loses the password
+		// and finalize will surface a "re-enter your password" prompt
+		// (TODO Wave 3B: not yet wired — for now finalize will fail
+		// loudly with a clear "missing in-memory password" error).
+		setupSecretCache.set(name, pw)
+		http.Redirect(w, r, "/setup/finalize", http.StatusSeeOther)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// in-memory password cache
+
+// The plaintext admin password is needed at finalize time (as the LUKS
+// passphrase, since per the user spec the two are the same). Persisting it
+// would defeat the point — anyone with read access to /srv/store could
+// then unlock storage. Hold it in a process-local map keyed on the admin
+// username instead. Cleared after a successful finalize.
+
+type secretCache struct {
+	mu sync.Mutex
+	m  map[string]string
+}
+
+func (c *secretCache) set(k, v string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = map[string]string{}
+	}
+	c.m[k] = v
+}
+
+func (c *secretCache) get(k string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.m[k]
+}
+
+func (c *secretCache) delete(k string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.m, k)
+}
+
+var setupSecretCache = &secretCache{}
+
+// ---------------------------------------------------------------------------
+// step 4 — finalize summary page (GET) + kickoff (POST)
+
+func (s *server) handleSetupFinalize(w http.ResponseWriter, r *http.Request) {
+	st, err := s.loadSetupState()
+	if err != nil {
+		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.renderSetup(w, "setup-finalize.html", setupPageData{
+			Title: "setup — finalize", Step: stepFinalize, State: st, Domain: st.Domain,
+		})
+	case http.MethodPost:
+		// POST is just acknowledgment; the JS in setup-finalize.html
+		// opens /setup/events and streams. We respond 204 so the JS can
+		// transition to the SSE-driven view without a page reload.
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// step 5 — done
+
+func (s *server) handleSetupDone(w http.ResponseWriter, r *http.Request) {
+	st, err := s.loadSetupState()
+	if err != nil {
+		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.renderSetup(w, "setup-done.html", setupPageData{
+		Title: "setup — complete", Step: stepDone, State: st, Domain: st.Domain,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// /setup/events — Server-Sent Events finalize stream
+//
+// Protocol (matches what setup-finalize.html consumes):
+//
+//   event: status
+//   data: {"step": "users_db", "msg": "writing users_database.yml"}
+//
+//   event: log
+//   data: {"line": "<arbitrary stdout from a sub-process>"}
+//
+//   event: error
+//   data: {"step": "cert", "msg": "certbot exited 1: <last lines>"}
+//
+//   event: done
+//   data: {"redirect": "https://example.com/"}
+//
+// And every 15 seconds: a comment line `: keepalive\n\n` that any HTTP idle
+// timeout in the proxy chain treats as activity. Without this, NPM / nginx
+// silently kill connections after ~60 seconds and the operator sees the
+// progress meter freeze mid-cert-issuance.
+
+func (s *server) handleSetupEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSetupToken(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported by this responder",
+			http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // disable nginx response buffering
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	// Keepalive ticker. 15s is well under any sane HTTP idle timeout
+	// (NPM defaults to 60s; the upstream nginx proxy_read_timeout is
+	// 60s by default).
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-keepalive.C:
+				// Comment lines are ignored by EventSource consumers
+				// but reset proxy idle timers. Best-effort: a slow/dead
+				// writer surfaces as the next finalize step's write
+				// failing.
+				if _, err := io.WriteString(w, ": keepalive\n\n"); err != nil {
+					cancel()
+					return
+				}
+				flusher.Flush()
+			}
+		}
+	}()
+
+	// Run the finalize pipeline synchronously, emitting SSE events as we
+	// go. emit captures the writer + flusher in a closure so step funcs
+	// don't need to know about HTTP plumbing.
+	emit := func(event, payload string) {
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, payload)
+		flusher.Flush()
+	}
+	emitStatus := func(step, msg string) {
+		emit("status", fmt.Sprintf(`{"step":%q,"msg":%q}`, step, msg))
+	}
+	emitLog := func(line string) {
+		// Strip control chars + trim — caller should not need to escape.
+		emit("log", fmt.Sprintf(`{"line":%q}`, line))
+	}
+	emitError := func(step, msg string) {
+		emit("error", fmt.Sprintf(`{"step":%q,"msg":%q}`, step, msg))
+	}
+
+	if err := s.runFinalize(ctx, emitStatus, emitLog); err != nil {
+		emitError(err.Step, err.Message)
+		return
+	}
+	emit("done", fmt.Sprintf(`{"redirect":"https://%s/"}`, s.cfg.domain))
+}
+
+// ---------------------------------------------------------------------------
+// finalize pipeline
+//
+// Each step is idempotent: it consults state.CompletedSteps and skips work
+// already done. Failures bubble up as a finalizeErr with a step tag so the
+// SSE consumer can render a clickable "back to <step>" link.
+
+type finalizeErr struct {
+	Step    string
+	Message string
+}
+
+func (e *finalizeErr) Error() string { return e.Step + ": " + e.Message }
+
+func wrapErr(step string, err error) *finalizeErr {
+	return &finalizeErr{Step: step, Message: err.Error()}
+}
+
+func (s *server) runFinalize(
+	ctx context.Context,
+	status func(step, msg string),
+	logLine func(string),
+) *finalizeErr {
+	st, err := s.loadSetupState()
+	if err != nil {
+		return wrapErr("load-state", err)
+	}
+
+	// 1. users_database.yml — write the admin entry via UsersDB.flush().
+	if !st.CompletedSteps.UsersDBWritten {
+		status("users_db", "writing admin to users_database.yml")
+		if err := s.finalizeWriteAdmin(st); err != nil {
+			return wrapErr("users_db", err)
+		}
+		st.CompletedSteps.UsersDBWritten = true
+		_ = s.saveSetupState(st)
+	}
+
+	// 2. shared LUKS keyfile — verify (Wave 2B already created it).
+	if !st.CompletedSteps.SharedKeyVerify {
+		status("shared_key", "verifying /etc/luks/_shared.key")
+		if err := s.finalizeVerifySharedKey(); err != nil {
+			// Non-fatal warning rather than hard fail — the operator
+			// can re-run create-shared-volume.sh post-setup.
+			logLine("warning: " + err.Error())
+		}
+		st.CompletedSteps.SharedKeyVerify = true
+		_ = s.saveSetupState(st)
+	}
+
+	// 3. render Authelia config + sibling templates.
+	if !st.CompletedSteps.TemplatesRender {
+		status("templates", "re-rendering templates with chosen domain")
+		if err := s.finalizeRenderTemplates(ctx, logLine); err != nil {
+			return wrapErr("templates", err)
+		}
+		st.CompletedSteps.TemplatesRender = true
+		_ = s.saveSetupState(st)
+	}
+
+	// 4. cert issuance via certbot — slowest step, stream stdout.
+	if !st.CompletedSteps.CertIssued {
+		status("cert", "requesting wildcard cert via Let's Encrypt DNS-01")
+		if err := s.finalizeIssueCert(ctx, st, logLine); err != nil {
+			return wrapErr("cert", err)
+		}
+		st.CompletedSteps.CertIssued = true
+		_ = s.saveSetupState(st)
+	}
+
+	// 5. wire NPM proxy hosts (shells out to wire-npm-routes.sh).
+	if !st.CompletedSteps.NPMRoutesWired {
+		status("npm", "wiring NPM proxy hosts (auth/enrol/cloud/console)")
+		if err := s.finalizeWireNPM(ctx, st, logLine); err != nil {
+			return wrapErr("npm", err)
+		}
+		st.CompletedSteps.NPMRoutesWired = true
+		_ = s.saveSetupState(st)
+	}
+
+	// 6. flip out of setup mode.
+	if !st.CompletedSteps.SentinelTouched {
+		status("sentinel", "marking setup complete")
+		if err := s.finalizeTouchSentinel(); err != nil {
+			return wrapErr("sentinel", err)
+		}
+		st.CompletedSteps.SentinelTouched = true
+		st.Step = stepDone
+		_ = s.saveSetupState(st)
+	}
+
+	// Drop the in-memory plaintext password — never needed again.
+	setupSecretCache.delete(st.AdminUsername)
+
+	status("done", "all steps complete")
+	return nil
+}
+
+// ---- finalize step 1: write the admin to users_database.yml --------------
+
+func (s *server) finalizeWriteAdmin(st *setupState) error {
+	if st.AdminUsername == "" || st.AdminPasswordHash == "" {
+		return errors.New("admin username/hash missing — restart wizard at /setup/admin")
+	}
+	// Ensure the parent dir + an empty users_database.yml exist. The
+	// Wave 1A example file is committed under users_database.yml.example;
+	// the wizard's responsibility is to materialise the live file at the
+	// path the enrol container reads.
+	dir := filepath.Dir(s.cfg.usersDBPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	if _, err := os.Stat(s.cfg.usersDBPath); errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(s.cfg.usersDBPath, []byte("users: {}\n"), 0o600); err != nil {
+			return fmt.Errorf("seed %s: %w", s.cfg.usersDBPath, err)
+		}
+	}
+	db, err := loadUsersDB(s.cfg.usersDBPath)
+	if err != nil {
+		return fmt.Errorf("load users db: %w", err)
+	}
+	u := User{
+		Disabled:    false,
+		DisplayName: st.AdminDisplayName,
+		Password:    st.AdminPasswordHash,
+		Email:       st.AdminEmail,
+		Groups:      []string{"admins"},
+	}
+	if err := db.upsert(st.AdminUsername, u); err != nil {
+		return fmt.Errorf("upsert admin: %w", err)
+	}
+	if err := db.flush(); err != nil {
+		return fmt.Errorf("flush users db: %w", err)
+	}
+	return nil
+}
+
+// ---- finalize step 2: verify the shared LUKS keyfile ---------------------
+
+func (s *server) finalizeVerifySharedKey() error {
+	const path = "/etc/luks/_shared.key"
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s: %w (Wave 2B's create-shared-volume.sh "+
+			"may not have run; cloud's [/shared] block will fail-closed)", path, err)
+	}
+	if info.Size() < 32 {
+		return fmt.Errorf("%s: too small (%d bytes; expected >= 32)", path, info.Size())
+	}
+	return nil
+}
+
+// ---- finalize step 3: re-render templates --------------------------------
+
+func (s *server) finalizeRenderTemplates(ctx context.Context, logLine func(string)) error {
+	script := filepath.Join(s.cfg.repoDir, "scripts/render-templates.sh")
+	envFile := filepath.Join(s.cfg.stacksDir, ".env")
+	cmd := exec.CommandContext(ctx, "bash", script, "--env-file", envFile)
+	return runStreaming(cmd, logLine)
+}
+
+// ---- finalize step 4: certbot -------------------------------------------
+
+// dnsCredsINI renders a certbot credentials INI file body for the given
+// provider. For most providers this is a flat key=value list (the field
+// names already match certbot's expected keys); for Google the JSON blob
+// is written to a separate JSON file and only the path is referenced here.
+//
+// Returns: (mainINIBody, sidecarPath, sidecarBody). Sidecar is empty for
+// every provider except google.
+func dnsCredsINI(provider string, creds map[string]string) (string, string, string) {
+	if provider == "google" {
+		// google needs a JSON file + a tiny INI pointing at it.
+		jsonPath := "/srv/store/setup/google-creds.json"
+		jsonBody := creds["dns_google_credentials"]
+		ini := "dns_google_credentials = " + jsonPath + "\n"
+		return ini, jsonPath, jsonBody
+	}
+	var b strings.Builder
+	for k, v := range creds {
+		b.WriteString(k)
+		b.WriteString(" = ")
+		b.WriteString(v)
+		b.WriteString("\n")
+	}
+	return b.String(), "", ""
+}
+
+func (s *server) finalizeIssueCert(ctx context.Context, st *setupState, logLine func(string)) error {
+	if st.DNSProvider == "" {
+		return errors.New("no DNS provider selected — restart wizard at /setup/dns")
+	}
+	if st.Domain == "" {
+		return errors.New("domain unset")
+	}
+	// Write the per-provider credentials INI to /srv/store/setup so it
+	// rides the same backed-up volume as everything else. Mode 0600.
+	credsDir := filepath.Join(s.cfg.setupStateDir, "dns-creds")
+	if err := os.MkdirAll(credsDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", credsDir, err)
+	}
+	ini, sidecarPath, sidecarBody := dnsCredsINI(st.DNSProvider, st.DNSProviderCreds)
+	credsFile := filepath.Join(credsDir, st.DNSProvider+".ini")
+	if err := os.WriteFile(credsFile, []byte(ini), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", credsFile, err)
+	}
+	if sidecarPath != "" {
+		// Make sure the parent dir exists. For google the sidecar path
+		// is /srv/store/setup/google-creds.json by default.
+		if err := os.MkdirAll(filepath.Dir(sidecarPath), 0o700); err != nil {
+			return fmt.Errorf("mkdir %s: %w", filepath.Dir(sidecarPath), err)
+		}
+		if err := os.WriteFile(sidecarPath, []byte(sidecarBody), 0o600); err != nil {
+			return fmt.Errorf("write %s: %w", sidecarPath, err)
+		}
+	}
+
+	// Email for Let's Encrypt expiry warnings. We use the admin email if
+	// the operator supplied one, else fall back to ADMIN_EMAIL from the
+	// .env (which Phase 1 captured).
+	email := st.AdminEmail
+	if email == "" {
+		email = os.Getenv("ADMIN_EMAIL")
+	}
+
+	// Run certbot via the ingress stack's docker-compose so it shares
+	// /etc/letsencrypt with NPM. Wave 4A may swap this for a direct
+	// `docker run` once the ingress compose grows a `certbot:` service;
+	// for now we use `docker compose run --rm certbot ...` which Just
+	// Works as long as the service exists.
+	composeFile := filepath.Join(s.cfg.stacksDir, "ingress/docker-compose.yml")
+	args := []string{
+		"compose", "-f", composeFile,
+		"run", "--rm", "certbot", "certonly",
+		"--non-interactive", "--agree-tos",
+		"--email", email,
+		"--dns-" + st.DNSProvider,
+		"--dns-" + st.DNSProvider + "-credentials", credsFile,
+		"-d", st.Domain,
+		"-d", "*." + st.Domain,
+	}
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	return runStreaming(cmd, logLine)
+}
+
+// ---- finalize step 5: NPM proxy host wiring -----------------------------
+
+func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine func(string)) error {
+	script := filepath.Join(s.cfg.repoDir, "stacks/authelia/scripts/wire-npm-routes.sh")
+	// NPM admin: the script needs an existing NPM login. Phase 1 wrote
+	// admin@example.com / changeme into NPM's first-boot defaults; we
+	// thread those through verbatim. A future wave (4A) replaces this
+	// with a typed Go client that rotates the password atomically.
+	npmEmail := os.Getenv("NPM_EMAIL")
+	if npmEmail == "" {
+		npmEmail = "admin@example.com"
+	}
+	npmPass := os.Getenv("NPM_PASS")
+	if npmPass == "" {
+		npmPass = "changeme"
+	}
+	cmd := exec.CommandContext(ctx, "bash", script)
+	cmd.Env = append(os.Environ(),
+		"DOMAIN="+st.Domain,
+		"NPM_EMAIL="+npmEmail,
+		"NPM_PASS="+npmPass,
+	)
+	return runStreaming(cmd, logLine)
+}
+
+// ---- finalize step 6: touch the sentinel --------------------------------
+
+func (s *server) finalizeTouchSentinel() error {
+	dir := filepath.Dir(s.cfg.setupCompleteSentinel)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := os.WriteFile(s.cfg.setupCompleteSentinel, []byte(now+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", s.cfg.setupCompleteSentinel, err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+
+// runStreaming runs cmd, fan-outing every stdout+stderr line to logLine.
+// Blocks until cmd exits; returns the cmd's error verbatim so the caller
+// can wrap with finalizeErr.
+func runStreaming(cmd *exec.Cmd, logLine func(string)) error {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Two pumps in parallel (stdout + stderr); finish wait on cmd.Wait().
+	done := make(chan struct{}, 2)
+	pump := func(r io.Reader) {
+		defer func() { done <- struct{}{} }()
+		buf := make([]byte, 0, 4096)
+		tmp := make([]byte, 1024)
+		for {
+			n, err := r.Read(tmp)
+			if n > 0 {
+				buf = append(buf, tmp[:n]...)
+				for {
+					i := indexNewline(buf)
+					if i < 0 {
+						break
+					}
+					line := strings.TrimRight(string(buf[:i]), "\r")
+					logLine(line)
+					buf = buf[i+1:]
+				}
+			}
+			if err != nil {
+				if len(buf) > 0 {
+					logLine(strings.TrimRight(string(buf), "\r"))
+				}
+				return
+			}
+		}
+	}
+	go pump(stdout)
+	go pump(stderr)
+	<-done
+	<-done
+	return cmd.Wait()
+}
+
+func indexNewline(b []byte) int {
+	for i, c := range b {
+		if c == '\n' {
+			return i
+		}
+	}
+	return -1
+}

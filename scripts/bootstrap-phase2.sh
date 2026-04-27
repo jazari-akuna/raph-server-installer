@@ -48,6 +48,9 @@ log()  { printf '[phase2 %s] %s\n' "$(ts)" "$*"; }
 fail() { printf '[phase2 %s] FATAL: %s\n' "$(ts)" "$*" >&2; exit 1; }
 
 log "===== raph-server-installer bootstrap (phase 2) starting ====="
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  log "TEST_MODE=1: irreversible actions will be short-circuited"
+fi
 
 # ──────────────────────────────────────────────────────────────────────────
 # Preflight
@@ -67,7 +70,9 @@ fi
 # Idempotent short-circuit.
 if [[ -f "$PHASE2_DONE" ]]; then
   log "Phase 2 sentinel present ($PHASE2_DONE) — nothing to do"
-  systemctl disable "${CONTINUE_UNIT}" >/dev/null 2>&1 || true
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable "${CONTINUE_UNIT}" >/dev/null 2>&1 || true
+  fi
   exit 0
 fi
 
@@ -76,18 +81,22 @@ fi
 # ──────────────────────────────────────────────────────────────────────────
 
 log "==> verifying amneziawg kernel module"
-if ! modinfo amneziawg >/dev/null 2>&1; then
-  fail "amneziawg kernel module not present after reboot — DKMS build failed. \
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  log "    TEST_MODE: skipping modinfo/modprobe amneziawg (DKMS not built in container)"
+else
+  if ! modinfo amneziawg >/dev/null 2>&1; then
+    fail "amneziawg kernel module not present after reboot — DKMS build failed. \
 Inspect /var/lib/dkms/amneziawg/*/build/make.log and the install-gw0.sh \
 remediation block."
-fi
-log "    amneziawg modinfo OK"
+  fi
+  log "    amneziawg modinfo OK"
 
-# Don't load it pre-emptively — install-gw0.sh / awg-quick will pull it in
-# when needed. modprobe-test it to surface any latent load failure now.
-if ! modprobe -n amneziawg >/dev/null 2>&1; then
-  log "    WARNING: modprobe -n amneziawg failed; the module may still load \
+  # Don't load it pre-emptively — install-gw0.sh / awg-quick will pull it in
+  # when needed. modprobe-test it to surface any latent load failure now.
+  if ! modprobe -n amneziawg >/dev/null 2>&1; then
+    log "    WARNING: modprobe -n amneziawg failed; the module may still load \
 when awg-quick runs but this is suspicious"
+  fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -126,10 +135,15 @@ without /shared. Investigate before announcing setup-ready."
   # the volume mounted in this boot; `start` would fail because the
   # mapper is open. The unit fires cleanly on next reboot.
   if [[ -f "$SHARED_UNIT_SRC" ]]; then
+    install -d -m 0755 /etc/systemd/system
     install -m 0644 "$SHARED_UNIT_SRC" "$SHARED_UNIT_DST"
-    systemctl daemon-reload
-    systemctl enable shared-store.service >/dev/null 2>&1 || \
-      log "    WARNING: enable shared-store.service failed; volume won't auto-mount on reboot"
+    if [[ "${TEST_MODE:-0}" == "1" ]] && ! command -v systemctl >/dev/null 2>&1; then
+      log "    TEST_MODE: skipping systemctl daemon-reload + enable shared-store.service"
+    else
+      systemctl daemon-reload
+      systemctl enable shared-store.service >/dev/null 2>&1 || \
+        log "    WARNING: enable shared-store.service failed; volume won't auto-mount on reboot"
+    fi
   fi
 else
   log "==> $SHARED_SCRIPT not present (Parcel 2B); skipping shared volume"
@@ -154,6 +168,15 @@ compose_up() {
     return 0
   fi
   log "==> docker compose up -d ($stack)"
+  if [[ "${TEST_MODE:-0}" == "1" ]]; then
+    # In test mode, log what would have run (the harness assertion library
+    # greps these lines to verify each stack saw an up -d invocation).
+    log "    TEST_MODE: skipping 'docker compose --env-file $ENV_FILE -f $file up -d --remove-orphans' for stack=$stack"
+    if [[ -n "${TEST_COMPOSE_LOG:-}" ]]; then
+      printf '%s\n' "$stack" >> "$TEST_COMPOSE_LOG"
+    fi
+    return 0
+  fi
   # --remove-orphans cleans up containers from a previous compose layout.
   # Run inside the stack dir so any relative bind mounts resolve correctly.
   ( cd "$STACKS_DIR/$stack" && \
@@ -180,25 +203,29 @@ fi
 # binds to 172.17.0.1:8080 in normal mode; in setup mode it's on :80
 # directly. Try both endpoints so we don't depend on which mode it's in
 # right now (the wizard finalisation flips the mode). 30s budget.
-log "==> waiting for enrol /healthz (timeout 30s)"
-ENROL_OK=0
-for i in $(seq 1 30); do
-  for url in \
-    "http://127.0.0.1/healthz" \
-    "http://172.17.0.1:8080/healthz" \
-    "http://127.0.0.1:8080/healthz"; do
-    if curl -fsS -o /dev/null --max-time 2 "$url" 2>/dev/null; then
-      log "    enrol healthy at $url (after ${i}s)"
-      ENROL_OK=1
-      break 2
-    fi
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  log "==> TEST_MODE: skipping enrol /healthz wait (no real containers running)"
+else
+  log "==> waiting for enrol /healthz (timeout 30s)"
+  ENROL_OK=0
+  for i in $(seq 1 30); do
+    for url in \
+      "http://127.0.0.1/healthz" \
+      "http://172.17.0.1:8080/healthz" \
+      "http://127.0.0.1:8080/healthz"; do
+      if curl -fsS -o /dev/null --max-time 2 "$url" 2>/dev/null; then
+        log "    enrol healthy at $url (after ${i}s)"
+        ENROL_OK=1
+        break 2
+      fi
+    done
+    sleep 1
   done
-  sleep 1
-done
-if [[ $ENROL_OK -eq 0 ]]; then
-  log "    WARNING: enrol /healthz did not respond within 30s — wizard \
+  if [[ $ENROL_OK -eq 0 ]]; then
+    log "    WARNING: enrol /healthz did not respond within 30s — wizard \
 may not be reachable yet. Check 'docker compose -f \
 $STACKS_DIR/enrol/docker-compose.yml logs'."
+  fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -213,13 +240,17 @@ fi
 #   2. add a simple iptables INPUT ACCEPT rule on dport 80, if not already
 #      present.
 log "==> opening port 80 for setup wizard"
-ufw allow 80/tcp >/dev/null 2>&1 || true
-if command -v iptables >/dev/null 2>&1; then
-  if ! iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null; then
-    iptables -I INPUT -p tcp --dport 80 -j ACCEPT
-    log "    inserted iptables INPUT ACCEPT for tcp/80"
-  else
-    log "    iptables INPUT already accepts tcp/80"
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  log "    TEST_MODE: skipping ufw allow 80/tcp + iptables INPUT ACCEPT for tcp/80"
+else
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  if command -v iptables >/dev/null 2>&1; then
+    if ! iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null; then
+      iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+      log "    inserted iptables INPUT ACCEPT for tcp/80"
+    else
+      log "    iptables INPUT already accepts tcp/80"
+    fi
   fi
 fi
 # Note: the wizard's finalisation step (Wave 3A) is responsible for closing
@@ -233,7 +264,9 @@ date -u '+%Y-%m-%dT%H:%M:%SZ' > "$PHASE2_DONE"
 log "Phase 2 sentinel: $PHASE2_DONE"
 
 # Belt-and-suspenders: also disable the continue unit ourselves.
-systemctl disable "${CONTINUE_UNIT}" >/dev/null 2>&1 || true
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable "${CONTINUE_UNIT}" >/dev/null 2>&1 || true
+fi
 
 VPS_IP="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null \
   || ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')"

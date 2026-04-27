@@ -51,6 +51,27 @@ func newServer(cfg config) (*server, error) {
 			}
 			return fmt.Sprintf("%.2f", 100*float64(part)/float64(whole))
 		},
+		// setupStepDone reports whether `target` is BEFORE `cur` in the
+		// canonical wizard order, i.e. has been left behind. Used by the
+		// progress indicator to render past-step ticks. Accepts the
+		// strongly-typed setupStepName as well as plain strings.
+		"setupStepDone": func(cur any, target string) bool {
+			order := []string{"welcome", "domain", "dns", "admin", "finalize", "done"}
+			c := fmt.Sprintf("%v", cur)
+			ci, ti := -1, -1
+			for i, s := range order {
+				if s == c {
+					ci = i
+				}
+				if s == target {
+					ti = i
+				}
+			}
+			if ci < 0 || ti < 0 {
+				return false
+			}
+			return ti < ci
+		},
 		"prettyBytes": func(n int64) string {
 			const (
 				kib = 1024
@@ -87,6 +108,14 @@ func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		// In setup mode we deliberately don't require gw0.conf: the
+		// wizard runs before AmneziaWG is provisioned (gw0 is opt-in
+		// via SKIP_GW0=0; see Wave 2A). Treat existence of the wizard
+		// itself as "ready" until setup completes.
+		if s.setupModeActive() {
+			fmt.Fprintln(w, "ok (setup mode)")
+			return
+		}
 		path := filepath.Join(s.cfg.awgDir, s.cfg.awgIface+".conf")
 		if _, err := os.Stat(path); err != nil {
 			http.Error(w, "not ready: "+err.Error(), http.StatusServiceUnavailable)
@@ -97,6 +126,11 @@ func (s *server) routes() http.Handler {
 
 	mux.Handle("/static/", http.StripPrefix("/static/",
 		http.FileServer(http.Dir(s.cfg.staticDir))))
+
+	// Setup wizard routes (Parcel 3A). They're registered unconditionally;
+	// the setupRouteGate middleware below is what hides them once setup
+	// completes.
+	s.registerSetupRoutes(mux)
 
 	// IS the auth endpoint — no requireAuth, no CSRF. NPM rewrites only
 	// POST /api/firstfactor here; we proxy verbatim to Authelia and on
@@ -117,7 +151,51 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/peers", requireAuth(s.cfg, true, s.withCSRF(s.handlePeers)))
 	mux.HandleFunc("/peers/", requireAuth(s.cfg, true, s.withCSRF(s.handlePeerSub)))
 
-	return mux
+	return s.setupRouteGate(mux)
+}
+
+// setupRouteGate enforces the wizard-mode invariant:
+//
+//   - While /srv/store/.setup-complete is ABSENT, /healthz and /static/*
+//     pass through; everything else that isn't already a /setup/* route
+//     302s to /setup. This guarantees the operator can't accidentally
+//     poke at /users (which would 401 anyway, since Authelia isn't yet
+//     wired) and also keeps a half-open browser tab from a previous
+//     install from leaking error pages instead of bringing the operator
+//     to the wizard.
+//
+//   - Once the sentinel exists, /setup/* returns 404 (not 410 — we don't
+//     want to leak that the wizard ever existed at this URL). This is
+//     belt-and-braces: the wizard's token-check would 401 anyway since
+//     setupToken is wiped from the env after finalize, but defence in
+//     depth is cheap.
+//
+// The /login-intercept and /healthz endpoints bypass the gate entirely
+// in both directions.
+func (s *server) setupRouteGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		isSetup := path == "/setup" || strings.HasPrefix(path, "/setup/")
+		isStatic := strings.HasPrefix(path, "/static/")
+		isHealth := path == "/healthz"
+		// /login-intercept always passes through (in setup mode it just
+		// fails because Authelia isn't routable yet, but that's fine).
+
+		if s.setupModeActive() {
+			// Wizard mode: hide the day-2 surface entirely.
+			if !isSetup && !isStatic && !isHealth {
+				http.Redirect(w, r, "/setup", http.StatusSeeOther)
+				return
+			}
+		} else {
+			// Day-2 mode: hide the wizard surface entirely.
+			if isSetup {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ---------------------------------------------------------------------------

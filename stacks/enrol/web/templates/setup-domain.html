@@ -1,0 +1,27 @@
+{{template "setup-head" .}}
+
+<section class="setup-step">
+  <h2>confirm domain</h2>
+  <p>
+    Phase 1 captured this apex domain from the bootstrap command. It is
+    baked into the .env file, the rendered Authelia config, and the
+    docker-compose substitutions. The wildcard certificate that gets
+    issued in the finalize step covers <code>*.{{.Domain}}</code>.
+  </p>
+  <form method="POST" action="/setup/domain" class="setup-form">
+    <label>domain (read-only)
+      <input type="text" name="domain" value="{{.Domain}}" readonly>
+    </label>
+    <p class="hint">
+      To change the domain, exit the wizard and re-run bootstrap with the
+      correct <code>DOMAIN=</code>. Editing this field in place is not
+      supported because the value is referenced by too many on-disk files
+      to safely rewrite from this UI.
+    </p>
+    <div class="setup-actions">
+      <button type="submit" class="primary">This looks right &rarr;</button>
+    </div>
+  </form>
+</section>
+
+{{template "setup-tail" .}}

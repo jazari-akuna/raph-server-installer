@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Stub `docker` for the test container. Logs every invocation; answers a
+# handful of subcommands defensively. The real test path goes through
+# bootstrap-phase2.sh's TEST_MODE branch which never calls `docker compose
+# up` (it logs the would-be-invocation instead). This stub exists in case
+# any other code path slips through.
+set -uo pipefail
+LOG="${TEST_STUB_LOG:-/tmp/test-stubs.log}"
+printf 'docker %s\n' "$*" >> "$LOG"
+
+case "${1:-}" in
+  network)
+    case "${2:-}" in
+      inspect) exit 1 ;;  # network "doesn't exist" → caller will create
+      create)  exit 0 ;;
+      ls)      echo "NETWORK ID  NAME  DRIVER  SCOPE"; exit 0 ;;
+    esac
+    ;;
+  version|info)
+    echo "Stub Docker (test harness)"
+    exit 0
+    ;;
+  compose)
+    # `docker compose --env-file ... -f ... up -d --remove-orphans` etc.
+    # The phase2 TEST_MODE branch should pre-empt this; if we reach here
+    # it's a leak. Log and exit 0 so the test can see the leak in stub.log.
+    exit 0
+    ;;
+esac
+exit 0

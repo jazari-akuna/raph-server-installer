@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Stub `mkfs.ext4` — the create-shared-volume.sh TEST_MODE branch should
+# preempt this. Logs leaks.
+set -uo pipefail
+LOG="${TEST_STUB_LOG:-/tmp/test-stubs.log}"
+printf 'mkfs.ext4 %s\n' "$*" >> "$LOG"
+echo "STUB-mkfs.ext4-leak: real mkfs.ext4 invoked in TEST_MODE: $*" >&2
+exit 0

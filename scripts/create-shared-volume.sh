@@ -45,6 +45,12 @@ if ! [[ $size_gib =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
+# TEST_MODE: cap to a 16 MiB sparse blob and stub the destructive cryptsetup
+# + mkfs steps. Each skip emits a `TEST_MODE: skipping <thing>` line.
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+    echo "==> TEST_MODE: capping blob size to 16 MiB sparse + stubbing crypto ops"
+fi
+
 data_dir=/srv/store/data
 mnt_dir=/srv/store/mnt
 img="$data_dir/_shared.img"
@@ -96,26 +102,33 @@ fi
 # Sparse blob + luksFormat (only on first run)
 
 if [[ $img_already_present -eq 0 ]]; then
-    echo "==> creating sparse ${size_gib} GiB blob at $img"
-    # Same sparse-file idiom used by create-store-volume.sh.
-    dd if=/dev/zero of="$img" bs=1 count=0 seek="${size_gib}G" status=none
-    chmod 0600 "$img"
-    chown root:root "$img"
+    if [[ "${TEST_MODE:-0}" == "1" ]]; then
+        echo "==> TEST_MODE: skipping multi-GiB sparse + luksFormat; writing 16 MiB sparse stub at $img"
+        dd if=/dev/zero of="$img" bs=1 count=0 seek=16M status=none
+        chmod 0600 "$img"
+        chown root:root "$img" 2>/dev/null || true
+    else
+        echo "==> creating sparse ${size_gib} GiB blob at $img"
+        # Same sparse-file idiom used by create-store-volume.sh.
+        dd if=/dev/zero of="$img" bs=1 count=0 seek="${size_gib}G" status=none
+        chmod 0600 "$img"
+        chown root:root "$img"
 
-    echo "==> luksFormat (keyfile-backed, argon2id KDF)"
-    # Same crypto profile as per-user volumes: aes-xts-plain64 / 512-bit /
-    # sha512 / argon2id / urandom — only the unlock secret differs (keyfile
-    # vs passphrase).
-    cryptsetup luksFormat \
-        --type luks2 \
-        --cipher aes-xts-plain64 \
-        --key-size 512 \
-        --hash sha512 \
-        --pbkdf argon2id \
-        --use-urandom \
-        --batch-mode \
-        --key-file "$keyfile" \
-        "$img"
+        echo "==> luksFormat (keyfile-backed, argon2id KDF)"
+        # Same crypto profile as per-user volumes: aes-xts-plain64 / 512-bit /
+        # sha512 / argon2id / urandom — only the unlock secret differs (keyfile
+        # vs passphrase).
+        cryptsetup luksFormat \
+            --type luks2 \
+            --cipher aes-xts-plain64 \
+            --key-size 512 \
+            --hash sha512 \
+            --pbkdf argon2id \
+            --use-urandom \
+            --batch-mode \
+            --key-file "$keyfile" \
+            "$img"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -123,7 +136,9 @@ fi
 # already mkfs'd; mkfs is gated by the img_already_present flag).
 
 opened_here=0
-if [[ ! -e /dev/mapper/$mapper ]]; then
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+    echo "==> TEST_MODE: skipping cryptsetup open $img -> /dev/mapper/$mapper"
+elif [[ ! -e /dev/mapper/$mapper ]]; then
     echo "==> opening $img as /dev/mapper/$mapper"
     cryptsetup open \
         --type luks2 \
@@ -148,8 +163,12 @@ cleanup_on_fail() {
 trap cleanup_on_fail EXIT
 
 if [[ $img_already_present -eq 0 ]]; then
-    echo "==> mkfs.ext4 -L $mapper /dev/mapper/$mapper"
-    mkfs.ext4 -q -L "$mapper" "/dev/mapper/$mapper"
+    if [[ "${TEST_MODE:-0}" == "1" ]]; then
+        echo "==> TEST_MODE: skipping mkfs.ext4 on /dev/mapper/$mapper"
+    else
+        echo "==> mkfs.ext4 -L $mapper /dev/mapper/$mapper"
+        mkfs.ext4 -q -L "$mapper" "/dev/mapper/$mapper"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -198,7 +217,9 @@ install -d -m 0755 -o root -g root "$mountpoint"
 
 # Mount once if not already mounted, so the next boot's systemd unit
 # isn't doing the heavy work for the first time.
-if mountpoint -q "$mountpoint"; then
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+    echo "==> TEST_MODE: skipping mount /dev/mapper/$mapper at $mountpoint"
+elif mountpoint -q "$mountpoint"; then
     echo "==> already mounted at $mountpoint"
 else
     echo "==> mounting /dev/mapper/$mapper at $mountpoint"

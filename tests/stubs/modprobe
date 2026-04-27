@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Stub `modprobe`. Always succeeds so amneziawg "loads."
+set -uo pipefail
+LOG="${TEST_STUB_LOG:-/tmp/test-stubs.log}"
+printf 'modprobe %s\n' "$*" >> "$LOG"
+exit 0

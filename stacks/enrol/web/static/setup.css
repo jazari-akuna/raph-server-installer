@@ -1,0 +1,279 @@
+/* setup.css — wizard-only styles. Sibling to style.css; the wizard does
+   NOT import the day-2 stylesheet because the chrome is different (no
+   header nav, no logout link, single column max-640px). The colour
+   tokens mirror style.css so the visual transition into the launcher
+   after finalize feels seamless.
+*/
+
+:root {
+  --fg: #1a1a1a;
+  --bg: #fafaf7;
+  --muted: #666;
+  --accent: #2c5282;
+  --danger: #c53030;
+  --warn: #d97706;
+  --ok: #2f855a;
+  --border: #d0d0c8;
+  --setup-max: 640px;
+}
+* { box-sizing: border-box; }
+body.setup {
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  margin: 0;
+  padding: 0;
+}
+
+.setup-header {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 1.2em 1.5em 0.6em;
+}
+.setup-header h1 {
+  margin: 0 0 0.4em;
+  font-size: 1.05em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Step progress indicator. Six chips in a row; current step accented,
+   past steps tick-marked. On narrow screens the chips wrap rather than
+   overflow. */
+.setup-progress {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4em;
+  font-size: 0.85em;
+}
+.setup-progress li {
+  padding: 0.2em 0.7em;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: #fff;
+}
+.setup-progress li.is-current {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.setup-progress li.is-done {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.setup-progress li.is-done::before { content: "\2713\00a0"; }
+
+.setup-main {
+  max-width: var(--setup-max);
+  margin: 1.6em auto;
+  padding: 0 1.5em;
+}
+
+.setup-step h2 {
+  font-size: 1.15em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.3em;
+  margin-top: 0;
+}
+.setup-step h3 {
+  font-size: 1em;
+  margin-top: 1.4em;
+  color: var(--accent);
+}
+
+.setup-step p, .setup-step ol, .setup-step ul { margin: 0.7em 0; }
+.setup-step .hint { color: var(--muted); font-size: 0.9em; }
+.setup-step code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; }
+
+.setup-form { margin-top: 1.2em; }
+.setup-form label {
+  display: block;
+  margin: 0.7em 0 0.4em;
+  font-weight: 500;
+}
+.setup-form input[type=text],
+.setup-form input[type=email],
+.setup-form input[type=password],
+.setup-form textarea,
+.setup-form select {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  padding: 0.5em;
+  margin-top: 0.2em;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: #fff;
+  font: inherit;
+  font-family: inherit;
+}
+.setup-form textarea {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+.setup-form input[readonly] {
+  background: #f4f4ee;
+  color: var(--muted);
+}
+.setup-form .setup-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  font-weight: 400;
+}
+.setup-form fieldset {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.6em 1em 1em;
+  margin: 1em 0;
+  background: #fff;
+}
+.setup-form fieldset legend {
+  padding: 0 0.4em;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.setup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1em;
+  margin-top: 1.6em;
+}
+.setup-actions .setup-back {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.9em;
+}
+.setup-actions .setup-back:hover { color: var(--accent); }
+
+button, .setup-form button {
+  background: #eee;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 0.55em 1.1em;
+  border-radius: 3px;
+  cursor: pointer;
+  font: inherit;
+}
+button.primary, .setup-form button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+button:hover { filter: brightness(0.95); }
+button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Per-provider credentials. Each fieldset is hidden until its radio is
+   selected (toggled via vanilla JS in setup-dns.html). */
+.dns-providers { display: flex; flex-wrap: wrap; gap: 0.6em; }
+.dns-providers .dns-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.3em 0.7em;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: #fff;
+  cursor: pointer;
+}
+.dns-providers .dns-provider input { margin: 0; }
+
+/* Validation + flash messages. */
+.setup-err {
+  padding: 0.7em 1em;
+  background: #fff5f5;
+  border-left: 3px solid var(--danger);
+  color: var(--danger);
+  margin-bottom: 1em;
+}
+.setup-flash {
+  padding: 0.7em 1em;
+  background: #f0fff4;
+  border-left: 3px solid var(--ok);
+  color: var(--ok);
+  margin-bottom: 1em;
+}
+
+/* Finalize page: SSE-driven progress + log box. */
+.setup-summary { padding-left: 1.4em; }
+.setup-summary li { margin: 0.4em 0; }
+
+.setup-finalize-stream { margin-top: 2em; }
+.setup-step-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5em 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+}
+.setup-step-list li {
+  padding: 0.5em 0.9em;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+.setup-step-list li:last-child { border-bottom: 0; }
+.setup-step-list li.is-running {
+  color: var(--accent);
+  font-weight: 500;
+}
+.setup-step-list li.is-running::before { content: "\21bb\00a0"; }
+.setup-step-list li.is-done {
+  color: var(--ok);
+}
+.setup-step-list li.is-done::before { content: "\2713\00a0"; }
+.setup-step-list li.is-failed {
+  color: var(--danger);
+  background: #fff5f5;
+}
+.setup-step-list li.is-failed::before { content: "\2717\00a0"; }
+
+/* Terminal-style log box. Monospace, dark, scrollable. */
+.setup-log {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  background: #1d1f21;
+  color: #c5c8c6;
+  padding: 0.8em 1em;
+  border-radius: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0.5em 0;
+}
+
+/* Done page: links list looks more like nav cards than text. */
+.setup-links {
+  list-style: none;
+  padding: 0;
+  margin: 0.6em 0 1em;
+}
+.setup-links li {
+  margin: 0.5em 0;
+}
+.setup-links a {
+  display: inline-block;
+  padding: 0.5em 0.9em;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  text-decoration: none;
+  color: var(--fg);
+}
+.setup-links a.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.setup-links a:hover { filter: brightness(0.97); }

@@ -129,6 +129,17 @@ services:
       - /usr/bin/awg:/usr/bin/awg:ro
       - /usr/bin/awg-quick:/usr/bin/awg-quick:ro
 
+      # Setup wizard (Parcel 3A). The token file is the out-of-band
+      # secret printed at the end of bootstrap; the setup handler
+      # reads it once at startup and constant-time-compares against
+      # the operator's ?token=. The repo + stacks dirs are needed by
+      # the finalize pipeline so it can re-run render-templates.sh
+      # and wire-npm-routes.sh, and so it can `docker compose run`
+      # the certbot one-shot from the ingress stack.
+      - /etc/raph-installer:/etc/raph-installer:ro
+      - /opt/raph-server-installer:/opt/raph-server-installer:ro
+      - /opt/stacks:/opt/stacks:ro
+
     environment:
       # Bind to the docker0 bridge gateway IP, which is what NPM's
       # ingress container sees as `host.docker.internal`. This excludes
@@ -176,6 +187,18 @@ services:
       # catch the creation page before navigating away. Stored 0700
       # root-owned dir; files 0600 root-owned. See peers_archive.go.
       ENROL_PEERS_ARCHIVE_DIR: "/srv/store/enrol-peers-archive"
+
+      # Setup wizard (Parcel 3A). SETUP_TOKEN is read from the bootstrap
+      # .env (which we receive verbatim via --env-file at compose-up
+      # time); the wizard takes that as the authoritative source and
+      # falls back to /etc/raph-installer/setup-token if absent. The
+      # *_DIR + *_SENTINEL paths line up with Wave 2A's conventions.
+      SETUP_TOKEN: "${SETUP_TOKEN:-}"
+      ENROL_SETUP_STATE_DIR: "/srv/store/setup"
+      ENROL_SETUP_COMPLETE: "/srv/store/.setup-complete"
+      ENROL_SETUP_TOKEN_FILE: "/etc/raph-installer/setup-token"
+      ENROL_STACKS_DIR: "/opt/stacks"
+      ENROL_REPO_DIR: "/opt/raph-server-installer"
 
     healthcheck:
       # ENROL_LISTEN binds to 172.17.0.1:8080 (the docker bridge gateway),

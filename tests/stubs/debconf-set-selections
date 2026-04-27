@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -uo pipefail
+LOG="${TEST_STUB_LOG:-/tmp/test-stubs.log}"
+printf 'debconf-set-selections %s\n' "$*" >> "$LOG"
+cat >/dev/null
+exit 0

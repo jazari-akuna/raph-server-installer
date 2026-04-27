@@ -1,0 +1,27 @@
+{{template "setup-head" .}}
+
+<section class="setup-step">
+  <h2>welcome</h2>
+  <p>
+    This wizard finishes the install for the host you just bootstrapped.
+    It runs in your browser, gated by the one-shot token printed at the
+    end of bootstrap. You will not need to SSH to the server.
+  </p>
+  <p>
+    There are six steps. Three collect input (domain confirmation, DNS
+    provider credentials, first admin account). The fourth runs the
+    configuration end-to-end: writing the admin user, issuing a wildcard
+    TLS certificate, and wiring the reverse proxy. Cert issuance can take
+    one to three minutes; the page will stream progress as it happens.
+  </p>
+  <p>
+    After this finishes, the wizard locks itself permanently. Re-running
+    it requires deleting <code>/srv/store/.setup-complete</code> on the
+    host as root.
+  </p>
+  <form method="POST" action="/setup/welcome" class="setup-form">
+    <button type="submit" class="primary">Begin setup</button>
+  </form>
+</section>
+
+{{template "setup-tail" .}}

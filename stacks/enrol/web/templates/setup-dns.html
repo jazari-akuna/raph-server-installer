@@ -1,0 +1,85 @@
+{{template "setup-head" .}}
+
+<section class="setup-step">
+  <h2>DNS provider</h2>
+  <p>
+    Wildcard certs from Let's Encrypt require a DNS-01 challenge: certbot
+    drops a TXT record on <code>_acme-challenge.{{.Domain}}</code> via your
+    DNS provider's API, waits for propagation, then receives the cert. The
+    credentials below are written to
+    <code>/srv/store/setup/dns-creds/&lt;provider&gt;.ini</code> with mode
+    0600 and used by certbot in the finalize step.
+  </p>
+
+  <form method="POST" action="/setup/dns" class="setup-form" id="dns-form">
+    <fieldset class="dns-providers">
+      <legend>provider</legend>
+      {{$state := .State}}
+      {{range .Providers}}
+      <label class="dns-provider">
+        <input type="radio" name="provider" value="{{.ID}}"
+          {{if eq $state.DNSProvider .ID}}checked{{end}}
+          data-provider="{{.ID}}">
+        <span class="dns-provider-name">{{.Label}}</span>
+      </label>
+      {{end}}
+    </fieldset>
+
+    {{range .Providers}}
+    <fieldset class="dns-creds" data-provider="{{.ID}}"
+      {{if ne $state.DNSProvider .ID}}style="display:none"{{end}}>
+      <legend>{{.Label}} credentials</legend>
+      <p class="hint">{{.Help}}</p>
+      {{$prov := .ID}}
+      {{range .Fields}}
+      <label>
+        {{.Label}}
+        {{if .Multiline}}
+          <textarea name="{{.Name}}" rows="6" cols="60"
+            data-provider="{{$prov}}"
+            placeholder="{{.Help}}">{{index $state.DNSProviderCreds .Name}}</textarea>
+        {{else}}
+          <input type="text" name="{{.Name}}"
+            data-provider="{{$prov}}"
+            value="{{index $state.DNSProviderCreds .Name}}"
+            placeholder="{{.Help}}">
+        {{end}}
+      </label>
+      {{end}}
+    </fieldset>
+    {{end}}
+
+    <div class="setup-actions">
+      <a class="setup-back" href="/setup/domain">&larr; back</a>
+      <button type="submit" class="primary">Save credentials &rarr;</button>
+    </div>
+  </form>
+</section>
+
+<script>
+  // Vanilla DOM toggling: when the operator picks a provider radio, hide
+  // every other provider's credentials block. No framework — keep the
+  // wizard fully usable with even a minimal browser.
+  (function() {
+    var radios = document.querySelectorAll('input[name=provider]');
+    var blocks = document.querySelectorAll('fieldset.dns-creds');
+    function show(id) {
+      blocks.forEach(function(b) {
+        b.style.display = (b.dataset.provider === id) ? '' : 'none';
+        // Disable inputs of hidden blocks so the form submission only
+        // carries the chosen provider's fields. Otherwise required-field
+        // validation on hidden boxes would block submit silently.
+        b.querySelectorAll('input,textarea').forEach(function(i) {
+          i.disabled = (b.dataset.provider !== id);
+        });
+      });
+    }
+    radios.forEach(function(r) {
+      r.addEventListener('change', function() { show(r.value); });
+    });
+    var checked = document.querySelector('input[name=provider]:checked');
+    if (checked) show(checked.value);
+  })();
+</script>
+
+{{template "setup-tail" .}}

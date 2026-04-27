@@ -1,0 +1,68 @@
+{{template "setup-head" .}}
+
+<section class="setup-step">
+  <h2>first admin</h2>
+  <p>
+    This is the operator account. It gets the <code>admins</code> group
+    in Authelia (which is required to reach the enrol UI and Portainer)
+    and a host-side OS user. The login password is also used as the LUKS
+    passphrase for the per-user encrypted volume; the login interceptor
+    auto-unlocks it on every successful sign-in.
+  </p>
+  <p class="hint">
+    Add additional users from the enrol UI after setup completes. There
+    is intentionally no "skip" here &mdash; an installer with no admin
+    account is unrecoverable without SSH.
+  </p>
+
+  <form method="POST" action="/setup/admin" class="setup-form">
+    <label>username
+      <input type="text" name="name" required
+        pattern="[a-z][a-z0-9_\-]{0,31}" maxlength="32"
+        autocomplete="username"
+        value="{{.State.AdminUsername}}"
+        placeholder="lowercase, e.g. alice">
+    </label>
+    <label>display name
+      <input type="text" name="displayname" required maxlength="64"
+        value="{{.State.AdminDisplayName}}"
+        placeholder="e.g. Alice Smith">
+    </label>
+    <label>email
+      <input type="email" name="email" required
+        value="{{.State.AdminEmail}}"
+        placeholder="alice@example.com">
+    </label>
+    <label>password
+      <input type="password" name="password" required minlength="12"
+        autocomplete="new-password"
+        placeholder="at least 12 characters">
+    </label>
+    <label>confirm password
+      <input type="password" name="password_confirm" required minlength="12"
+        autocomplete="new-password">
+    </label>
+
+    <fieldset class="setup-totp">
+      <legend>two-factor (TOTP)</legend>
+      <label class="setup-checkbox">
+        <input type="checkbox" name="enable_totp"
+          {{if .State.EnableTOTP}}checked{{end}}>
+        require TOTP at login (you can turn this on later in Settings)
+      </label>
+      <p class="hint">
+        Default is off. The wizard does NOT require TOTP at first login
+        because a misconfigured authenticator app is a common way to lock
+        yourself out of a fresh install. Once you can sign in normally,
+        enable TOTP from the user detail page.
+      </p>
+    </fieldset>
+
+    <div class="setup-actions">
+      <a class="setup-back" href="/setup/dns">&larr; back</a>
+      <button type="submit" class="primary">Create admin &rarr;</button>
+    </div>
+  </form>
+</section>
+
+{{template "setup-tail" .}}

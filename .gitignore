@@ -44,6 +44,9 @@ host/ssh/sshd_config.d/99-hardening.conf
 # render-templates.sh).
 stacks/authelia/snippets/authelia-authrequest.conf
 
+# Rendered qedge config (template -> real file done by render-templates.sh).
+stacks/qedge/config.yaml
+
 # enrol: persisted runtime data (not produced under repo, but defensive)
 stacks/enrol/data/
 
@@ -54,6 +57,10 @@ stacks/console/data/
 # Working-notes journals — wave-1a, wave-1b, etc. Local to the operator
 # running the wave; not meant to be shared.
 .journals/
+
+# Test harness runtime artefacts (built image logs, container.log,
+# per-scenario phase{1,2} captures). Created by tests/run-tests.sh.
+tests/.last-run/
 
 # Node tooling, if it shows up later (none currently committed).
 node_modules/

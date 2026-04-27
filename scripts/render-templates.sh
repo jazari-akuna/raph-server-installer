@@ -59,7 +59,12 @@ done
 
 # Walk up from this script's directory until we find docs/design.md (the
 # repo-root sentinel established in Wave 1B). Mirrors deploy.sh's approach.
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# The `-P` on cd resolves symlinks so a symlinked /opt/raph-server-installer
+# (e.g. the test-harness `TEST_REPO_SRC` symlink) lands on the real path —
+# without this, `find $repo_root` silently descends into nothing because
+# find treats a symlink-as-target as a single file unless given `-L` or a
+# trailing slash. (Discovered by tests/ harness.)
+script_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$script_dir"
 while [[ "$repo_root" != "/" && ! -f "$repo_root/docs/design.md" ]]; do
   repo_root="$(dirname "$repo_root")"

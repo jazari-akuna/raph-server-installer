@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Stub `modinfo`. In TEST_MODE bootstrap-phase2.sh skips the modinfo check.
+# This stub exists to make it obvious if the skip is bypassed.
+set -uo pipefail
+LOG="${TEST_STUB_LOG:-/tmp/test-stubs.log}"
+printf 'modinfo %s\n' "$*" >> "$LOG"
+case "${1:-}" in
+  amneziawg)
+    # Pretend the module exists so any pure-runtime check passes.
+    cat <<'EOF'
+filename:       /lib/modules/test/amneziawg.ko
+license:        GPL
+description:    AmneziaWG kernel module (stub)
+EOF
+    exit 0
+    ;;
+esac
+exit 1

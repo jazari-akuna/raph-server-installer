@@ -1,0 +1,59 @@
+{{template "setup-head" .}}
+
+<section class="setup-step setup-done">
+  <h2>setup complete</h2>
+  <p class="setup-flash">
+    The wizard is now locked. From this point the launcher takes over.
+  </p>
+
+  <h3>where to go next</h3>
+  <ul class="setup-links">
+    <li>
+      <a href="https://{{.Domain}}/" class="primary">Open launcher
+        &rarr; https://{{.Domain}}/</a>
+    </li>
+    <li>
+      <a href="https://auth.{{.Domain}}/">Sign in via Authelia
+        &rarr; https://auth.{{.Domain}}/</a>
+    </li>
+  </ul>
+
+  <h3>what's next</h3>
+  <ul>
+    <li>
+      <strong>Add more users.</strong> Sign in as
+      <code>{{.State.AdminUsername}}</code>, open the enrol panel, and
+      use <em>users &rarr; create user</em> to provision additional
+      accounts. Each new user gets their own LUKS-encrypted home.
+    </li>
+    <li>
+      <strong>Install the desktop client.</strong> If AmneziaWG is
+      enabled, generate a peer config from <em>devices &rarr; add</em>
+      and download the <code>.conf</code> for AmneziaWG (Wireguard-
+      compatible) on your laptop and phone.
+    </li>
+    <li>
+      <strong>Turn on TOTP.</strong>
+      {{if .State.EnableTOTP}}
+        TOTP was enabled at signup. The QR for
+        <code>{{.State.AdminUsername}}</code> was displayed on the
+        admin-creation page; if you lost it, regenerate from the
+        user-detail page.
+      {{else}}
+        TOTP is off by default. Enable it from
+        <em>users &rarr; {{.State.AdminUsername}} &rarr; regenerate
+        TOTP</em>; you'll be prompted to scan a fresh QR.
+      {{end}}
+    </li>
+  </ul>
+
+  <p class="hint">
+    To re-run this wizard, log into the host as root and remove
+    <code>/srv/store/.setup-complete</code>. All collected state
+    (admin, DNS creds, password) persists in
+    <code>/srv/store/setup/state.json</code> so a re-run resumes from
+    the beginning rather than re-prompting.
+  </p>
+</section>
+
+{{template "setup-tail" .}}

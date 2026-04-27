@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -uo pipefail
+LOG="${TEST_STUB_LOG:-/tmp/test-stubs.log}"
+printf 'swapon %s\n' "$*" >> "$LOG"
+case "${1:-}" in
+  --show) echo "" ;;
+esac
+exit 0

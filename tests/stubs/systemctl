@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Stub `systemctl` for the test container. Logs every invocation and answers
+# enough subcommands that bootstrap.sh / bootstrap-phase2.sh think they're
+# talking to a live systemd. State (enabled/active) is persisted under
+# /var/lib/test-systemctl/ so assertions can grep it post-run.
+set -euo pipefail
+LOG="${TEST_STUB_LOG:-/tmp/test-stubs.log}"
+STATE_DIR="/var/lib/test-systemctl"
+mkdir -p "$STATE_DIR"
+printf 'systemctl %s\n' "$*" >> "$LOG"
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  daemon-reload|reload|restart|start|stop)
+    # Mark "started" units as active for the is-active query.
+    for arg in "$@"; do
+      [[ "$arg" == --* ]] && continue
+      case "$cmd" in
+        start)   echo "active"   > "$STATE_DIR/${arg}.state" ;;
+        restart) echo "active"   > "$STATE_DIR/${arg}.state" ;;
+        stop)    echo "inactive" > "$STATE_DIR/${arg}.state" ;;
+      esac
+    done
+    exit 0
+    ;;
+  enable)
+    for arg in "$@"; do
+      [[ "$arg" == --* ]] && continue
+      echo "enabled" > "$STATE_DIR/${arg}.enabled"
+      # --now also starts.
+      printf '%s\n' "$@" | grep -q -- '--now' && echo "active" > "$STATE_DIR/${arg}.state"
+    done
+    exit 0
+    ;;
+  disable)
+    for arg in "$@"; do
+      [[ "$arg" == --* ]] && continue
+      echo "disabled" > "$STATE_DIR/${arg}.enabled"
+    done
+    exit 0
+    ;;
+  is-enabled)
+    unit="${1:-}"
+    if [[ -n "$unit" && -f "$STATE_DIR/${unit}.enabled" ]]; then
+      cat "$STATE_DIR/${unit}.enabled"
+      [[ "$(cat "$STATE_DIR/${unit}.enabled")" == "enabled" ]] && exit 0 || exit 1
+    fi
+    echo "disabled"; exit 1
+    ;;
+  is-active)
+    unit="${1:-}"
+    if [[ -n "$unit" && -f "$STATE_DIR/${unit}.state" ]]; then
+      cat "$STATE_DIR/${unit}.state"
+      [[ "$(cat "$STATE_DIR/${unit}.state")" == "active" ]] && exit 0 || exit 1
+    fi
+    echo "inactive"; exit 1
+    ;;
+  reboot)
+    # Belt-and-suspenders: bootstrap.sh's TEST_MODE branch should have caught
+    # this already. If it didn't, log loudly and touch a sentinel so the test
+    # can detect the leak.
+    echo "STUB-systemctl-reboot-leak: bootstrap reached real reboot path" >&2
+    : > /srv/store/.test-reboot-requested-via-stub
+    exit 0
+    ;;
+  cat|status|show|list-units|list-unit-files)
+    # Make these noop-print so debug usage doesn't fail.
+    echo "[stub systemctl $cmd] $*"
+    exit 0
+    ;;
+  *)
+    # Unknown subcommand: log + exit 0 (don't fail the bootstrap).
+    exit 0
+    ;;
+esac

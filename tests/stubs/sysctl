@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -uo pipefail
+LOG="${TEST_STUB_LOG:-/tmp/test-stubs.log}"
+printf 'sysctl %s\n' "$*" >> "$LOG"
+exit 0
