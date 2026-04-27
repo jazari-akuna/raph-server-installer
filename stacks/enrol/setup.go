@@ -692,6 +692,23 @@ type secretCache struct {
 	m  map[string]string
 }
 
+// secretCacheDir lives on host tmpfs (/run is tmpfs on Ubuntu 24.04 by
+// default), so the cache survives enrol container restarts (we rebuild
+// during dev / for security patches) but evaporates on host reboot. The
+// directory is bind-mounted into enrol; bootstrap-phase2.sh creates it
+// with mode 0700 root before the stack comes up. We deliberately do NOT
+// use /srv/store: that's the persistent-disk anchor whose contents the
+// admin password also unlocks (per spec, admin pw == LUKS passphrase),
+// so leaving the password there would defeat the storage encryption.
+const secretCacheDir = "/run/raph-setup-secrets"
+
+func secretCacheFile(k string) string {
+	// Usernames are validated upstream (see handleSetupAdmin) to a safe
+	// charset; still defensive — strip path separators just in case.
+	safe := strings.ReplaceAll(strings.ReplaceAll(k, "/", "_"), "..", "_")
+	return filepath.Join(secretCacheDir, safe+".pass")
+}
+
 func (c *secretCache) set(k, v string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -699,18 +716,37 @@ func (c *secretCache) set(k, v string) {
 		c.m = map[string]string{}
 	}
 	c.m[k] = v
+	// Mirror to tmpfs so a restart-and-retry doesn't strand the operator
+	// at /setup/admin. Best-effort: on failure we still have the in-mem
+	// copy, so finalize works in this process; subsequent restarts would
+	// just hit the original "missing from in-memory cache" path.
+	if err := os.MkdirAll(secretCacheDir, 0o700); err == nil {
+		_ = os.WriteFile(secretCacheFile(k), []byte(v), 0o600)
+	}
 }
 
 func (c *secretCache) get(k string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.m[k]
+	if v, ok := c.m[k]; ok && v != "" {
+		return v
+	}
+	if data, err := os.ReadFile(secretCacheFile(k)); err == nil {
+		v := string(bytes.TrimRight(data, "\r\n"))
+		if c.m == nil {
+			c.m = map[string]string{}
+		}
+		c.m[k] = v
+		return v
+	}
+	return ""
 }
 
 func (c *secretCache) delete(k string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.m, k)
+	_ = os.Remove(secretCacheFile(k))
 }
 
 var setupSecretCache = &secretCache{}

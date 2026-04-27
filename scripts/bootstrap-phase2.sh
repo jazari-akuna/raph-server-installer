@@ -277,6 +277,13 @@ fi
 strict_step "ensure certbot creds tmpfs dir"
 install -d -m 0700 -o root -g root /run/raph-certbot
 
+# In-flight wizard secrets cache (admin password). Same tmpfs threat model
+# as /run/raph-certbot above; bind-mounted into enrol via stacks/enrol/
+# docker-compose.yml. Pre-create so enrol's bind has a target and so the
+# operator's password survives an enrol restart mid-wizard.
+strict_step "ensure setup secrets tmpfs dir"
+install -d -m 0700 -o root -g root /run/raph-setup-secrets
+
 compose_up ingress
 compose_up authelia
 compose_up cloud

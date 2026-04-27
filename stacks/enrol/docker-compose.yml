@@ -159,6 +159,14 @@ services:
       # by bootstrap-phase2.sh before this stack comes up.
       - /run/raph-certbot:/run/raph-certbot:rw
 
+      # In-flight wizard secrets (admin password etc.) cache. On host
+      # tmpfs (/run is tmpfs on Ubuntu 24.04 by default), root-only,
+      # evaporates on reboot. enrol mirrors setupSecretCache here so a
+      # container rebuild doesn't strand the operator with "admin password
+      # missing from in-memory cache" mid-finalize. Deleted on successful
+      # finalize. Threat model is the same as /run/raph-certbot above.
+      - /run/raph-setup-secrets:/run/raph-setup-secrets:rw
+
     environment:
       # Bind to the docker0 bridge gateway IP, which is what NPM's
       # ingress container sees as `host.docker.internal`. This excludes
