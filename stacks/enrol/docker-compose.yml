@@ -155,6 +155,17 @@ services:
       - /opt/raph-server-installer:/opt/raph-server-installer:rw
       - /opt/stacks:/opt/stacks:rw
 
+      # Shared LUKS keyfile directory. create-shared-volume.sh runs INSIDE
+      # this container during finalize and writes /etc/luks/_shared.key (mode
+      # 0400 root:root) — the boot-time shared-store.service unit on the host
+      # later reads that same keyfile to auto-mount /dev/mapper/store_shared
+      # after reboot. Without this bind, the keyfile lands in the container's
+      # overlay fs, evaporates on rebuild, the host's shared-store.service
+      # fails on boot, and verifySharedVolume (which stats this path) fails.
+      # Mode is rw because the script creates the directory + file from
+      # scratch on first run.
+      - /etc/luks:/etc/luks:rw
+
       # DNS-01 credentials hand-off. enrol writes the operator-supplied
       # provider creds to /run/raph-certbot/<provider>.ini at finalize
       # time; certbot is then `docker compose run --rm` from the ingress
