@@ -49,6 +49,10 @@ stacks/qedge/config.yaml
 
 # enrol: persisted runtime data (not produced under repo, but defensive)
 stacks/enrol/data/
+# enrol: built Go binary from `go build ./...` runs (produced when the
+# operator builds outside Docker for a quick check; the docker-compose
+# build path stages it inside the image and leaves no artifact here).
+stacks/enrol/enrol
 
 # cloud / console: copyparty + Portainer runtime state
 stacks/cloud/data/

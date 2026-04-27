@@ -103,6 +103,13 @@ const (
 type setupCompletedSteps struct {
 	UsersDBWritten   bool `json:"users_db_written,omitempty"`
 	SharedVolReady   bool `json:"shared_volume_ready,omitempty"`
+	// AdminVolReady tracks whether the operator's personal LUKS volume
+	// at /srv/store/data/<admin>.img has been created. Sized from
+	// PersonalLUKSSize (state.json), unlocked by the operator's plaintext
+	// password from setupSecretCache. Skipped (with a logged warning) if
+	// the cache is empty post-restart — the operator can re-walk
+	// /setup/admin to repopulate it before re-running finalize.
+	AdminVolReady    bool `json:"admin_volume_ready,omitempty"`
 	OIDCRotated      bool `json:"oidc_rotated,omitempty"`
 	TemplatesRender  bool `json:"templates_rendered,omitempty"`
 	CertIssued       bool `json:"cert_issued,omitempty"`
@@ -1129,6 +1136,26 @@ func (s *server) runFinalize(
 		_ = s.saveSetupState(st)
 	}
 
+	// 2b. admin's personal LUKS volume — created at the operator-chosen
+	// PersonalLUKSSize (state.json), unlocked by the operator's plaintext
+	// password (cached in setupSecretCache from the /setup/admin POST).
+	// MUST run after the users_database.yml step (so the host user has
+	// been created via finalizeWriteAdmin → hostUserAdd is implicit at
+	// luksCreate time) but BEFORE the runtime cfg.luksSizeGB reflection
+	// in step 7, so a wizard-chosen 15 GiB lands as a 15 GiB blob (not
+	// the env-var default 50). The previous wizard finalize wrote the
+	// Authelia user but skipped the LUKS blob, leaving the admin with
+	// "raph (no volume) — 50.0 GB nominal" on the dashboard despite
+	// /srv/store/data/raph.img not existing.
+	if !st.CompletedSteps.AdminVolReady {
+		status("admin_volume", "provisioning /srv/store/data/"+st.AdminUsername+".img")
+		if err := s.finalizeEnsureAdminVolume(ctx, st, logLine); err != nil {
+			return wrapErr("admin_volume", err)
+		}
+		st.CompletedSteps.AdminVolReady = true
+		_ = s.saveSetupState(st)
+	}
+
 	// 3. rotate the OIDC console (Portainer) client_secret. MUST run
 	// BEFORE finalizeRenderTemplates because the template substitution
 	// reads AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH from /opt/stacks/.env;
@@ -1334,6 +1361,66 @@ func (s *server) finalizeEnsureSharedVolume(ctx context.Context, st *setupState,
 	}
 	cmd.Env = env
 	return runStreaming(cmd, logLine)
+}
+
+// ---- finalize step 2b: provision the admin's personal LUKS volume --------
+//
+// finalizeEnsureAdminVolume creates /srv/store/data/<admin>.img at the
+// operator's PersonalLUKSSize (state.json), unlocked by the plaintext
+// password held in setupSecretCache from the /setup/admin POST. Mirrors
+// the day-2 /users/new flow except the size comes from state.json instead
+// of cfg.luksSizeGB (which still reflects the env-var default at this
+// point — step 7 of runFinalize is what reflects PersonalLUKSSize back
+// into the runtime cfg, and that runs LATER in the pipeline).
+//
+// Idempotent: if the .img already exists (a previous finalize created it),
+// re-runs are no-ops. The host user is created via hostUserAdd before
+// luksCreateWithSize, since luksCreate's chown of the mountpoint needs
+// the uid/gid resolved from /etc/passwd via nsenter.
+//
+// Plaintext-password recovery path: if setupSecretCache is empty (e.g.
+// finalize is being re-run after a host reboot wiped /run tmpfs and the
+// operator hasn't re-walked /setup/admin yet), surface a clear error
+// pointing at the wizard step rather than silently skipping. The operator
+// can re-enter the password and re-run finalize; the rest of the pipeline
+// is idempotent so already-completed steps short-circuit cheaply.
+func (s *server) finalizeEnsureAdminVolume(ctx context.Context, st *setupState, logLine func(string)) error {
+	_ = ctx // ctx is accepted for future cancellation support; cryptsetup
+	// blocks the goroutine for ~2 s during argon2id KDF derivation and
+	// isn't context-aware in our wrapper, so we don't thread it in yet.
+	if st.AdminUsername == "" {
+		return errors.New("admin username unset in state.json — restart wizard at /setup/admin")
+	}
+	if st.PersonalLUKSSize <= 0 {
+		return errors.New("personal_luks_size unset in state.json — restart wizard at /setup/storage")
+	}
+	img, _, _ := volumePaths(s.cfg, st.AdminUsername)
+	if _, err := os.Stat(img); err == nil {
+		logLine("admin_volume: " + img + " already exists, skipping create")
+		return nil
+	}
+	if testModeEnabled() {
+		logLine("TEST_MODE: skipping luksCreate for admin " + st.AdminUsername)
+		return nil
+	}
+	plaintext := setupSecretCache.get(st.AdminUsername)
+	if plaintext == "" {
+		return fmt.Errorf("admin password missing from in-memory cache "+
+			"(restart wizard at /setup/admin to re-enter, then re-run finalize); "+
+			"required to luksFormat %s", img)
+	}
+	// Ensure the host system user exists before chowning the mountpoint.
+	// Idempotent — hostUserAdd returns nil when the user is already there.
+	if err := hostUserAdd(st.AdminUsername); err != nil {
+		return fmt.Errorf("hostUserAdd %s: %w", st.AdminUsername, err)
+	}
+	logLine(fmt.Sprintf("admin_volume: creating %s at %d bytes (%.1f GiB)",
+		img, st.PersonalLUKSSize, float64(st.PersonalLUKSSize)/float64(gibBytes)))
+	if err := luksCreateWithSize(s.cfg, st.AdminUsername, plaintext, st.PersonalLUKSSize); err != nil {
+		return fmt.Errorf("luksCreate %s: %w", st.AdminUsername, err)
+	}
+	logLine("admin_volume: " + img + " created (locked); auto-unlock fires on first login via loginintercept.go")
+	return nil
 }
 
 // ---- finalize step 3: re-render templates --------------------------------

@@ -95,6 +95,23 @@ key_dir=/etc/luks
 if [[ -f $img ]]; then
     echo "==> $img already exists — verifying remaining state is consistent"
     img_already_present=1
+    # If the operator picked a larger size on the wizard than the .img
+    # we already have on disk, surface a loud warning. We deliberately
+    # do NOT auto-resize: a live resize requires umount + cryptsetup
+    # close + truncate + cryptsetup resize + resize2fs and the volume
+    # may currently be in use by the cloud container's bind-mount. The
+    # operator can run scripts/lib/resize-shared-volume.sh manually
+    # (or follow the operator-runbook procedure documented in
+    # docs/storage.md) once they've quiesced cloud.
+    if [[ -n "${SHARED_LUKS_SIZE_BYTES:-}" ]]; then
+        existing=$(stat -c %s "$img" 2>/dev/null || echo 0)
+        if [[ "$existing" -gt 0 && "$existing" -lt "$size_bytes" ]]; then
+            echo "    WARNING: existing $img is $existing bytes; wizard requested $size_bytes bytes"
+            echo "             ($(( (size_bytes - existing) / (1024*1024*1024) )) GiB short)."
+            echo "             Existing volume is NOT auto-resized — see docs/storage.md for the"
+            echo "             umount + cryptsetup resize + resize2fs procedure."
+        fi
+    fi
 else
     img_already_present=0
 fi

@@ -14,6 +14,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -81,6 +82,21 @@ type UserStorage struct {
 
 // storageSnapshot collects the data the /users storage panel renders.
 // Read-only; tolerates Stat/Statfs errors per-user (zeroes that field).
+//
+// Per-user `NominalBytes` resolution priority (the dashboard's "nominal"
+// column reflects the operator's actual choice, never the env-var fallback
+// when something better is known):
+//
+//  1. Apparent size of the user's `.img` on disk — the truth for any volume
+//     that exists. This is the LUKS blob's declared envelope (sparse files
+//     report the requested size via `Stat()`, not the on-disk allocation).
+//  2. PersonalLUKSSize from /srv/store/setup/state.json — what the operator
+//     picked on the wizard's storage step. Applies to users whose volume
+//     hasn't been provisioned yet (e.g. the admin pre-finalize, or a
+//     queued user awaiting LUKS create after a failed first attempt).
+//  3. cfg.luksSizeGB — the legacy `ENROL_LUKS_SIZE_GB` env-var fallback,
+//     used only when neither of the above is available (e.g. fresh
+//     /users/new on a host where the wizard pre-dates the storage step).
 func storageSnapshot(cfg config, users []string) StorageInfo {
 	si := StorageInfo{Root: "/srv/store"}
 	var fs syscall.Statfs_t
@@ -88,12 +104,17 @@ func storageSnapshot(cfg config, users []string) StorageInfo {
 		si.TotalBytes = int64(fs.Blocks) * int64(fs.Bsize)
 		si.FreeBytes = int64(fs.Bavail) * int64(fs.Bsize)
 	}
-	nominal := int64(cfg.luksSizeGB) << 30
+	defaultNominal := defaultPersonalNominalBytes(cfg)
 	for _, name := range users {
-		us := UserStorage{Name: name, NominalBytes: nominal}
+		us := UserStorage{Name: name, NominalBytes: defaultNominal}
 		img, mnt, _ := volumePaths(cfg, name)
 		if st, err := os.Stat(img); err == nil {
 			us.Exists = true
+			// Apparent size = LUKS envelope chosen at create time. This is
+			// the per-user "nominal" the dashboard advertises; it's
+			// authoritative once the volume exists, regardless of what the
+			// wizard or env var would suggest.
+			us.NominalBytes = st.Size()
 			if sys, ok := st.Sys().(*syscall.Stat_t); ok {
 				us.OnDiskBytes = int64(sys.Blocks) * 512
 			}
@@ -119,6 +140,38 @@ func storageSnapshot(cfg config, users []string) StorageInfo {
 		si.SystemBytes = 0
 	}
 	return si
+}
+
+// defaultPersonalNominalBytes returns the per-user nominal size the
+// dashboard should attribute to a user whose `.img` doesn't (yet) exist
+// on disk. Reads /srv/store/setup/state.json's PersonalLUKSSize first
+// (the wizard-captured operator choice); falls back to cfg.luksSizeGB
+// (`ENROL_LUKS_SIZE_GB`) when state.json is missing/unparseable/zero.
+//
+// Only the two fields needed are unmarshalled — we deliberately avoid
+// importing setupState here to keep luks.go free of the wizard's
+// concerns (and so the unit tests don't drag setup.go's transitive
+// deps in). Best-effort: any read/parse error silently falls back to
+// the env default rather than failing the dashboard render.
+func defaultPersonalNominalBytes(cfg config) int64 {
+	envFallback := int64(cfg.luksSizeGB) << 30
+	if cfg.setupStateDir == "" {
+		return envFallback
+	}
+	b, err := os.ReadFile(filepath.Join(cfg.setupStateDir, "state.json"))
+	if err != nil {
+		return envFallback
+	}
+	var partial struct {
+		PersonalLUKSSize int64 `json:"personal_luks_size"`
+	}
+	if err := json.Unmarshal(b, &partial); err != nil {
+		return envFallback
+	}
+	if partial.PersonalLUKSSize > 0 {
+		return partial.PersonalLUKSSize
+	}
+	return envFallback
 }
 
 // sharedSnapshot reads the shared volume's on-disk + mount state.
@@ -189,13 +242,28 @@ func isMounted(path string) bool {
 
 // luksCreate creates a fresh LUKS2 blob + ext4 fs at /srv/store/data/<u>.img,
 // initializes the mountpoint, leaves the volume CLOSED on return. Mirrors
-// scripts/create-store-volume.sh.
+// scripts/create-store-volume.sh. Uses cfg.luksSizeGB for the envelope —
+// this is the day-2 /users/new path, which has no per-user size override
+// (the env-var default applies). Use luksCreateWithSize when a specific
+// size is known (e.g. finalize provisioning the admin's volume from the
+// wizard-captured PersonalLUKSSize).
 func luksCreate(cfg config, user, passphrase string) error {
+	return luksCreateWithSize(cfg, user, passphrase, int64(cfg.luksSizeGB)<<30)
+}
+
+// luksCreateWithSize is luksCreate parametrised by an explicit envelope in
+// raw bytes. The dd seek= takes a byte count, so any positive value works
+// (we don't require an exact GiB multiple). Internal helper; callers must
+// have validated `sizeBytes > 0` upstream.
+func luksCreateWithSize(cfg config, user, passphrase string, sizeBytes int64) error {
 	if !validUsername(user) {
 		return fmt.Errorf("invalid username %q", user)
 	}
 	if len(passphrase) < 1 {
 		return errors.New("LUKS passphrase is empty")
+	}
+	if sizeBytes <= 0 {
+		return fmt.Errorf("LUKS size must be positive, got %d bytes", sizeBytes)
 	}
 	img, mnt, mapper := volumePaths(cfg, user)
 
@@ -209,8 +277,9 @@ func luksCreate(cfg config, user, passphrase string) error {
 		return err
 	}
 
-	// Sparse blob.
-	size := fmt.Sprintf("%dG", cfg.luksSizeGB)
+	// Sparse blob. Pass byte-precise seek= so wizard-chosen non-GiB
+	// multiples (rare but allowed) land at exactly the requested size.
+	size := fmt.Sprintf("%d", sizeBytes)
 	if err := runCommand("dd", "if=/dev/zero", "of="+img,
 		"bs=1", "count=0", "seek="+size); err != nil {
 		return fmt.Errorf("dd create %s: %w", img, err)
