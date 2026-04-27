@@ -16,12 +16,19 @@
 </head>
 <body>
   <header>
-    <h1><a href="/users">enrol</a></h1>
+    {{/* Logo links to launcher root, which is reachable by every
+         authenticated user (admin or regular). The admin nav links
+         below are gated on .ViewerIsAdmin which page-data structs set
+         to true on admin-only renders and to the actual viewer's admin
+         status on the launcher (see launcherData in server.go). */}}
+    <h1><a href="/">enrol</a></h1>
     <nav>
       <a href="/">apps</a>
-      <a href="/users">users</a>
-      {{if awgEnabled}}<a href="/peers">devices</a>{{end}}
-      <a href="/audit">audit</a>
+      {{if .ViewerIsAdmin}}
+        <a href="/users">users</a>
+        {{if awgEnabled}}<a href="/peers">devices</a>{{end}}
+        <a href="/audit">audit</a>
+      {{end}}
     </nav>
     <div class="who">{{.User}}</div>
     <a class="logout" href="https://auth.{{domain}}/logout">Logout</a>

@@ -5,7 +5,8 @@
   <dl>
     <dt>display</dt><dd>{{.Target.DisplayName}}</dd>
     <dt>email</dt><dd><code>{{.Target.Email}}</code></dd>
-    <dt>groups</dt><dd>{{join .Target.Groups ", "}}</dd>
+    <dt>role</dt><dd>{{if .IsAdmin}}<strong>admin</strong>{{else}}user{{end}}
+        <span class="muted">(Authelia groups: {{join .Target.Groups ", "}})</span></dd>
     <dt>disabled</dt><dd>{{.Target.Disabled}}</dd>
   </dl>
 </section>
@@ -21,9 +22,9 @@
     <label>email
       <input type="email" name="email" required value="{{.Target.Email}}">
     </label>
-    <label>groups (comma-separated)
-      <input type="text" name="groups" value="{{join .Target.Groups ", "}}"
-        placeholder="admins">
+    <label class="checkbox">
+      <input type="checkbox" name="is_admin" value="1"{{if .IsAdmin}} checked{{end}}>
+      is admin (Authelia <code>admins</code> group; enrol + Portainer access)
     </label>
     <button type="submit">save</button>
   </form>
@@ -31,14 +32,15 @@
 
 <section>
   <h2>change login password</h2>
+  <p class="hint">
+    Updates the Authelia argon2id hash only. The LUKS passphrase is
+    independent — rotate it below if you want the auto-unlock-on-login
+    invariant to keep holding.
+  </p>
   <form method="POST" action="/users/{{.Name}}/password">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label>new password
       <input type="password" name="password" required minlength="12"
-        autocomplete="new-password">
-    </label>
-    <label>confirm
-      <input type="password" name="password_confirm" required minlength="12"
         autocomplete="new-password">
     </label>
     <button type="submit">update password</button>
@@ -93,9 +95,6 @@
       </label>
       <label>new passphrase
         <input type="password" name="new" required minlength="12" autocomplete="new-password">
-      </label>
-      <label>confirm
-        <input type="password" name="new_confirm" required minlength="12" autocomplete="new-password">
       </label>
       <button type="submit">rotate passphrase</button>
     </form>

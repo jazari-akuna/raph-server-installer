@@ -16,11 +16,13 @@
         {{end}}
         <span class="tile-name">{{.Name}}</span>
       </a>
+      {{if $.ViewerIsAdmin}}
       <form class="tile-delete" method="POST" action="/launcher/apps/{{.ID}}/delete"
             onsubmit="return confirm('Remove {{.Name}} from the launcher?');">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <button type="submit" class="danger" title="remove">&times;</button>
       </form>
+      {{end}}
     </div>
     {{end}}
   </div>
@@ -29,6 +31,7 @@
   {{end}}
 </section>
 
+{{if .ViewerIsAdmin}}
 <section>
   <h2>add app</h2>
   <p class="hint">
@@ -59,5 +62,6 @@
     <button type="submit">add</button>
   </form>
 </section>
+{{end}}
 
 {{template "tail" .}}

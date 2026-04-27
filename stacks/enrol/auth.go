@@ -39,6 +39,18 @@ func authFromRequest(r *http.Request, cfg config) (authedUser, error) {
 	return authedUser{Name: user, Groups: groups}, nil
 }
 
+// requireAuth gates a handler on the presence of valid Authelia
+// Remote-User / Remote-Groups headers. The `requireGroup` flag is the
+// LEGACY all-or-nothing admin gate — when true, the user must be in
+// `cfg.requiredGroup` (default `admins`). For the modernized two-tier
+// model (admin vs regular user), prefer requireAdmin (admin-only) for
+// the day-2 management surface and requireAuth(cfg, false, ...) for
+// surfaces any authenticated user may reach (the launcher, the icon
+// fileserver, audit-on-self if we ever add it).
+//
+// The Authelia ACL on enrol.${DOMAIN} should be `one_factor` with NO
+// subject restriction, so non-admins can reach the launcher. The
+// admin/non-admin split is then enforced HERE, route-by-route.
 func requireAuth(cfg config, requireGroup bool, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		u, err := authFromRequest(r, cfg)
@@ -64,4 +76,14 @@ func requireAuth(cfg config, requireGroup bool, h http.HandlerFunc) http.Handler
 		r.Header.Set("X-Enrol-Groups", strings.Join(u.Groups, ","))
 		h(w, r)
 	}
+}
+
+// requireAdmin gates a handler on Authelia membership of the admin
+// group (cfg.requiredGroup, default `admins`). Returns 401 on missing
+// Remote-User and 403 on a non-admin authenticated user. Use this on
+// every "create user" / "edit user" / "delete user" / launcher mutation
+// / audit / peers / wizard-day-2 surface — anything that should be
+// invisible to a regular user.
+func requireAdmin(cfg config, h http.HandlerFunc) http.HandlerFunc {
+	return requireAuth(cfg, true, h)
 }

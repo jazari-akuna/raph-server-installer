@@ -106,13 +106,27 @@ access_control:
     - domain: 'cloud.${DOMAIN}'
       policy: 'one_factor'
 
-    # Peer-management UI: password-only, admins-only group.
+    # enrol — landing page (apps launcher) is reachable by every
+    # authenticated user; the management surfaces under it (/users,
+    # /users/*, /peers, /audit, /launcher/apps) are gated INSIDE enrol
+    # by requireAdmin (auth.go) which checks the same Remote-Groups
+    # header for `admins`. Two-tier model: regular users get an apps
+    # launcher with public/cloud tiles only; admins additionally see
+    # the day-2 management surface. We deliberately do NOT subject-gate
+    # at the Authelia layer here because doing so would 403 non-admins
+    # before they can even reach their launcher tiles.
     - domain: 'enrol.${DOMAIN}'
       policy: 'one_factor'
-      subject:
-        - 'group:admins'
 
-    # Portainer: password-only, admins-only group.
+    # Portainer: password-only, admins-only group. This is the STRONGEST
+    # enforcement point for "non-admins MUST NOT be Portainer admins":
+    # NPM forward-auth refuses to even pass the request through unless
+    # the user is in `admins`, so Portainer (which has no native OIDC
+    # admin-claim mapping in the CE edition) never gets a chance to
+    # auto-provision a non-admin Portainer account. The OIDC `groups`
+    # claim flows through too (cf. configure-oidc.sh), so regular
+    # `admins`-team mapping inside Portainer keeps working for the
+    # day a Portainer Business upgrade lets us promote via claim.
     - domain: 'console.${DOMAIN}'
       policy: 'one_factor'
       subject:

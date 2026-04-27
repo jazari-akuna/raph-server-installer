@@ -162,19 +162,36 @@ func (s *server) routes() http.Handler {
 	// success fire-and-forget a LUKS unlock for the user.
 	mux.HandleFunc("/login-intercept", s.handleLoginIntercept)
 
-	mux.HandleFunc("/", requireAuth(s.cfg, true, s.withCSRF(s.handleLauncher)))
-	mux.HandleFunc("/launcher/apps", requireAuth(s.cfg, true, s.withCSRF(s.handleLauncherAddApp)))
-	mux.HandleFunc("/launcher/apps/", requireAuth(s.cfg, true, s.withCSRF(s.handleLauncherAppSub)))
-	mux.HandleFunc("/launcher/icons/", requireAuth(s.cfg, true, s.handleLauncherIcon))
-	mux.HandleFunc("/audit", requireAuth(s.cfg, true, s.handleAudit))
+	// Two-tier access model (see auth.go):
+	//   - requireAuth(cfg, false, ...): any authenticated user (admin OR
+	//     regular). Used for the launcher landing page and the icon
+	//     fileserver — non-admins land here after SSO and see only the
+	//     tiles they're allowed to follow (the "users" tile is filtered
+	//     out by handleLauncher; the "console" tile is filtered too,
+	//     since the Authelia ACL on console.${DOMAIN} would 403 them
+	//     anyway and we'd rather not surface the dead link).
+	//   - requireAdmin(cfg, ...): admin-only. Anything that mutates
+	//     users_database.yml, the launcher app list, the gw0 peer set,
+	//     or reads the audit log. A non-admin who forges a direct GET
+	//     /users / POST /users / GET /users/<x> / etc. gets a 403.
+	//
+	// The Authelia ACL on enrol.${DOMAIN} is `one_factor` with NO
+	// subject restriction (see configuration.yml.template), so non-admins
+	// can reach the launcher at all. Admin gating happens HERE.
+	mux.HandleFunc("/", requireAuth(s.cfg, false, s.withCSRF(s.handleLauncher)))
+	mux.HandleFunc("/launcher/icons/", requireAuth(s.cfg, false, s.handleLauncherIcon))
+	mux.HandleFunc("/launcher/apps", requireAdmin(s.cfg, s.withCSRF(s.handleLauncherAddApp)))
+	mux.HandleFunc("/launcher/apps/", requireAdmin(s.cfg, s.withCSRF(s.handleLauncherAppSub)))
+	mux.HandleFunc("/audit", requireAdmin(s.cfg, s.handleAudit))
 
-	// Users
-	mux.HandleFunc("/users", requireAuth(s.cfg, true, s.withCSRF(s.handleUsers)))
-	mux.HandleFunc("/users/", requireAuth(s.cfg, true, s.withCSRF(s.handleUserSub)))
+	// Users — admin-only. Non-admins MUST NOT see or hit any /users,
+	// /users/* surface (per the two-tier model).
+	mux.HandleFunc("/users", requireAdmin(s.cfg, s.withCSRF(s.handleUsers)))
+	mux.HandleFunc("/users/", requireAdmin(s.cfg, s.withCSRF(s.handleUserSub)))
 
-	// Peers (devices)
-	mux.HandleFunc("/peers", requireAuth(s.cfg, true, s.withCSRF(s.handlePeers)))
-	mux.HandleFunc("/peers/", requireAuth(s.cfg, true, s.withCSRF(s.handlePeerSub)))
+	// Peers (devices) — admin-only. Mirrors /users.
+	mux.HandleFunc("/peers", requireAdmin(s.cfg, s.withCSRF(s.handlePeers)))
+	mux.HandleFunc("/peers/", requireAdmin(s.cfg, s.withCSRF(s.handlePeerSub)))
 
 	return s.setupRouteGate(mux)
 }
@@ -259,12 +276,13 @@ func (s *server) handleUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 type usersListData struct {
-	Title   string
-	User    string
-	CSRF    string
-	Users   []userRow
-	Storage StorageInfo
-	Flash   string
+	Title         string
+	User          string
+	CSRF          string
+	ViewerIsAdmin bool
+	Users         []userRow
+	Storage       StorageInfo
+	Flash         string
 }
 
 type userRow struct {
@@ -272,6 +290,7 @@ type userRow struct {
 	DisplayName string
 	Email       string
 	Groups      []string
+	IsAdmin     bool
 	HasVolume   bool
 	VolMounted  bool
 }
@@ -290,16 +309,18 @@ func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash s
 		v := describeVolume(s.cfg, name)
 		rows = append(rows, userRow{
 			Name: name, DisplayName: u.DisplayName, Email: u.Email,
-			Groups: u.Groups, HasVolume: v.Exists, VolMounted: v.Mounted,
+			Groups: u.Groups, IsAdmin: isAdminUser(u),
+			HasVolume: v.Exists, VolMounted: v.Mounted,
 		})
 	}
 	data := usersListData{
-		Title:   "users",
-		User:    r.Header.Get("X-Enrol-User"),
-		CSRF:    csrf,
-		Users:   rows,
-		Storage: storageSnapshot(s.cfg, names),
-		Flash:   flash,
+		Title:         "users",
+		User:          r.Header.Get("X-Enrol-User"),
+		CSRF:          csrf,
+		ViewerIsAdmin: true, // requireAdmin gates this route
+		Users:         rows,
+		Storage:       storageSnapshot(s.cfg, names),
+		Flash:         flash,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "users.html", data); err != nil {
@@ -326,7 +347,13 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	displayname := strings.TrimSpace(r.Form.Get("displayname"))
 	email := strings.TrimSpace(r.Form.Get("email"))
 	password := r.Form.Get("password")
-	luksPass := r.Form.Get("luks_passphrase")
+	isAdmin := r.Form.Get("is_admin") != ""
+	// One password field; it feeds both the Authelia argon2id hash AND
+	// the LUKS unlock secret so loginintercept.go's auto-unlock works
+	// without a second prompt. Operator verifies typo on first sign-in
+	// (browser autofill is the source-of-truth for "did I type the
+	// right thing").
+	luksPass := password
 
 	if !validUsername(name) {
 		http.Error(w, "invalid username (allowed: lowercase a-z, then a-z0-9_-, 1..32)",
@@ -344,11 +371,6 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(password) < 12 {
 		http.Error(w, "password must be at least 12 characters",
-			http.StatusBadRequest)
-		return
-	}
-	if len(luksPass) < 12 {
-		http.Error(w, "LUKS passphrase must be at least 12 characters",
 			http.StatusBadRequest)
 		return
 	}
@@ -380,9 +402,24 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4. Splice into YAML and atomic-rename write.
+	//
+	// Group convention (matches setup.go finalizeWriteAdmin and the
+	// `admins`-only Authelia ACL on console.${DOMAIN}): admins get
+	// `[admins]`; non-admins get `[users]`. The `users` group has no
+	// special meaning in Authelia today — it's a placeholder so the
+	// Remote-Groups header is non-empty and so a future regular-user
+	// ACL has something to subject-match against. The is_admin
+	// distinction is what actually gates enrol's admin surface (see
+	// requireAdmin in auth.go) and Portainer access (Authelia ACL on
+	// console.${DOMAIN} requires `group:admins`, so non-admins can't
+	// reach Portainer at all — strongest possible enforcement).
+	groups := []string{"users"}
+	if isAdmin {
+		groups = []string{"admins"}
+	}
 	u := User{
 		Disabled: false, DisplayName: displayname, Password: hash,
-		Email: email, Groups: []string{"admins"},
+		Email: email, Groups: groups,
 	}
 	if err := db.upsert(name, u); err != nil {
 		http.Error(w, "upsert: "+err.Error(), http.StatusInternalServerError)
@@ -437,21 +474,23 @@ func (s *server) renderUserCreated(w http.ResponseWriter, r *http.Request,
 			base64.StdEncoding.EncodeToString(qrPNG))
 	}
 	data := struct {
-		Title      string
-		User       string
-		CSRF       string
-		Created    string
-		OtpauthURI string
-		QRDataURI  template.URL
-		Flash      string
+		Title         string
+		User          string
+		CSRF          string
+		ViewerIsAdmin bool
+		Created       string
+		OtpauthURI    string
+		QRDataURI     template.URL
+		Flash         string
 	}{
-		Title:      "user created: " + name,
-		User:       r.Header.Get("X-Enrol-User"),
-		CSRF:       csrf,
-		Created:    name,
-		OtpauthURI: otpauth,
-		QRDataURI:  qrDataURI,
-		Flash:      flash,
+		Title:         "user created: " + name,
+		User:          r.Header.Get("X-Enrol-User"),
+		CSRF:          csrf,
+		ViewerIsAdmin: true, // requireAdmin gates this route
+		Created:       name,
+		OtpauthURI:    otpauth,
+		QRDataURI:     qrDataURI,
+		Flash:         flash,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "user-created.html", data); err != nil {
@@ -501,14 +540,28 @@ func (s *server) handleUserSub(w http.ResponseWriter, r *http.Request) {
 }
 
 type userDetailData struct {
-	Title   string
-	User    string
-	CSRF    string
-	Target  User
-	Name    string
-	Volume  VolumeInfo
-	Devices []peer
-	Flash   string
+	Title         string
+	User          string
+	CSRF          string
+	ViewerIsAdmin bool
+	Target        User
+	Name          string
+	IsAdmin       bool // target user's admin status (drives checkbox)
+	Volume        VolumeInfo
+	Devices       []peer
+	Flash         string
+}
+
+// isAdminUser returns true iff the user has the `admins` Authelia group.
+// Single source-of-truth for the admin/non-admin distinction the
+// modernized /users form exposes as a checkbox.
+func isAdminUser(u User) bool {
+	for _, g := range u.Groups {
+		if g == "admins" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) handleUserDetail(w http.ResponseWriter, r *http.Request, name string) {
@@ -530,10 +583,12 @@ func (s *server) handleUserDetail(w http.ResponseWriter, r *http.Request, name s
 	v := describeVolume(s.cfg, name)
 	devices := s.devicesForUser(name)
 	data := userDetailData{
-		Title:  "user " + name,
-		User:   r.Header.Get("X-Enrol-User"),
-		CSRF:   csrf,
-		Target: u, Name: name, Volume: v, Devices: devices,
+		Title:         "user " + name,
+		User:          r.Header.Get("X-Enrol-User"),
+		CSRF:          csrf,
+		ViewerIsAdmin: true, // requireAdmin gates this route
+		Target:        u, Name: name, IsAdmin: isAdminUser(u),
+		Volume: v, Devices: devices,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "user-detail.html", data); err != nil {
@@ -557,7 +612,7 @@ func (s *server) handleUserEdit(w http.ResponseWriter, r *http.Request, name str
 	}
 	displayname := strings.TrimSpace(r.Form.Get("displayname"))
 	email := strings.TrimSpace(r.Form.Get("email"))
-	groupsRaw := strings.TrimSpace(r.Form.Get("groups"))
+	isAdmin := r.Form.Get("is_admin") != ""
 	if !validDisplayName(displayname) {
 		http.Error(w, "invalid display name", http.StatusBadRequest)
 		return
@@ -566,14 +621,12 @@ func (s *server) handleUserEdit(w http.ResponseWriter, r *http.Request, name str
 		http.Error(w, "invalid email", http.StatusBadRequest)
 		return
 	}
-	groups := []string{}
-	for _, g := range strings.Split(groupsRaw, ",") {
-		g = strings.TrimSpace(g)
-		if g != "" {
-			groups = append(groups, g)
-		}
-	}
-	if len(groups) == 0 {
+	// Same group convention as handleCreateUser. Self-demotion is
+	// allowed at the data layer; if it locks the operator out of the
+	// admin surface that's fine — they can SSH in and edit the YAML
+	// directly. We don't try to be cleverer than that.
+	groups := []string{"users"}
+	if isAdmin {
 		groups = []string{"admins"}
 	}
 
@@ -620,10 +673,15 @@ func (s *server) handleUserPassword(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 	pw := r.Form.Get("password")
-	pwc := r.Form.Get("password_confirm")
-	if pw == "" || pw != pwc {
-		http.Error(w, "password missing or doesn't match confirmation",
-			http.StatusBadRequest)
+	// Single password field — no confirm. Browser autofill is the source
+	// of truth for "did I type the right thing"; the operator verifies on
+	// the user's first sign-in. Note that this rotates ONLY the Authelia
+	// hash, not the LUKS passphrase: if the operator wants the auto-
+	// unlock-on-login invariant to keep holding, they must also rotate
+	// LUKS via the "change LUKS passphrase" form below (which still
+	// requires the old one).
+	if pw == "" {
+		http.Error(w, "password required", http.StatusBadRequest)
 		return
 	}
 	if len(pw) < 12 {
@@ -701,10 +759,12 @@ func (s *server) handleLUKSPassphrase(w http.ResponseWriter, r *http.Request, na
 	}
 	old := r.Form.Get("old")
 	newp := r.Form.Get("new")
-	confirm := r.Form.Get("new_confirm")
-	if newp == "" || newp != confirm {
-		http.Error(w, "new passphrase missing or doesn't match confirmation",
-			http.StatusBadRequest)
+	// Single-field new passphrase (no confirm) — the operator verifies
+	// on the next unlock attempt; if it's wrong they still have the old
+	// keyslot intact (luksChangePassphrase adds the new slot first then
+	// removes the old). Browser autofill is the source of truth.
+	if newp == "" {
+		http.Error(w, "new passphrase required", http.StatusBadRequest)
 		return
 	}
 	if len(newp) < 12 {
@@ -893,13 +953,14 @@ type peerGroup struct {
 }
 
 type peersListData struct {
-	Title  string
-	User   string
-	CSRF   string
-	Groups []peerGroup
-	Users  []string
-	Tags   []string
-	Flash  string
+	Title         string
+	User          string
+	CSRF          string
+	ViewerIsAdmin bool
+	Groups        []peerGroup
+	Users         []string
+	Tags          []string
+	Flash         string
 }
 
 // awgEnabled reports whether AmneziaWG (gw0) is provisioned on this host
@@ -920,13 +981,15 @@ func (s *server) awgEnabled() bool {
 func (s *server) renderPeersDisabled(w http.ResponseWriter, r *http.Request) {
 	csrf := ensureCSRF(w, r)
 	data := struct {
-		Title string
-		User  string
-		CSRF  string
+		Title         string
+		User          string
+		CSRF          string
+		ViewerIsAdmin bool
 	}{
-		Title: "devices",
-		User:  r.Header.Get("X-Enrol-User"),
-		CSRF:  csrf,
+		Title:         "devices",
+		User:          r.Header.Get("X-Enrol-User"),
+		CSRF:          csrf,
+		ViewerIsAdmin: true, // requireAdmin gates this route
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "peers-disabled.html", data); err != nil {
@@ -983,13 +1046,14 @@ func (s *server) renderPeerList(w http.ResponseWriter, r *http.Request, flash st
 	groups := groupPeersByUser(all, knownUsers)
 
 	data := peersListData{
-		Title:  "devices",
-		User:   r.Header.Get("X-Enrol-User"),
-		CSRF:   csrf,
-		Groups: groups,
-		Users:  knownUsers,
-		Tags:   []string{"laptop", "phone", "tablet", "other"},
-		Flash:  flash,
+		Title:         "devices",
+		User:          r.Header.Get("X-Enrol-User"),
+		CSRF:          csrf,
+		ViewerIsAdmin: true, // requireAdmin gates this route
+		Groups:        groups,
+		Users:         knownUsers,
+		Tags:          []string{"laptop", "phone", "tablet", "other"},
+		Flash:         flash,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "peers.html", data); err != nil {
@@ -1122,19 +1186,21 @@ func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 
 	csrf := ensureCSRF(w, r)
 	data := struct {
-		Title      string
-		User       string
-		CSRF       string
-		Peer       peer
-		ClientConf string
-		ReloadNote string
+		Title         string
+		User          string
+		CSRF          string
+		ViewerIsAdmin bool
+		Peer          peer
+		ClientConf    string
+		ReloadNote    string
 	}{
-		Title:      "device added",
-		User:       actor,
-		CSRF:       csrf,
-		Peer:       p,
-		ClientConf: clientConf,
-		ReloadNote: reloadNote,
+		Title:         "device added",
+		User:          actor,
+		CSRF:          csrf,
+		ViewerIsAdmin: true, // requireAdmin gates this route
+		Peer:          p,
+		ClientConf:    clientConf,
+		ReloadNote:    reloadNote,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "peer-created.html", data); err != nil {
@@ -1239,6 +1305,7 @@ func (s *server) handlePeerDetail(w http.ResponseWriter, r *http.Request, name s
 		Title         string
 		User          string
 		CSRF          string
+		ViewerIsAdmin bool
 		Peer          peer
 		ClientConf    string
 		ArchiveExists bool
@@ -1246,6 +1313,7 @@ func (s *server) handlePeerDetail(w http.ResponseWriter, r *http.Request, name s
 		Title:         "peer " + p.Name,
 		User:          r.Header.Get("X-Enrol-User"),
 		CSRF:          csrf,
+		ViewerIsAdmin: true, // requireAdmin gates this route
 		Peer:          p,
 		ClientConf:    clientConf,
 		ArchiveExists: archiveExists(s.cfg, p.Name),
@@ -1450,11 +1518,12 @@ type launcherTileData struct {
 }
 
 type launcherData struct {
-	Title string
-	User  string
-	CSRF  string
-	Apps  []launcherTileData
-	Flash string
+	Title         string
+	User          string
+	CSRF          string
+	Apps          []launcherTileData
+	ViewerIsAdmin bool
+	Flash         string
 }
 
 func (s *server) handleLauncher(w http.ResponseWriter, r *http.Request) {
@@ -1469,6 +1538,19 @@ func (s *server) handleLauncher(w http.ResponseWriter, r *http.Request) {
 	s.renderLauncher(w, r, "")
 }
 
+// adminTileIDs are the bootstrap tiles that point at admin-only
+// surfaces. Non-admin users have those surfaces blocked at the Authelia
+// ACL layer (console.${DOMAIN} -> group:admins) or at the enrol routing
+// layer (enrol-users -> requireAdmin). Listing the dead tiles to a
+// non-admin would just be a footgun, so the launcher filters them out.
+// Operator-added custom tiles are NOT filtered — if an operator adds a
+// tile they presumably want all users to see it. Toggle on a per-tile
+// basis later if that turns out to be wrong.
+var adminTileIDs = map[string]bool{
+	"enrol-users": true,
+	"console":     true,
+}
+
 func (s *server) renderLauncher(w http.ResponseWriter, r *http.Request, flash string) {
 	csrf := ensureCSRF(w, r)
 	apps, err := loadLauncher(s.cfg.launcherDir)
@@ -1476,8 +1558,21 @@ func (s *server) renderLauncher(w http.ResponseWriter, r *http.Request, flash st
 		http.Error(w, "load launcher: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Re-derive admin status from the Remote-Groups header set by
+	// requireAuth; this is the canonical source for the request lifetime.
+	groups := r.Header.Get("X-Enrol-Groups")
+	isAdmin := false
+	for _, g := range strings.Split(groups, ",") {
+		if strings.TrimSpace(g) == s.cfg.requiredGroup {
+			isAdmin = true
+			break
+		}
+	}
 	tiles := make([]launcherTileData, 0, len(apps))
 	for _, a := range apps {
+		if !isAdmin && adminTileIDs[a.ID] {
+			continue
+		}
 		t := launcherTileData{
 			ID:       a.ID,
 			Name:     a.Name,
@@ -1496,11 +1591,12 @@ func (s *server) renderLauncher(w http.ResponseWriter, r *http.Request, flash st
 		tiles = append(tiles, t)
 	}
 	data := launcherData{
-		Title: "apps",
-		User:  r.Header.Get("X-Enrol-User"),
-		CSRF:  csrf,
-		Apps:  tiles,
-		Flash: flash,
+		Title:         "apps",
+		User:          r.Header.Get("X-Enrol-User"),
+		CSRF:          csrf,
+		Apps:          tiles,
+		ViewerIsAdmin: isAdmin,
+		Flash:         flash,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "launcher.html", data); err != nil {

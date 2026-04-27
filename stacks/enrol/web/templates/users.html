@@ -77,7 +77,7 @@
   {{if .Users}}
   <table>
     <thead>
-      <tr><th>name</th><th>display</th><th>email</th><th>groups</th><th>volume</th><th></th></tr>
+      <tr><th>name</th><th>display</th><th>email</th><th>role</th><th>volume</th><th></th></tr>
     </thead>
     <tbody>
     {{range .Users}}
@@ -85,7 +85,7 @@
         <td><a href="/users/{{.Name}}">{{.Name}}</a></td>
         <td>{{.DisplayName}}</td>
         <td><code>{{.Email}}</code></td>
-        <td>{{join .Groups ", "}}</td>
+        <td>{{if .IsAdmin}}<strong>admin</strong>{{else}}user{{end}}</td>
         <td>
           {{if .HasVolume}}
             {{if .VolMounted}}<span class="ok">unlocked</span>{{else}}<span class="muted">locked</span>{{end}}
@@ -108,9 +108,11 @@
   <p class="hint">
     Creates the Authelia entry, host system user, 50&nbsp;GB LUKS volume,
     and a fresh TOTP secret. The TOTP QR is shown once on the next page —
-    save it before navigating away. The login password and the LUKS
-    passphrase are intentionally separate (a leaked Authelia password
-    must not also unlock the data blob at rest).
+    save it before navigating away. The same password feeds both the
+    Authelia argon2id hash and the LUKS unlock secret, so login auto-
+    unlocks the user's data volume. Tick "is admin" to grant the same
+    powers as the wizard-created admin (enrol UI + Portainer); leave it
+    off for a regular user (apps launcher + cloud only).
   </p>
   <form method="POST" action="/users">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -127,15 +129,14 @@
       <input type="email" name="email" required
         placeholder="user@example.com">
     </label>
-    <label>login password
+    <label>password
       <input type="password" name="password" required
         minlength="12" autocomplete="new-password"
         placeholder="at least 12 chars">
     </label>
-    <label>LUKS passphrase
-      <input type="password" name="luks_passphrase" required
-        minlength="12" autocomplete="new-password"
-        placeholder="separate from login password">
+    <label class="checkbox">
+      <input type="checkbox" name="is_admin" value="1">
+      is admin (Authelia <code>admins</code> group; enrol + Portainer access)
     </label>
     <button type="submit">create</button>
   </form>
