@@ -144,7 +144,14 @@ services:
       # /opt/stacks/.env (NPM admin password etc.). With `:ro` here
       # the wizard's templates step fails with EROFS on the mv into
       # the rendered output.
-      - /etc/raph-installer:/etc/raph-installer:ro
+      # RW (not :ro) — finalize's OIDC rotation step (oidc.go) writes the
+      # plaintext client_secret here for the operator to paste into Portainer.
+      # The directory also holds /etc/raph-installer/setup-token (read-only
+      # to us in practice) and /etc/raph-installer/npm-bootstrap.pass (read
+      # by finalizeWireNPM). Threat model unchanged: enrol is already
+      # privileged + holds the docker socket; whether this bind is :ro or :rw
+      # makes no real difference to the attack surface.
+      - /etc/raph-installer:/etc/raph-installer:rw
       - /opt/raph-server-installer:/opt/raph-server-installer:rw
       - /opt/stacks:/opt/stacks:rw
 
