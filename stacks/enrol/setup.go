@@ -1147,11 +1147,18 @@ func (s *server) runFinalize(
 	// Authelia user but skipped the LUKS blob, leaving the admin with
 	// "raph (no volume) — 50.0 GB nominal" on the dashboard despite
 	// /srv/store/data/raph.img not existing.
+	// No gate on AdminVolReady: finalizeEnsureAdminVolume is fully
+	// idempotent (early-returns when img exists AND is mounted). Running
+	// it every retry catches the "previous finalize created the .img but
+	// crashed before unlocking it" case — without the unconditional re-
+	// check, a retry would skip the volume entirely and the operator
+	// would land on the dashboard with a locked home. The state bit is
+	// still set on success as a record-of-completion.
+	status("admin_volume", "ensuring /srv/store/data/"+st.AdminUsername+".img is created and mounted")
+	if err := s.finalizeEnsureAdminVolume(ctx, st, logLine); err != nil {
+		return wrapErr("admin_volume", err)
+	}
 	if !st.CompletedSteps.AdminVolReady {
-		status("admin_volume", "provisioning /srv/store/data/"+st.AdminUsername+".img")
-		if err := s.finalizeEnsureAdminVolume(ctx, st, logLine); err != nil {
-			return wrapErr("admin_volume", err)
-		}
 		st.CompletedSteps.AdminVolReady = true
 		_ = s.saveSetupState(st)
 	}
@@ -1394,9 +1401,15 @@ func (s *server) finalizeEnsureAdminVolume(ctx context.Context, st *setupState, 
 	if st.PersonalLUKSSize <= 0 {
 		return errors.New("personal_luks_size unset in state.json — restart wizard at /setup/storage")
 	}
-	img, _, _ := volumePaths(s.cfg, st.AdminUsername)
+	img, mnt, _ := volumePaths(s.cfg, st.AdminUsername)
+	imgExists := false
 	if _, err := os.Stat(img); err == nil {
-		logLine("admin_volume: " + img + " already exists, skipping create")
+		imgExists = true
+	}
+	mounted := isMounted(mnt)
+
+	if imgExists && mounted {
+		logLine("admin_volume: " + img + " already created and mounted at " + mnt)
 		return nil
 	}
 	if testModeEnabled() {
@@ -1407,19 +1420,32 @@ func (s *server) finalizeEnsureAdminVolume(ctx context.Context, st *setupState, 
 	if plaintext == "" {
 		return fmt.Errorf("admin password missing from in-memory cache "+
 			"(restart wizard at /setup/admin to re-enter, then re-run finalize); "+
-			"required to luksFormat %s", img)
+			"required to %s %s",
+			map[bool]string{true: "luksUnlock", false: "luksFormat"}[imgExists], img)
 	}
 	// Ensure the host system user exists before chowning the mountpoint.
 	// Idempotent — hostUserAdd returns nil when the user is already there.
 	if err := hostUserAdd(st.AdminUsername); err != nil {
 		return fmt.Errorf("hostUserAdd %s: %w", st.AdminUsername, err)
 	}
-	logLine(fmt.Sprintf("admin_volume: creating %s at %d bytes (%.1f GiB)",
-		img, st.PersonalLUKSSize, float64(st.PersonalLUKSSize)/float64(gibBytes)))
-	if err := luksCreateWithSize(s.cfg, st.AdminUsername, plaintext, st.PersonalLUKSSize); err != nil {
-		return fmt.Errorf("luksCreate %s: %w", st.AdminUsername, err)
+	if !imgExists {
+		logLine(fmt.Sprintf("admin_volume: creating %s at %d bytes (%.1f GiB)",
+			img, st.PersonalLUKSSize, float64(st.PersonalLUKSSize)/float64(gibBytes)))
+		if err := luksCreateWithSize(s.cfg, st.AdminUsername, plaintext, st.PersonalLUKSSize); err != nil {
+			return fmt.Errorf("luksCreate %s: %w", st.AdminUsername, err)
+		}
 	}
-	logLine("admin_volume: " + img + " created (locked); auto-unlock fires on first login via loginintercept.go")
+	// Open + mount so the operator's home is ready the moment the wizard
+	// redirects to the dashboard. Earlier the code relied solely on
+	// loginintercept.go to fire on the next POST /api/firstfactor — but
+	// that doesn't fire if the operator already has a valid Authelia
+	// session cookie (re-walks, browser tabs left over from the original
+	// install attempt, etc.). They'd land on the dashboard with a locked
+	// home and no obvious recovery. luksUnlock is idempotent.
+	if err := luksUnlock(s.cfg, st.AdminUsername, plaintext); err != nil {
+		return fmt.Errorf("luksUnlock %s: %w", st.AdminUsername, err)
+	}
+	logLine("admin_volume: " + img + " ready and mounted at " + mnt)
 	return nil
 }
 
