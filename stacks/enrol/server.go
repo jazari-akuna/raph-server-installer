@@ -204,6 +204,11 @@ func (s *server) routes() http.Handler {
 	// can reach the launcher at all. Admin gating happens HERE.
 	mux.HandleFunc("/", requireAuth(s.cfg, false, s.withCSRF(s.handleLauncher)))
 	mux.HandleFunc("/launcher/icons/", requireAuth(s.cfg, false, s.handleLauncherIcon))
+	// /logout is intentionally PUBLIC: a user with an expired or missing
+	// session must still be able to click "Logout" to fully clean up.
+	// The handler renders a static HTML orchestrator that fans logout
+	// across cloud + task + auth (see logout.go for the rationale).
+	mux.HandleFunc("/logout", s.handleLogout)
 	mux.HandleFunc("/launcher/apps", requireAdmin(s.cfg, s.withCSRF(s.handleLauncherAddApp)))
 	mux.HandleFunc("/launcher/apps/", requireAdmin(s.cfg, s.withCSRF(s.handleLauncherAppSub)))
 	mux.HandleFunc("/audit", requireAdmin(s.cfg, s.handleAudit))

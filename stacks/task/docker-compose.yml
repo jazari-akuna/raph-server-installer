@@ -74,7 +74,11 @@ services:
       VIKUNJA_AUTH_OPENID_REDIRECTURL: "https://task.${DOMAIN}/auth/openid/"
       VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_NAME: "Single Sign-On"
       VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_AUTHURL: "https://auth.${DOMAIN}"
-      VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_LOGOUTURL: "https://auth.${DOMAIN}/logout"
+      # Point at enrol's logout orchestrator instead of Authelia /logout
+      # directly — it fans out to Nextcloud + Authelia in one click. See
+      # stacks/enrol/logout.go for why this is browser-side: Authelia
+      # 4.39 has no OIDC SLO so cross-app cleanup can't happen server-side.
+      VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_LOGOUTURL: "https://enrol.${DOMAIN}/logout"
       VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_CLIENTID: "task"
       VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_CLIENTSECRET: "${VIKUNJA_OIDC_CLIENT_SECRET}"
       VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_SCOPE: "openid profile email"

@@ -122,6 +122,17 @@ access_control:
     - domain: 'task.${DOMAIN}'
       policy: 'bypass'
 
+    # enrol /logout — single-click cross-app logout orchestrator
+    # (stacks/enrol/logout.go). MUST bypass Authelia: a user with an
+    # already-expired session must still be able to click "Logout" and
+    # have it cleanly fan out to Nextcloud/Vikunja/Authelia. If we left
+    # this gated, /logout would 302 to the login page for an
+    # unauthenticated user, which defeats the point.
+    - domain: 'enrol.${DOMAIN}'
+      resources:
+        - '^/logout$'
+      policy: 'bypass'
+
     # enrol — landing page (apps launcher) is reachable by every
     # authenticated user; the management surfaces under it (/users,
     # /users/*, /peers, /audit, /launcher/apps) are gated INSIDE enrol
