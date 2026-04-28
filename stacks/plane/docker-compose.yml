@@ -101,10 +101,11 @@ services:
       - /srv/store/plane-files:/app/vikunja/files:rw
 
     healthcheck:
-      # Vikunja exposes /api/v1/info — JSON payload, no auth needed.
-      # wget --spider returns 0 on 2xx, non-zero otherwise. Alpine wget
-      # ships in the image. busybox wget --quiet is acceptable.
-      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3456/api/v1/info"]
+      # Vikunja's image is distroless — no shell, no wget. Use the binary's
+      # own `vikunja healthcheck` subcommand which exits 0 on a working API.
+      # Side effect: it runs DB migrations on every probe, which is a no-op
+      # on a healthy stack but adds ~50 ms; tolerable at 30 s interval.
+      test: ["CMD", "/app/vikunja/vikunja", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 5
