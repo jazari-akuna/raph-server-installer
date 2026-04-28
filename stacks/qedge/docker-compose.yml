@@ -46,12 +46,14 @@ services:
       # 443/UDP only. Do NOT add a TCP mapping here — NPM owns 443/TCP.
       - "443:443/udp"
     volumes:
-      # Server config (rendered from ./config.yaml.template with the password
-      # from .env — see ./README.md). Read-only.
+      # Server config + TLS material in one bind (./config holds both
+      # config.yaml AND tls/{fullchain,privkey}.pem, the latter as
+      # symlinks into NPM's letsencrypt live/ dir). Single mount avoids
+      # docker's "can't mkdir mountpoint inside :ro bind" failure.
       - ./config:/etc/hysteria:ro
-      # TLS material. These are symlinks on the host into NPM's letsencrypt
-      # live/ directory. Read-only.
-      - ./tls:/etc/hysteria/tls:ro
+      # NPM's letsencrypt store, exposed read-only so the symlinks under
+      # ./config/tls resolve inside the container.
+      - /opt/stacks/ingress/letsencrypt:/opt/stacks/ingress/letsencrypt:ro
     networks:
       - edge
     mem_limit: 2g

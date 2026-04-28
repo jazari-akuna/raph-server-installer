@@ -159,3 +159,26 @@ If TCP-via-tunnel is much slower than UDP-via-tunnel at the same bitrate, suspec
 - `apt-cache policy amneziawg-linux-kmod` — confirms whether the prebuilt kmod is published for the running ABI.
 - `grep -o 'aes' /proc/cpuinfo` — sanity check; should print `aes`.
 - Real-world `iperf3` numbers from a peer in mainland CN (the latency profile dominates beyond what tuning can fix).
+
+## VPS uplink ceiling (the hard limit nothing in this doc can fix)
+
+Everything above tunes overhead inside the tunnel. None of it can move the ceiling set by the **carrier route from the VPS to the peer's network** — and on commodity HK plans, that ceiling is in the single-to-low-double-digit Mbps for mainland-China destinations.
+
+Measured 2026-04-28 from a Layerstack standard HK plan, `speedtest --server <id>` against major CN carriers:
+
+| Test server                 | VPS → server (peer download) | VPS ← server (peer upload) | RTT  |
+|-----------------------------|------------------------------|----------------------------|------|
+| Beijing Unicom (43752)      | **7.7 Mbps**                 | 44 Mbps                    | 80 ms|
+| Shanghai Unicom (24447)     | **7.6 Mbps**                 | 67 Mbps                    | 66 ms|
+| Hangzhou Telecom (59386)    | **14.7 Mbps**                | 110 Mbps                   | 68 ms|
+| Auto-pick (regional/HK/SG)  | 506 Mbps                     | 822 Mbps                   | 1 ms |
+
+Note the asymmetry: outbound from this VPS to mainland CN is throttled to the 7–15 Mbps range; inbound is roughly an order of magnitude higher. That asymmetry is exactly what an in-tunnel iperf3 from a CN peer will show (the peer's "download" travels the throttled VPS→CN direction, the peer's "upload" travels the unconstrained CN→VPS direction).
+
+If you're seeing tunnel throughput in this range and the in-VPS speedtest above gives the same numbers, **stop tuning the tunnel** — protocol, MTU, sysctl, junk parameters, and even switching from `gw0` to `qedge` (Hysteria2) will all converge on the same ~15 Mbps because the bottleneck is the wire, not the tunnel. The fix is provider-side:
+
+- **Same provider, premium tier.** Layerstack, Bandwagon, Vultr etc. sell "China-optimized" / CN2-GIA / CMI-routed plans for a 2-3× price uplift; these clear the 100+ Mbps barrier to CN.
+- **Different provider with CN-direct transit.** Bandwagon CN2 GIA and similar SKUs are widely benchmarked.
+- **Frontend in a CN-friendly region.** Keep the stack on the cheap VPS, add a thin proxy on a CN2-routed box. Adds RTT and a moving part.
+
+Astrill and similar commercial VPNs hit 200+ Mbps to the same peers because they buy premium CN transit in bulk. That's the mechanism, not protocol cleverness.

@@ -45,8 +45,15 @@ host/ssh/sshd_config.d/99-hardening.conf
 # render-templates.sh).
 stacks/authelia/snippets/authelia-authrequest.conf
 
-# Rendered qedge config (template -> real file done by render-templates.sh).
+# Rendered qedge state. The runbook mounts ./config (config.yaml + tls/
+# symlinks) into the container, and ./.env holds QEDGE_PASSWORD. None of
+# these may be committed — they hold the auth password and reference NPM
+# letsencrypt material via symlink. /opt/stacks is a symlink to this dir,
+# which is why the rendered files land here at all.
 stacks/qedge/config.yaml
+stacks/qedge/config/
+stacks/qedge/tls/
+stacks/qedge/.env
 
 # enrol: persisted runtime data (not produced under repo, but defensive)
 stacks/enrol/data/

@@ -21,80 +21,63 @@ You bring `qedge` up when, **and only when**, all of the following hold:
 
 If any of those is false: don't switch. The default daily driver is `gw0`.
 
-## Cert provisioning (one-time, must run before first start)
+## One-time setup (config render + cert symlinks)
 
-Hysteria2 needs a cert + key on disk. We reuse the wildcard
-`*.${DOMAIN}` cert that NPM (`ingress`) already provisioned
-via OVH DNS-01. NPM stores certs in numbered live/ directories under
-`/opt/stacks/ingress/letsencrypt/live/npm-N/` (the `N` is whatever number NPM
-assigned the cert when you created it in the admin UI — typically `npm-1`
-for the first wildcard, but check before you symlink).
+Both the rendered Hysteria2 config and the TLS material live under a
+single `./config/` bind, mounted into the container at `/etc/hysteria`.
+Why one bind and not two: docker can't `mkdir` a child mountpoint
+(`/etc/hysteria/tls`) inside a `:ro` parent bind, so the historical
+two-mount layout (`./config:/etc/hysteria:ro` + `./tls:/etc/hysteria/tls:ro`)
+fails container start with `read-only file system`. Putting `tls/` *under*
+`./config/` collapses to one mount and works cleanly. The compose file
+also mounts NPM's letsencrypt live store read-only at the same host path
+inside the container so the cert symlinks resolve.
 
 On the VPS, as root:
 
 ```bash
 cd /opt/stacks/qedge
 
-# 1. find the right NPM cert directory (the one whose fullchain.pem covers
-#    *.${DOMAIN} — usually the first wildcard you made)
-ls -la /opt/stacks/ingress/letsencrypt/live/
-
-# 2. confirm the cert is the wildcard you expect
-openssl x509 -in /opt/stacks/ingress/letsencrypt/live/npm-1/fullchain.pem \
-    -noout -text | grep -E 'Subject:|DNS:'
-
-# 3. create ./tls/ and symlink the cert pair in.
-#    Replace `npm-1` with the actual directory name from step 1.
-install -d -m 0750 ./tls
-ln -sfn /opt/stacks/ingress/letsencrypt/live/npm-1/fullchain.pem ./tls/fullchain.pem
-ln -sfn /opt/stacks/ingress/letsencrypt/live/npm-1/privkey.pem   ./tls/privkey.pem
-
-# 4. sanity check that the symlinks resolve (readable by the container's
-#    UID — Hysteria runs as root in the upstream image, so plain root-readable
-#    is fine)
-ls -lL ./tls/
-```
-
-NPM auto-renews the cert in place; the symlinks keep pointing at the live
-files, so `qedge` always picks up the renewed cert at next start. No cron
-needed on the qedge side.
-
-If you ever rotate the wildcard cert in NPM and it lands in a NEW numbered
-dir (`npm-2`, etc.), re-point the symlinks and `docker compose restart
-qedge` (only if the stack is currently up — usually it isn't).
-
-## Initial config render
-
-The `config.yaml.template` in this directory uses `${QEDGE_PASSWORD}` as a
-placeholder for the auth password. Render it once, on the VPS:
-
-```bash
-cd /opt/stacks/qedge
-
-# 1. copy .env.example to .env and fill in QEDGE_PASSWORD
+# 1. mint the auth password into .env
 cp .env.example .env
 chmod 0600 .env
-# edit .env, set QEDGE_PASSWORD=$(openssl rand -base64 32)
+sed -i "s|^QEDGE_PASSWORD=.*|QEDGE_PASSWORD=$(openssl rand -base64 32)|" .env
 
-# 2. render the live config
+# 2. render the live config from the template
 install -d -m 0750 ./config
 set -a; . ./.env; set +a
 envsubst < config.yaml.template > ./config/config.yaml
 chmod 0640 ./config/config.yaml
-
-# 3. sanity check — no unsubstituted ${...} should remain
 grep -F '${' ./config/config.yaml || echo "config render OK"
+
+# 3. find the wildcard cert dir (NPM uses either live/${DOMAIN}/ or
+#    live/npm-N/ depending on how the cert was created)
+ls -la /opt/stacks/ingress/letsencrypt/live/
+NPM_LIVE=/opt/stacks/ingress/letsencrypt/live/<your-cert-dir>
+openssl x509 -in "${NPM_LIVE}/fullchain.pem" -noout -text \
+    | grep -E 'Subject:|DNS:'
+
+# 4. symlink the cert pair under ./config/tls/. NPM auto-renews in place,
+#    so the symlinks always point at the current cert; no watcher needed.
+install -d -m 0750 ./config/tls
+ln -sfn "${NPM_LIVE}/fullchain.pem" ./config/tls/fullchain.pem
+ln -sfn "${NPM_LIVE}/privkey.pem"   ./config/tls/privkey.pem
+ls -lL ./config/tls/
 ```
 
-Re-run the render step any time you rotate `QEDGE_PASSWORD` (see "Rotating
-the password" below).
+If the wildcard cert ever lands in a different live/ dir, re-point the
+symlinks and `docker compose restart qedge` (only if the stack is up —
+usually it isn't).
+
+Re-run step 2 any time you rotate `QEDGE_PASSWORD` (see "Rotating the
+password" below).
 
 ## Switchover procedure: gw0 → qedge
 
-Run as root on the VPS. Both steps are required: leaving `gw0` up while
-`qedge` is up is fine on different ports, but the whole point of bringing
-`qedge` up is that `gw0` isn't working — stop it so peers don't waste
-reconnect attempts on a dead path.
+Run as root on the VPS. Both steps are required, and order matters:
+`gw0` and `qedge` both bind UDP/443 (gw0 was moved off 51820 to dodge
+non-443 UDP shaping), so only one can be up at a time. Stop `gw0` first,
+then start `qedge`.
 
 ```bash
 # 1. stop the primary gateway
