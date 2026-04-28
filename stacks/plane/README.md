@@ -1,353 +1,138 @@
-# plane
+# plane — runbook
 
-Project tracker for the shared VPS — issues, projects, workspaces,
-attachments. Internally this is [Plane](https://github.com/makeplane/plane)
-v0.27.1; externally and in all paths/names it is `plane`. Reachable
-only via `ingress` at `plane.${DOMAIN}`. There are no public port
-bindings on this stack.
+Project tracker for the shared VPS. Externally and in all
+paths/stack-names it is `plane`. Internally this is
+[Vikunja](https://vikunja.io) (`vikunja/vikunja:2.3.0`) — the camouflage
+name (`plane`) is unchanged from the previous deploy. Reachable at
+`https://plane.${DOMAIN}`. Auth is delegated to Authelia via OIDC
+(no local accounts).
 
-This replaces Jira / Linear in the operator's workflow. Like the
-`cloud` stack, auth is delegated to Authelia via OIDC (Plane owns its
-own session); like all other stacks, persistent state lives on
-`/srv/store/plane-*` bind-mounts so backup is one rsync + one pg_dump.
+## Why Vikunja (and not Plane)
 
-> **Release pinning.** This file was authored against Plane **v0.27.1**
-> (released 2025-07-04). The latest stable release at any moment can
-> be checked at <https://github.com/makeplane/plane/releases>; if you
-> bump the tag here, also check the upstream `deployments/cli/community/
-> docker-compose.yml` for service-composition drift, and snapshot the
-> DB + bind-mounts before pulling. See "Upgrading" below.
+We tried Plane v0.27.1 first. Source-code probe of the running
+containers showed Plane only ships hardcoded OAuth providers —
+Google / GitHub / GitLab — and has zero generic OIDC support. Plane
+v1.3.0 adds Gitea but still no OIDC. With Authelia as our IdP, no
+generic OIDC = no SSO. Vikunja's OIDC config (`auth.openid.providers.*`)
+is exactly what we need: generic, doc'd, callback at
+`/auth/openid/<provider_key>`. See ADR-009.
 
-## What this is
+## Stack composition
 
-Fourteen containers on the existing `edge` Docker network — 13 Plane
-services + 1 (`plane-mc`) that we add to seed the MinIO bucket on
-first up:
+| Service | Image | Listens on | Bind mount |
+|---|---|---|---|
+| `plane-app` | `vikunja/vikunja:2.3.0` | `:3456` | `/srv/store/plane-files` → `/app/vikunja/files` (uid 1000) |
+| `plane-db` | `postgres:16.6-alpine` | `:5432` (internal) | `/srv/store/plane-db` → `/var/lib/postgresql/data` (uid 70) |
 
-| Service          | Image                                          | Role                                                    |
-| ---              | ---                                            | ---                                                     |
-| `plane-proxy`    | `makeplane/plane-proxy:v0.27.1`                | Caddy fan-out (web/admin/space/live/api) — what NPM hits|
-| `plane-web`      | `makeplane/plane-frontend:v0.27.1`             | Next.js end-user UI (workspaces, projects, issues)      |
-| `plane-admin`    | `makeplane/plane-admin:v0.27.1`                | Next.js god-mode panel (instance admin, OIDC config)    |
-| `plane-space`    | `makeplane/plane-space:v0.27.1`                | Next.js public-share UI (read-only project links)       |
-| `plane-live`     | `makeplane/plane-live:v0.27.1`                 | WebSocket / live-collaboration server                   |
-| `plane-api`      | `makeplane/plane-backend:v0.27.1`              | Django REST API + gunicorn (the big one, ~300 MB RSS)   |
-| `plane-worker`   | `makeplane/plane-backend:v0.27.1`              | Celery default queue (concurrency 1)                    |
-| `plane-beat`     | `makeplane/plane-backend:v0.27.1`              | Celery beat scheduler (periodic tasks)                  |
-| `plane-migrator` | `makeplane/plane-backend:v0.27.1`              | One-shot Django schema migrator (`restart: no`)         |
-| `plane-db`       | `postgres:15.7-alpine`                         | Postgres 15 (Plane requires PG 14-16)                   |
-| `plane-redis`    | `valkey/valkey:7.2.11-alpine`                  | Cache + Celery result backend (broker is RabbitMQ)      |
-| `plane-mq`       | `rabbitmq:3.13.6-management-alpine`            | Celery broker (durable task queue)                      |
-| `plane-minio`    | `minio/minio:RELEASE.2024-12-18T13-15-44Z`     | S3-compatible attachment store                          |
-| `plane-mc`       | `minio/mc:RELEASE.2024-12-18T13-15-44Z`        | One-shot bucket-init job (ours, NOT upstream)           |
+NPM proxies `plane.${DOMAIN}` → `plane-app:3456` over the `edge` network.
+Authelia rule for `plane.${DOMAIN}` is **bypass** — Vikunja owns its
+session.
 
-NPM terminates TLS upstream and proxies `plane.${DOMAIN}` →
-`plane-proxy:80`, which fans out internally. Nothing is published to
-the host (we strip upstream's `ports: 80/443` block — NPM is the
-edge).
+## Deploy runbook
 
-## Auth — Authelia OIDC (manual one-time bootstrap)
-
-Auth is delegated to Authelia using **OIDC**. NPM does not inject
-`Remote-User` or `X-Forward-Auth-Secret` for this stack; Plane owns
-its own session.
-
-Plane has **no env-var path** to bootstrap OIDC — by deliberate
-upstream design, the operator visits `/god-mode/` first and pastes
-the OIDC config into the UI. See ADR-009 in
-`/opt/raph-server-installer/docs/architecture-decisions.md` for the
-rationale.
-
-### First-time setup (manual, after `docker compose up -d`)
-
-1. **Visit `https://plane.${DOMAIN}/god-mode/` in a browser.**
-   Sign up with the operator's email + a temporary password. **The
-   first user to sign up at this URL becomes instance admin** —
-   first-user-wins. Do this **immediately** after the first compose-up;
-   see "First-user-wins footgun" below.
-
-2. **Paste OIDC config** at
-   `https://plane.${DOMAIN}/god-mode/authentication/oidc/`:
-
-   | Field                | Value                                               |
-   | ---                  | ---                                                 |
-   | IdP Display Name     | `Authelia`                                          |
-   | Client ID            | `plane`                                             |
-   | Client Secret        | contents of `/etc/raph-installer/oidc-plane-client-secret` (mode 0600 root) |
-   | Authorize URL        | `https://auth.${DOMAIN}/api/oidc/authorization`     |
-   | Token URL            | `https://auth.${DOMAIN}/api/oidc/token`             |
-   | User Info URL        | `https://auth.${DOMAIN}/api/oidc/userinfo`          |
-   | Auto user signup     | **ON** (so first-time Authelia logins auto-provision a Plane account) |
-
-   Save. The server-side check happens immediately; if any field is
-   wrong (especially Client Secret or one of the URLs) the save itself
-   fails with an error toast.
-
-3. **Verify in a private window.** `https://plane.${DOMAIN}/` →
-   "Sign in with Authelia" → bounces to Authelia → log in → land in
-   Plane as the same Authelia user.
-
-4. **Generate the admin API token** for enrol's admin page (Wave B):
-   `/god-mode/workspace/api-tokens/` → "Create personal access token"
-   for a service-account user (NOT the operator's own account — the
-   token grants full Plane API access). Write the token to
-   `/etc/raph-installer/plane-admin-token` (mode 0600 root).
-
-### First-user-wins footgun — read this
-
-If `plane.${DOMAIN}` is reachable publicly **before** the operator
-claims `/god-mode/`, an attacker who finds the URL gets instance
-admin instead. Concretely: any random visitor to `/god-mode/` between
-"first compose-up" and "operator finishes signup" wins.
-
-Mitigation, in order of paranoia:
-
-- **Default mitigation (do this every time).** Complete steps 1-3
-  above **in the same deploy session** as the first
-  `docker compose up`. The window of exposure is then ~minutes, not
-  hours.
-
-- **Belt-and-braces (do this if the operator might not be at the
-  keyboard within minutes).** Temporarily gate `plane.${DOMAIN}` at
-  the Authelia layer with `policy: one_factor` instead of `bypass` for
-  the first 24 h, then flip to `bypass` after god-mode is claimed and
-  OIDC is configured. Edit
-  `stacks/authelia/configuration.yml.template`, find the
-  `plane.${DOMAIN}` access rule, change `policy: bypass` →
-  `policy: one_factor`, re-render templates, restart Authelia. After
-  step 3 verifies, change it back. (This breaks the OIDC dance during
-  the gated window — that's intentional; the operator is the only one
-  who should be there.)
-
-### No-OIDC fallback
-
-If Authelia is down, the bootstrap admin can still sign in at
-`/god-mode/instance-admin/sign-in` with the email + password set in
-step 1. This is Plane's documented escape hatch — DO NOT delete the
-bootstrap admin account.
-
-## Where data lives
-
-All persistent state is on **external** bind mounts under
-`/srv/store/plane-*` on the host (NOT docker named volumes), so backup
-is a single rsync of the parent directory plus a `pg_dump` snapshot,
-per ADR-001.
-
-| Host path                | Container mount                  | Service(s)                                    | uid:gid     |
-| ---                      | ---                              | ---                                           | ---         |
-| `/srv/store/plane-db`    | `/var/lib/postgresql/data`       | `plane-db`                                    | 70:70       |
-| `/srv/store/plane-minio` | `/export`                        | `plane-minio` and `plane-mc`                  | 1000:1000   |
-| `/srv/store/plane-mq`    | `/var/lib/rabbitmq`              | `plane-mq`                                    | 100:101     |
-| `/srv/store/plane-logs`  | `/code/plane/logs`               | `plane-api` `plane-worker` `plane-beat` `plane-migrator` | 1001:1001 |
-
-`bootstrap-phase2.sh` creates these directories with the correct
-ownership before this stack comes up. **Verify the minio uid/gid on
-the actual image before chowning** — `docker run --rm
-minio/minio:RELEASE.2024-12-18T13-15-44Z id` to check; the default is
-1000:1000 but minio has occasionally bumped it across releases.
-
-`plane-redis` (Valkey) state is **intentionally not persisted** — it's
-cache + Celery result backend, both safe to lose on restart. The
-durable task queue lives on `plane-mq` (RabbitMQ).
-
-### Backup recipe (laptop-side, over SSH)
-
-Mirror of the cloud stack's recipe, with three rsync targets instead
-of three:
+### 1. Generate secrets
 
 ```sh
-ssh vps "docker exec plane-db pg_dump -U plane plane" \
-  > snapshots/$(date +%F)-plane-db.sql
-rsync -aAXH --delete vps:/srv/store/plane-minio/ snapshots/plane-minio/
-rsync -aAXH --delete vps:/srv/store/plane-mq/    snapshots/plane-mq/
-rsync -aAXH --delete vps:/srv/store/plane-logs/  snapshots/plane-logs/
+sudo install -d -m 0755 -o 1000 -g 1000 /srv/store/plane-files
+sudo install -d -m 0700 /srv/store/plane-db
+sudo chown 70:70 /srv/store/plane-db
+
+# DB password, JWT signing key (each used once at deploy time).
+PG_PWD="$(openssl rand -base64 32 | tr -d '\n=+/')"
+JWT_SECRET="$(openssl rand -base64 64 | tr -d '\n')"
+
+# OIDC client secret: matched by hash inside Authelia.
+OIDC_SECRET="$(cat /etc/raph-installer/oidc-plane-client-secret)"
+
+sudo tee /opt/stacks/plane/.env >/dev/null <<EOF
+DOMAIN=${DOMAIN}
+POSTGRES_PASSWORD=$PG_PWD
+VIKUNJA_JWT_SECRET=$JWT_SECRET
+VIKUNJA_OIDC_CLIENT_SECRET=$OIDC_SECRET
+EOF
+sudo chmod 0600 /opt/stacks/plane/.env
 ```
 
-Restore is the reverse, plus `psql -U plane < snapshot.sql`. Order:
+### 2. Bring up
 
 ```sh
-# On the new VPS, with the plane stack down:
-rsync -aAXH --delete snapshots/plane-minio/ vps:/srv/store/plane-minio/
-rsync -aAXH --delete snapshots/plane-mq/    vps:/srv/store/plane-mq/
-ssh vps "docker compose -f /opt/stacks/plane/docker-compose.yml up -d plane-db"
-ssh vps "docker exec -i plane-db psql -U plane -d plane" < snapshots/<date>-plane-db.sql
-ssh vps "docker compose -f /opt/stacks/plane/docker-compose.yml up -d"
+cd /opt/stacks/plane
+docker compose up -d
+docker compose logs -f plane-app   # wait for "ready to handle requests"
 ```
 
-The RabbitMQ rsync is technically optional — Plane will rebuild empty
-queues on boot and Celery's idempotent task design tolerates losing
-in-flight jobs. Including it preserves any in-flight Celery jobs
-across restore, which matters for long-running attachment uploads
-that haven't finished post-processing.
+### 3. First login (creates the operator's Vikunja account from OIDC)
 
-## Resource budget — the constraint that drives everything
+Browse `https://plane.${DOMAIN}/`. Vikunja shows a single button:
+**Single Sign-On**. Click → Authelia portal → log in / 2FA → bounced
+back to Vikunja, automatically logged in as your OIDC user.
 
-Target per ADR-008: ≤ 2.0 GB total RSS across all containers under
-steady load on a 2 GB VPS, ≤ 2.2 GB under burst, with 4 GB swap to
-absorb spikes.
+The first OIDC user that logs in is **NOT** automatically an admin —
+Vikunja has no built-in admin role beyond creator-of-thing. To grant
+admin powers (delete-anyone-account, change site settings):
 
-This stack is the biggest single contributor on the box. Tuned
-budget:
+```sh
+docker exec -it plane-db psql -U vikunja -d vikunja \
+  -c "UPDATE users SET status = 1, is_active = true WHERE username = '<your-username>';"
+```
 
-| Service        | mem_limit | Typical RSS | Knob                                                      |
-| ---            | ---       | ---         | ---                                                       |
-| `plane-api`    | 512m      | ~300 MB     | `GUNICORN_WORKERS=1`                                      |
-| `plane-worker` | 384m      | ~200 MB     | `CELERY_WORKER_CONCURRENCY=1`                             |
-| `plane-beat`   | 192m      | ~120 MB     | (no knob — beat scheduler RSS is what it is)              |
-| `plane-web`    | 192m      | ~120 MB     | (Next.js prod build; not tunable)                         |
-| `plane-admin`  | 192m      | ~120 MB     | "                                                         |
-| `plane-space`  | 192m      | ~120 MB     | "                                                         |
-| `plane-live`   | 192m      | ~120 MB     | "                                                         |
-| `plane-db`     | 256m      | ~80 MB      | `shared_buffers=64MB max_connections=50` via `command:`   |
-| `plane-mq`     | 192m      | ~120 MB     | `RABBITMQ_VM_MEMORY_HIGH_WATERMARK=0.4`                   |
-| `plane-minio`  | 192m      | ~80 MB      | (default is fine on a single-bucket workload)             |
-| `plane-redis`  | 96m       | ~30 MB      | `--maxmemory 64mb --maxmemory-policy allkeys-lru`         |
-| `plane-proxy`  | 64m       | ~30 MB      | (Caddy at idle; not tunable)                              |
-| `plane-mc`     | 128m      | (one-shot)  | (exits within seconds of plane-minio becoming healthy)    |
-| `plane-migrator` | 128m    | (one-shot)  | (exits within seconds of migrations completing)           |
-| **Total tuned** | -        | **~1.45 GB**| Steady state under light load                             |
+Vikunja's permission model is per-project / per-team — there is no
+global admin in the Nextcloud sense. Site-level settings are
+controlled by env vars in `docker-compose.yml`, not a UI.
 
-Combined with the cloud stack (~440 MB) + system baseline (~320 MB)
-that's **~2.21 GB / 2 GB** — over by ~200 MB. The 4 GB swap
-configured by the bootstrap absorbs the overage; on a Layerstack VPS
-swap-on-disk is fine for the brief peaks (issue-creation,
-attachment-upload).
+## Backups
 
-### Documented fallback if Plane OOMs in steady state
+Two artefacts:
 
-Drop the `plane-mq` service entirely and route Celery through
-`plane-redis`. Saves ~120 MB at the cost of broker durability for
-long workflows (long uploads, multi-step webhook fan-out can be lost
-on a redis restart). To switch:
-
-1. Comment out the `plane-mq` service block in `docker-compose.yml`.
-2. Remove the `plane-mq` healthy depends_on entries from `plane-api`,
-   `plane-worker`, `plane-beat`, `plane-migrator`.
-3. Set `CELERY_BROKER_URL=redis://plane-redis:6379/1` in `.env` (note
-   `/1` = a different DB number than the result-backend, which uses
-   `/0`).
-4. Override `AMQP_URL` to the same Redis URL so the api code path that
-   peeks broker state doesn't try to dial RabbitMQ:
-   `AMQP_URL=redis://plane-redis:6379/1`.
-5. `docker compose up -d` — workers will reconnect to redis.
-
-Reverse the steps to switch back.
-
-## Maintenance
-
-### Required env vars
-
-The stack will refuse to start without these set in
-`/opt/stacks/plane/.env` (each has a `:?` validator in
-`docker-compose.yml`):
-
-- `POSTGRES_PASSWORD` — random, generated by bootstrap-phase2.sh
-- `RABBITMQ_DEFAULT_PASS` — random, generated by bootstrap-phase2.sh
-- `AWS_ACCESS_KEY_ID` — defaults to `plane`; override only if sharing
-- `AWS_SECRET_ACCESS_KEY` — random, generated by bootstrap-phase2.sh
-- `SECRET_KEY` — random Django secret, generated by bootstrap-phase2.sh
-- `LIVE_SERVER_SECRET_KEY` — random, generated by bootstrap-phase2.sh
-
-Optional with sensible defaults: `APP_DOMAIN`, `WEB_URL`,
-`CORS_ALLOWED_ORIGINS`, `POSTGRES_USER`, `POSTGRES_DB`,
-`RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_VHOST`, `AWS_S3_BUCKET_NAME`,
-`AWS_REGION`, `API_KEY_RATE_LIMIT`, `CELERY_WORKER_CONCURRENCY`,
-`GUNICORN_WORKERS`, `FILE_SIZE_LIMIT`. See `.env.example`.
-
-### Plane admin API token
-
-The `/etc/raph-installer/plane-admin-token` file (mode 0600 root)
-holds a personal access token generated in god-mode for a dedicated
-service-account Plane user. enrol reads it on startup and uses it to
-query Plane usage stats for the admin page (workspaces, projects,
-issue counts per user, attachment bytes per user).
-
-To generate (one-time, after first OIDC-login is working):
-
-1. In the Plane web UI, create a service-account workspace member
-   (e.g. `enrol-bot@${DOMAIN}`) — admin role on every workspace whose
-   stats you want surfaced in the admin page.
-2. Sign into Plane as that user.
-3. Workspace settings → "API tokens" → "Add API token".
-4. Copy the token (shown ONCE; Plane does not store it server-side
-   in retrievable form).
-5. On the VPS:
+1. **Postgres dump** — authoritative.
    ```sh
-   echo -n '<TOKEN>' > /etc/raph-installer/plane-admin-token
-   chmod 0600     /etc/raph-installer/plane-admin-token
-   chown root:root /etc/raph-installer/plane-admin-token
+   docker exec plane-db pg_dump -U vikunja -d vikunja \
+     > /srv/store/plane-db-backup/plane-$(date -u +%Y%m%dT%H%M%SZ).sql
    ```
-6. `docker compose restart enrol` so it picks up the new token.
+2. **Files bind** — `/srv/store/plane-files` (attachments + avatars).
+   Single rsync target.
 
-To rotate: same procedure, then revoke the old token in the same UI.
+Restic (or whatever wraps the backups) should run the `pg_dump` first,
+then take the rsync of `/srv/store/plane-{files,db-backup}`. The raw
+`/srv/store/plane-db` directory is also captured but treated as a
+safety-net only — restoring from a hot data dir is fragile.
 
-### Upgrading Plane
+See `docs/backups.md` for the full host-level backup pipeline.
 
-Pinned to a specific tag per ADR-006 (NEVER `latest` / `stable`).
-Upstream Plane has historically shipped breaking changes under
-`stable`, including env-var renames and god-mode flow changes
-(v0.27 → v0.28 was one such break) — the pinned tag turns surprise
-3am pages into planned upgrade windows.
+## Upgrade procedure
 
-Quarterly cadence (see `docs/maintenance.md`):
+Vikunja follows semver. Upgrade by image-tag bump only:
 
-```sh
-# 1. Snapshot first — non-negotiable.
-ssh vps "docker exec plane-db pg_dump -U plane plane" > snapshots/pre-upgrade-plane-db.sql
-rsync -aAXH --delete vps:/srv/store/plane-minio/ snapshots/pre-upgrade-plane-minio/
+1. Snapshot Postgres: `docker exec plane-db pg_dump ... > snapshot.sql`.
+2. Edit `image: vikunja/vikunja:2.3.0` → newer pinned tag.
+3. `docker compose pull plane-app && docker compose up -d plane-app`.
+4. Vikunja runs DB migrations on startup; tail `docker compose logs -f
+   plane-app` until "ready to handle requests" appears again.
+5. Roll back: `docker compose down plane-app; <restore image tag>;
+   restore Postgres dump if migrations were destructive`.
 
-# 2. Check the changelog at https://github.com/makeplane/plane/releases
-#    for the new tag, especially BREAKING-CHANGE markers.
+Stay on a pinned tag — never `latest` or `unstable`. ADR-006.
 
-# 3. Edit stacks/plane/docker-compose.yml — bump every makeplane/plane-*
-#    image from v0.27.1 to the new tag. Keep them in lockstep — Plane
-#    requires the frontends, api, and proxy be on the same release.
-#    Re-check upstream's deployments/cli/community/docker-compose.yml
-#    for service-composition drift (new services added, env-var
-#    renames).
+## Resource budget
 
-# 4. Pull + recreate.
-ssh vps "cd /opt/stacks/plane && docker compose pull && docker compose up -d"
+Vikunja is a small Go binary. Steady state:
+- `plane-app` ~80 MB
+- `plane-db` ~120 MB
 
-# 5. plane-migrator runs automatically (depends_on
-#    service_completed_successfully gates api/worker/beat on it).
-#    Watch its logs:
-ssh vps "docker logs -f plane-migrator"
+Total ~200 MB, well within the per-stack envelope. ADR-008.
 
-# 6. Smoke: open plane.${DOMAIN}, verify SSO + create-issue +
-#    upload-attachment all work. Run the enrol admin page and confirm
-#    the Plane usage columns still populate.
-```
+## What changed vs. the prior Plane deploy
 
-If the migrator fails or Plane refuses to come up clean, the rollback
-is: revert the `docker-compose.yml` tag bump, restore the pre-upgrade
-DB dump (`psql < snapshots/pre-upgrade-plane-db.sql`), restore the
-minio bind-mount, `docker compose up -d`. The bind-mount-based backup
-model makes this fast — no `docker volume` recovery dance.
+- Image swap: `makeplane/plane-*` (14 services) → `vikunja/vikunja` + Postgres (2 services).
+- State paths: `/srv/store/plane-{db,minio,mq,logs}` → `/srv/store/plane-{files,db}`. The old paths were wiped during the swap.
+- OIDC callback: `/auth/oidc/callback/` → `/auth/openid/authelia`. Authelia's `redirect_uris` was updated; the OIDC clientid stays `plane` for camouflage.
+- No more RabbitMQ, MinIO, MinIO-mc, Valkey/Redis, plane-proxy, plane-frontends. Vikunja serves the frontend itself; attachments go on the local filesystem; no message queue needed.
+- The previous deploy had a god-mode admin claim step. Vikunja has none — first OIDC user just lands as a normal user; promote via SQL above.
 
-### MinIO bucket integrity check
+## Things deliberately NOT enabled
 
-```sh
-docker exec plane-mc mc alias set local http://plane-minio:9000 \
-  "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
-docker exec plane-mc mc ls local/uploads
-docker exec plane-mc mc admin info local
-```
-
-(The `plane-mc` container exits after first-up's bucket-create; you
-need to `docker compose run --rm plane-mc sh` to get an interactive
-shell, or just run the same commands inside `plane-minio` itself with
-`mc` installed there.)
-
-## Layout
-
-```
-stacks/plane/
-├── docker-compose.yml         # 14 services, all on `edge`
-├── .env.example               # documents every env var
-└── README.md                  # this file
-```
-
-No `conf/` subdirectory — Plane's bundled `plane-proxy` (Caddy) does
-not need any config-file overrides for our deployment (we don't use
-its built-in TLS / ACME paths because NPM is the TLS terminator).
+- **Local username/password accounts** (`VIKUNJA_AUTH_LOCAL_ENABLED=false`). Every account is OIDC, so users live in Authelia's `users_database.yml` and join Vikunja on first login.
+- **Public registration**. Even with OIDC enabled, this is a defense-in-depth toggle.
+- **Vikunja TOTP**. Authelia handles 2FA at the IdP layer.
+- **Mailer**. No SMTP wired in; password resets / email reminders are off. (OIDC-only auth means there's no password to reset anyway.)
+- **Typesense / search backend**. Vikunja falls back to Postgres full-text. Add Typesense later only if search latency bites.

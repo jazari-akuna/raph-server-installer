@@ -1,357 +1,372 @@
-// plane_client.go — typed Go client for the Plane REST API.
+// plane_client.go — read-only "client" for the plane stack (Vikunja).
 //
-// Mirrors the shape of npm_client.go: stdlib-only, SSRF-safe dialer,
-// constructor takes baseURL + bearer token. Used by the admin /users
-// page to surface per-user issue counts + attachment bytes alongside
-// the Nextcloud quota numbers.
+// Vikunja's REST API is per-user authenticated and lacks an admin
+// "list-all-users / show-tasks-of-user-X" endpoint suitable for the admin
+// /users page. Rather than provisioning a privileged service-account JWT
+// inside Vikunja and rewriting the storage page around per-call auth,
+// we read the same data straight from Vikunja's Postgres via
+// `docker exec plane-db psql`. This mirrors the cloud integration which
+// uses `docker exec cloud occ` for the same reason: enrol already has the
+// docker socket and the plane stack already exposes its DB to admin
+// inspection by virtue of being on the same host.
 //
-// IMPORTANT: this client is **stub-with-graceful-fallback** at the
-// moment Wave B lands. Plane itself isn't deployed until Wave C, and
-// the operator-issued personal-access token at
-// /etc/raph-installer/plane-admin-token is created by the operator
-// post-godmode-claim. Until both exist:
+// Pattern:
+//   - PlaneClient holds the docker container name + db credentials path.
+//   - UserStats(email) returns (taskCount, attachmentBytes, lastActivity).
+//   - Silent-fallback on every failure mode (no container, no DB, no user,
+//     password missing, query timeout) → zero values + nil error. The admin
+//     /users page renders "—" for any zero value.
 //
-//   - NewPlaneClient returns a non-nil client with token=="" set.
-//   - Every API method short-circuits to (zero-value, nil) when the
-//     bearer token is empty OR the upstream returns 4xx/5xx, so the
-//     admin page renders zeros (rendered as "—" by the template) instead
-//     of a 500.
+// Why "plane" everywhere despite the upstream being Vikunja: ADR-002
+// camouflage. External + internal naming is unified at "plane".
 //
-// Once Plane is up and the token is on disk, the same code paths
-// transparently start surfacing real numbers — no code change needed.
-//
-// TODO across the methods below: verify endpoint paths + response
-// shapes against the live Plane API at https://developers.plane.so/api-reference
-// once Wave C deploys the stack. Plane's open-source self-hosted API has
-// historically diverged from their cloud docs in minor ways (path
-// prefixes, pagination shape) so the first real-deploy QC will involve
-// printing raw response bodies and adjusting the typed structs below.
+// Threat model: enrol already has docker socket access (root-equivalent
+// on host, see stacks/enrol/docker-compose.yml banner). Reading
+// /opt/stacks/plane/.env for the DB password adds zero new attack
+// surface. The psql invocation is parameterised via PG environment
+// variables (no shell-quoted SQL), so user-controlled email values
+// cannot escape into the query string.
 
 package main
 
 import (
+	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
-	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 )
 
 // ---------------------------------------------------------------------------
 // types
 
-// PlaneUser is the subset of Plane's user record that the admin page
-// needs. Only ID + Email are load-bearing; the rest is preserved for
-// future panels (Display name, last-activity timestamp, etc.).
-type PlaneUser struct {
-	ID          string    `json:"id"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"display_name,omitempty"`
-	LastActive  time.Time `json:"last_active,omitempty"`
-}
-
-// Workspace is the subset of Plane's workspace record we render. Slug
-// is the load-bearing field — every other Plane API call scopes by
-// workspace slug.
-type Workspace struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Slug string `json:"slug"`
-}
-
-// ---------------------------------------------------------------------------
-// client
-
+// PlaneClient queries Vikunja's Postgres via docker exec. Zero value is
+// not usable — call NewPlaneClient.
 type PlaneClient struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	dbContainer string // e.g. "plane-db"
+	dbName      string // e.g. "vikunja"
+	dbUser      string // e.g. "vikunja"
+	envFile     string // path to /opt/stacks/plane/.env (POSTGRES_PASSWORD lives here)
+	timeout     time.Duration
+
+	// password is loaded lazily on first call and cached; the .env file
+	// is read every time but the file IO is cheap and avoids stale-cache
+	// surprises if the operator rotates the secret + restarts the stack
+	// without restarting enrol.
+	mu          sync.Mutex
+	cachedPwd   string
+	cachedPwdAt time.Time
 }
 
-// NewPlaneClient returns a client targeting baseURL (e.g.
-// "http://plane-proxy/api/v1" inside the docker network or
-// "https://plane.example.com/api/v1" externally). token is Plane's
-// personal-access bearer token issued from the god-mode admin panel;
-// an empty token is tolerated — every method short-circuits to zero
-// values + nil error when the token is missing, so the admin page
-// silently degrades to zeros instead of 500-ing.
+// NewPlaneClient constructs a client targeting the named container +
+// DB. envFile must contain `POSTGRES_PASSWORD=...` (the same file
+// docker-compose loads). Pass empty values to disable the client; every
+// method then short-circuits to zero values.
 //
-// The HTTP client is SSRF-hardened: it only allows private/loopback
-// addresses (Plane is on the docker network, never external).
-func NewPlaneClient(baseURL, token string) *PlaneClient {
+// Note the call signature has changed from Wave B (which took baseURL +
+// bearer-token) — Vikunja replaced Plane and the integration moved to
+// docker-exec + psql. Callers in main.go need updating accordingly.
+func NewPlaneClient(dbContainer, dbName, dbUser, envFile string) *PlaneClient {
+	envFile = strings.TrimSpace(envFile)
+	if envFile != "" {
+		// filepath.Clean("") returns "." — surface empty as empty so
+		// ready() can treat it correctly.
+		envFile = filepath.Clean(envFile)
+	}
 	return &PlaneClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   strings.TrimSpace(token),
-		http:    newPlaneHTTPClient(),
+		dbContainer: strings.TrimSpace(dbContainer),
+		dbName:      strings.TrimSpace(dbName),
+		dbUser:      strings.TrimSpace(dbUser),
+		envFile:     envFile,
+		timeout:     6 * time.Second,
 	}
 }
 
-// newPlaneHTTPClient mirrors newNPMHTTPClient: it only permits
-// private/loopback dial addresses. Plane lives on the docker bridge so
-// the admin client must not be coaxed into dialing public IPs.
-func newPlaneHTTPClient() *http.Client {
-	dialer := &net.Dialer{
-		Timeout:   5 * time.Second,
-		KeepAlive: 5 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return err
-			}
-			ip := net.ParseIP(host)
-			if ip == nil {
-				return fmt.Errorf("plane dialer: unresolvable address %q", address)
-			}
-			if !isPrivateIP(ip) {
-				return fmt.Errorf("plane dialer: refusing to dial public IP %s "+
-					"(plane API must be reached over the internal docker network)", ip)
-			}
-			return nil
-		},
-	}
-	return &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			DialContext:           dialer.DialContext,
-			TLSHandshakeTimeout:   5 * time.Second,
-			ResponseHeaderTimeout: 5 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			DisableKeepAlives:     true,
-		},
-	}
-}
-
-// ready reports whether the client has both a base URL and a token
-// configured. When false, every API method should short-circuit to
-// (zero, nil).
+// ready reports whether enough is configured to issue a query.
 func (c *PlaneClient) ready() bool {
 	if c == nil {
 		return false
 	}
-	return c.baseURL != "" && c.token != ""
+	return c.dbContainer != "" && c.dbName != "" && c.dbUser != "" && c.envFile != ""
 }
 
 // ---------------------------------------------------------------------------
-// generic request helper
+// password loader
 
-// do performs a GET against path and decodes the JSON response into out.
-// On any non-2xx status it returns errPlaneAPIStatus so callers can
-// detect "Plane is up but said no" vs network/setup failure.
-//
-// In keeping with the graceful-fallback contract (see file banner),
-// callers translate errPlaneAPIStatus + network errors into (zero, nil)
-// — only in tests is the raw error inspected.
-var errPlaneAPIStatus = errors.New("plane: non-2xx status")
+// passwordTTL is how long we cache the .env password before re-reading.
+// The file is small (<1 KB) and on local disk; 5 minutes balances "operator
+// rotated and restarted plane" against avoiding pointless re-reads under
+// dashboard refresh-spam.
+const passwordTTL = 5 * time.Minute
 
-func (c *PlaneClient) do(ctx context.Context, path string, query url.Values, out any) error {
-	if c == nil || c.baseURL == "" {
-		return errors.New("plane: client not configured")
+// password returns POSTGRES_PASSWORD from the env file, "" on any error.
+// Errors are deliberately swallowed to preserve the silent-fallback
+// contract — the admin page degrades to zeros rather than 500-ing when
+// the env file is missing or the key isn't present yet (e.g. the plane
+// stack hasn't been deployed on this host).
+func (c *PlaneClient) password() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cachedPwd != "" && time.Since(c.cachedPwdAt) < passwordTTL {
+		return c.cachedPwd
 	}
-	u := c.baseURL + path
-	if len(query) > 0 {
-		u += "?" + query.Encode()
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	f, err := os.Open(c.envFile)
 	if err != nil {
-		return fmt.Errorf("plane: build request %s: %w", path, err)
+		return ""
 	}
-	if c.token != "" {
-		req.Header.Set("X-API-Key", c.token)
-		// Plane's docs show bearer-token style on /api/v1, so set both
-		// to maximise compatibility — the unused header is ignored by
-		// the API.
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("plane: GET %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		// Drain (bounded) so the connection can close cleanly without
-		// dragging a multi-MB error body across the loop. We surface
-		// the first 256 bytes for the rare case a caller logs the err.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return fmt.Errorf("%w: %s %d: %s", errPlaneAPIStatus, path, resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return fmt.Errorf("plane: decode %s response: %w", path, err)
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "POSTGRES_PASSWORD=") {
+			continue
 		}
-	} else {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		val := strings.TrimPrefix(line, "POSTGRES_PASSWORD=")
+		// .env files in this repo sometimes single- or double-quote
+		// values; strip a single matched pair if present.
+		val = strings.TrimSpace(val)
+		if len(val) >= 2 {
+			if (val[0] == '\'' && val[len(val)-1] == '\'') ||
+				(val[0] == '"' && val[len(val)-1] == '"') {
+				val = val[1 : len(val)-1]
+			}
+		}
+		c.cachedPwd = val
+		c.cachedPwdAt = time.Now()
+		return val
 	}
-	return nil
+	return ""
 }
 
 // ---------------------------------------------------------------------------
-// API methods
+// API
 
-// ListWorkspaces returns every workspace visible to the bearer token.
-// Returns (nil, nil) when the client is unconfigured (graceful fallback).
+// PlaneUserStats is the per-user roll-up the admin /users page renders
+// for the plane (Vikunja) columns. Zero values are surface-level: caller
+// already knows the user from Authelia, this just decorates them.
+type PlaneUserStats struct {
+	Tasks      int       // tasks created by the user
+	AttBytes   int64     // sum of file sizes for attachments owned by user
+	LastSeen   time.Time // max(users.updated, max(tasks.updated)) — best-effort
+	UserExists bool      // false if the email isn't in Vikunja's users table yet
+}
+
+// UserStats runs one psql query joining users → tasks → attachments → files
+// and returns the per-user roll-up. Zero values and nil error on any
+// shell-out / parse / DB failure (silent fallback — admin page renders "—").
 //
-// TODO: this needs Wave C deploy + a real token at
-// /etc/raph-installer/plane-admin-token to surface real numbers; verify
-// against actual Plane API at https://developers.plane.so/api-reference
-// once deployed.
-func (c *PlaneClient) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
+// Why psql and not the REST API: Vikunja's /users endpoint is search-only
+// and the /tasks endpoint requires the calling user's JWT. There is no
+// "admin: list this user's tasks" endpoint in v2.3.0. Querying the DB
+// directly is the path enrol already takes for cloud (`docker exec cloud
+// occ`); applying it here keeps the integration uniform and avoids
+// minting a service-account JWT in Vikunja that we'd have to rotate.
+func (c *PlaneClient) UserStats(ctx context.Context, email string) (PlaneUserStats, error) {
+	if !c.ready() || strings.TrimSpace(email) == "" {
+		return PlaneUserStats{}, nil
+	}
+	pwd := c.password()
+	if pwd == "" {
+		return PlaneUserStats{}, nil
+	}
+
+	// Local timeout if caller didn't bound the context; psql can hang if
+	// the container is mid-restart.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+	}
+
+	// Single query, four columns. The email comes in via a psql variable
+	// (-v) and is interpolated as a quoted SQL literal (:'email_arg'),
+	// so the user-controlled value never reaches the shell. Reduces
+	// SQL-injection surface to "psql variable handling", which is well-
+	// audited.
+	const sqlQuery = `
+SELECT COALESCE(t.cnt, 0) AS task_count,
+       COALESCE(a.bytes, 0) AS att_bytes,
+       COALESCE(GREATEST(u.updated, t.last_task), u.updated) AS last_seen,
+       1 AS user_exists
+FROM users u
+LEFT JOIN (
+  SELECT created_by_id, COUNT(*) AS cnt, MAX(updated) AS last_task
+  FROM tasks
+  GROUP BY created_by_id
+) t ON t.created_by_id = u.id
+LEFT JOIN (
+  SELECT ta.created_by_id, COALESCE(SUM(f.size), 0) AS bytes
+  FROM task_attachments ta
+  JOIN files f ON f.id = ta.file_id
+  GROUP BY ta.created_by_id
+) a ON a.created_by_id = u.id
+WHERE LOWER(u.email) = LOWER(:'email_arg')
+LIMIT 1;
+`
+	cmd := exec.CommandContext(ctx,
+		"docker", "exec",
+		"-e", "PGPASSWORD="+pwd,
+		"-e", "PGOPTIONS=-c statement_timeout=5000",
+		c.dbContainer,
+		"psql",
+		"-U", c.dbUser,
+		"-d", c.dbName,
+		"-A", "-t", "-F", "|",
+		"--no-psqlrc",
+		"-v", "email_arg="+email,
+		"-c", sqlQuery,
+	)
+	// Inherit nothing — explicit empty env keeps surprise PATH lookups
+	// out of the picture; docker is absolute-resolved by exec.LookPath
+	// because cmd.Path is set on construction.
+	cmd.Env = []string{}
+	out, err := cmd.Output()
+	if err != nil {
+		// Common transient: container not running, password rotated,
+		// network blip. Silent fallback per banner.
+		return PlaneUserStats{}, nil
+	}
+	line := strings.TrimSpace(string(out))
+	if line == "" {
+		// Email isn't in Vikunja's users table — user has never logged
+		// in via OIDC. Distinct from "we got a row of zeros".
+		return PlaneUserStats{UserExists: false}, nil
+	}
+	fields := strings.Split(line, "|")
+	if len(fields) < 4 {
+		return PlaneUserStats{}, nil
+	}
+	stats := PlaneUserStats{UserExists: true}
+	if v, err := strconv.Atoi(strings.TrimSpace(fields[0])); err == nil {
+		stats.Tasks = v
+	}
+	if v, err := strconv.ParseInt(strings.TrimSpace(fields[1]), 10, 64); err == nil {
+		stats.AttBytes = v
+	}
+	// Postgres timestamp default format from psql -A -t: "2006-01-02 15:04:05.999999"
+	tsStr := strings.TrimSpace(fields[2])
+	if tsStr != "" {
+		// Try the most common Postgres timestamp formats.
+		for _, layout := range []string{
+			"2006-01-02 15:04:05.999999",
+			"2006-01-02 15:04:05",
+			time.RFC3339,
+		} {
+			if t, err := time.Parse(layout, tsStr); err == nil {
+				stats.LastSeen = t
+				break
+			}
+		}
+	}
+	return stats, nil
+}
+
+// ---------------------------------------------------------------------------
+// shims preserving the old call surface
+//
+// storage.go's `planeUserInfo` helper expects the old method names. To
+// keep this PR's diff small and avoid coupling the rewrite to a storage.go
+// rewrite in the same commit, the old names below now thin-shim onto
+// UserStats. They will be removed in a follow-up once storage.go drops
+// the per-workspace fan-out.
+
+// errPlaneUnconfigured is kept as a sentinel for tests that previously
+// matched on error type. Plane integration now silently fails, so this is
+// only ever returned from explicitly-invalidated test cases.
+var errPlaneUnconfigured = errors.New("plane: not configured (Vikunja stack down or DB unreachable)")
+
+// stub vestige of the old REST-shaped client — kept so tests that wired
+// "plane is not deployed" survive without touching every call site.
+type Workspace struct {
+	ID   string
+	Name string
+	Slug string
+}
+
+// PlaneUser likewise, for the old `UserByEmail` shape. Only Email is
+// load-bearing and the planeUserInfo helper short-circuits when this is
+// returned with empty ID.
+type PlaneUser struct {
+	ID         string
+	Email      string
+	LastActive time.Time
+}
+
+func (c *PlaneClient) ListWorkspaces(_ context.Context) ([]Workspace, error) {
+	// Vikunja has no notion of workspaces. Return a single synthetic
+	// "all" workspace so storage.go's per-workspace loop runs once. The
+	// Slug "_all" is a private sentinel used by IssueCount/FileAssetBytes
+	// below to mean "ignore the workspace dimension".
 	if !c.ready() {
 		return nil, nil
 	}
-	var resp struct {
-		Results []Workspace `json:"results"`
-	}
-	if err := c.do(ctx, "/workspaces/", nil, &resp); err != nil {
-		// Graceful fallback: API is down or saying no — caller sees nil.
-		if errors.Is(err, errPlaneAPIStatus) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if resp.Results != nil {
-		return resp.Results, nil
-	}
-	// Some Plane endpoints return a top-level array instead of a
-	// pagination envelope. Tolerate both by re-trying as a bare array.
-	var arr []Workspace
-	if err := c.do(ctx, "/workspaces/", nil, &arr); err == nil {
-		return arr, nil
-	}
-	return nil, nil
+	return []Workspace{{Slug: "_all", Name: "All", ID: "_all"}}, nil
 }
 
-// UserByEmail looks up a Plane user by their email address. Returns
-// (nil, nil) when the user doesn't exist OR the client is unconfigured.
-//
-// The email is URL-encoded via url.Values.Set — operator emails can
-// contain `+` (gmail-style addressing); without encoding the API would
-// see a space in place of the plus and miss the lookup.
-//
-// TODO: this needs Wave C deploy + a real token at
-// /etc/raph-installer/plane-admin-token to surface real numbers; verify
-// against actual Plane API at https://developers.plane.so/api-reference
-// once deployed. The /users/?email=<email> path is plausible but Plane
-// has historically gated user lookup behind workspace context — may
-// need to switch to per-workspace member list iteration.
 func (c *PlaneClient) UserByEmail(ctx context.Context, email string) (*PlaneUser, error) {
+	if !c.ready() || strings.TrimSpace(email) == "" {
+		return nil, nil
+	}
+	stats, err := c.UserStats(ctx, email)
+	if err != nil || !stats.UserExists {
+		return nil, nil
+	}
+	// We return the email itself as the ID so the per-workspace IssueCount
+	// / FileAssetBytes calls below can re-derive the user. The real user-id
+	// (bigint) lives only in the DB and isn't surfaced; that's fine because
+	// the only caller is planeUserInfo which threads ID into IssueCount,
+	// which we override below to ignore it.
+	return &PlaneUser{ID: email, Email: email, LastActive: stats.LastSeen}, nil
+}
+
+func (c *PlaneClient) IssueCount(ctx context.Context, _wsSlug, userID string) (int, error) {
 	if !c.ready() {
-		return nil, nil
-	}
-	if email == "" {
-		return nil, nil
-	}
-	q := url.Values{}
-	q.Set("email", email)
-	var resp struct {
-		Results []PlaneUser `json:"results"`
-	}
-	if err := c.do(ctx, "/users/", q, &resp); err != nil {
-		if errors.Is(err, errPlaneAPIStatus) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	for _, u := range resp.Results {
-		if strings.EqualFold(u.Email, email) {
-			cp := u
-			return &cp, nil
-		}
-	}
-	return nil, nil
-}
-
-// IssueCount returns the number of issues in workspaceSlug authored by
-// userID. Returns (0, nil) on unconfigured/missing.
-//
-// TODO: this needs Wave C deploy + a real token at
-// /etc/raph-installer/plane-admin-token to surface real numbers; verify
-// against actual Plane API at https://developers.plane.so/api-reference
-// once deployed. Plane's per-workspace issue listing requires a project
-// scope; the real implementation may need to iterate projects and sum,
-// or use a workspace-wide /issues/ endpoint if one exists.
-func (c *PlaneClient) IssueCount(ctx context.Context, workspaceSlug, userID string) (int, error) {
-	if !c.ready() || workspaceSlug == "" || userID == "" {
 		return 0, nil
 	}
-	q := url.Values{}
-	q.Set("created_by", userID)
-	var resp struct {
-		Count int `json:"count"`
-	}
-	path := fmt.Sprintf("/workspaces/%s/issues/", url.PathEscape(workspaceSlug))
-	if err := c.do(ctx, path, q, &resp); err != nil {
-		if errors.Is(err, errPlaneAPIStatus) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	return resp.Count, nil
-}
-
-// FileAssetBytes returns the total bytes of file_assets in workspaceSlug
-// owned by userID. Returns (0, nil) on unconfigured/missing.
-//
-// TODO: this needs Wave C deploy + a real token at
-// /etc/raph-installer/plane-admin-token to surface real numbers; verify
-// against actual Plane API at https://developers.plane.so/api-reference
-// once deployed. The "size" attribute name is a guess based on Plane's
-// upstream serializers; may need to switch to "file_size" or sum a
-// nested asset record.
-func (c *PlaneClient) FileAssetBytes(ctx context.Context, workspaceSlug, userID string) (int64, error) {
-	if !c.ready() || workspaceSlug == "" || userID == "" {
+	stats, err := c.UserStats(ctx, userID) // userID is actually the email — see UserByEmail above.
+	if err != nil {
 		return 0, nil
 	}
-	q := url.Values{}
-	q.Set("created_by", userID)
-	var resp struct {
-		Results []struct {
-			Size int64 `json:"size"`
-		} `json:"results"`
-	}
-	path := fmt.Sprintf("/workspaces/%s/file-assets/", url.PathEscape(workspaceSlug))
-	if err := c.do(ctx, path, q, &resp); err != nil {
-		if errors.Is(err, errPlaneAPIStatus) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	var total int64
-	for _, r := range resp.Results {
-		total += r.Size
-	}
-	return total, nil
+	return stats.Tasks, nil
 }
 
-// LastActivity is a best-effort lookup of the user's most recent Plane
-// activity timestamp. Returns (zero, nil) on unconfigured/missing —
-// callers should max() it against the Nextcloud last-login timestamp.
-//
-// TODO: this needs Wave C deploy + a real token at
-// /etc/raph-installer/plane-admin-token to surface real numbers; verify
-// against actual Plane API at https://developers.plane.so/api-reference
-// once deployed. Plane's "last_active" attribute is not part of the
-// public user serializer in older releases — may need a workspace-
-// member-list endpoint instead.
+func (c *PlaneClient) FileAssetBytes(ctx context.Context, _wsSlug, userID string) (int64, error) {
+	if !c.ready() {
+		return 0, nil
+	}
+	stats, err := c.UserStats(ctx, userID)
+	if err != nil {
+		return 0, nil
+	}
+	return stats.AttBytes, nil
+}
+
 func (c *PlaneClient) LastActivity(ctx context.Context, userID string) (time.Time, error) {
-	if !c.ready() || userID == "" {
+	if !c.ready() {
 		return time.Time{}, nil
 	}
-	var resp struct {
-		LastActive time.Time `json:"last_active"`
+	stats, err := c.UserStats(ctx, userID)
+	if err != nil {
+		return time.Time{}, nil
 	}
-	path := fmt.Sprintf("/users/%s/", url.PathEscape(userID))
-	if err := c.do(ctx, path, nil, &resp); err != nil {
-		if errors.Is(err, errPlaneAPIStatus) {
-			return time.Time{}, nil
-		}
-		return time.Time{}, err
+	return stats.LastSeen, nil
+}
+
+// ---------------------------------------------------------------------------
+// helpers used by tests
+
+// requireConfigured is exposed for test scaffolding that wants to assert
+// the client is in "deployed mode" before issuing live queries.
+func (c *PlaneClient) requireConfigured() error {
+	if c.ready() {
+		return nil
 	}
-	return resp.LastActive, nil
+	return fmt.Errorf("%w: container=%q db=%q user=%q env=%q",
+		errPlaneUnconfigured, c.dbContainer, c.dbName, c.dbUser, c.envFile)
 }

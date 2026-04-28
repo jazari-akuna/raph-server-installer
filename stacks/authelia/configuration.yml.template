@@ -260,17 +260,18 @@ identity_providers:
 
       - client_id: 'plane'
         client_name: 'Plane'
-        # client_secret is the pbkdf2-sha512 hash; the plaintext goes into
-        # Plane's OIDC config. Generate with:
-        #   docker run --rm authelia/authelia:4.39.19 \
-        #     authelia crypto hash generate pbkdf2 --variant sha512
+        # NOTE: clientid stays "plane" for camouflage (ADR-002) — the upstream
+        # image is Vikunja, but external naming is "plane.${DOMAIN}". The
+        # callback path comes from Vikunja's frontend: /auth/openid/<provider_key>.
+        # Our Vikunja config uses provider_key "authelia" (lowercase), so the
+        # exact redirect_uri must match below. NO trailing slash for Vikunja
+        # (the previous Plane entry needed one — Vikunja does not).
         client_secret: '${AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH}'
         public: false
         authorization_policy: 'one_factor'
         require_pkce: false
         redirect_uris:
-          # Trailing slash is mandatory — Plane is strict about exact match.
-          - 'https://plane.${DOMAIN}/auth/oidc/callback/'
+          - 'https://plane.${DOMAIN}/auth/openid/authelia'
         scopes:
           - 'openid'
           - 'profile'

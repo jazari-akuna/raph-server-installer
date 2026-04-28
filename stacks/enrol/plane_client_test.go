@@ -1,92 +1,74 @@
-// plane_client_test.go — table-driven tests for the Plane REST client.
+// plane_client_test.go — unit tests for the Vikunja-backed PlaneClient.
 //
-// All HTTP-level tests use httptest.NewServer; no live Plane is touched.
-// The mock server runs on 127.0.0.1, which the SSRF Control hook on the
-// PlaneClient.http transport permits (loopback is "private").
+// The live integration shells out `docker exec plane-db psql ...`, which
+// can't be mocked without a docker-in-docker setup. These tests therefore
+// cover the fast, mockable surface only:
+//
+//   - constructor + ready()
+//   - silent fallback when the client is unconfigured
+//   - .env password parsing (quoted/unquoted/missing)
+//
+// The actual psql shell-out is exercised by the live deploy smoke test
+// in scripts/smoke-test.sh (TODO: add an assertion there for the admin
+// /users page rendering plane columns once Vikunja has at least one user).
 
 package main
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
-// newMockPlane builds an httptest server with the supplied handler,
-// returns it plus a PlaneClient pointed at the mock with a non-empty
-// token so the .ready() guard doesn't short-circuit.
-func newMockPlane(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *PlaneClient) {
-	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-	c := NewPlaneClient(srv.URL, "test-token")
-	return srv, c
-}
-
-// ----- constructor -----
+// ----- constructor + ready() -----
 
 func TestNewPlaneClient(t *testing.T) {
 	cases := []struct {
-		name        string
-		baseURL     string
-		token       string
-		wantBaseURL string
-		wantToken   string
-		wantReady   bool
+		name      string
+		container string
+		dbName    string
+		dbUser    string
+		envFile   string
+		wantReady bool
 	}{
 		{
-			name:        "trailing slash trimmed",
-			baseURL:     "http://plane-proxy/api/v1/",
-			token:       "abc",
-			wantBaseURL: "http://plane-proxy/api/v1",
-			wantToken:   "abc",
-			wantReady:   true,
+			name:      "fully configured",
+			container: "plane-db",
+			dbName:    "vikunja",
+			dbUser:    "vikunja",
+			envFile:   "/opt/stacks/plane/.env",
+			wantReady: true,
 		},
 		{
-			name:        "no trailing slash preserved",
-			baseURL:     "http://plane-proxy/api/v1",
-			token:       "abc",
-			wantBaseURL: "http://plane-proxy/api/v1",
-			wantToken:   "abc",
-			wantReady:   true,
+			name:      "missing container → not ready",
+			container: "",
+			dbName:    "vikunja",
+			dbUser:    "vikunja",
+			envFile:   "/opt/stacks/plane/.env",
+			wantReady: false,
 		},
 		{
-			name:        "empty token → not ready",
-			baseURL:     "http://plane-proxy/api/v1",
-			token:       "",
-			wantBaseURL: "http://plane-proxy/api/v1",
-			wantToken:   "",
-			wantReady:   false,
+			name:      "missing env file → not ready",
+			container: "plane-db",
+			dbName:    "vikunja",
+			dbUser:    "vikunja",
+			envFile:   "",
+			wantReady: false,
 		},
 		{
-			name:        "whitespace token trimmed",
-			baseURL:     "http://plane-proxy/api/v1",
-			token:       "  spaced  \n",
-			wantBaseURL: "http://plane-proxy/api/v1",
-			wantToken:   "spaced",
-			wantReady:   true,
-		},
-		{
-			name:        "empty baseURL → not ready",
-			baseURL:     "",
-			token:       "abc",
-			wantBaseURL: "",
-			wantToken:   "abc",
-			wantReady:   false,
+			name:      "whitespace stripped",
+			container: "  plane-db  ",
+			dbName:    "vikunja",
+			dbUser:    "vikunja",
+			envFile:   "/opt/stacks/plane/.env",
+			wantReady: true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewPlaneClient(tc.baseURL, tc.token)
-			if c.baseURL != tc.wantBaseURL {
-				t.Errorf("baseURL = %q, want %q", c.baseURL, tc.wantBaseURL)
-			}
-			if c.token != tc.wantToken {
-				t.Errorf("token = %q, want %q", c.token, tc.wantToken)
-			}
+			c := NewPlaneClient(tc.container, tc.dbName, tc.dbUser, tc.envFile)
 			if got := c.ready(); got != tc.wantReady {
 				t.Errorf("ready() = %v, want %v", got, tc.wantReady)
 			}
@@ -94,8 +76,8 @@ func TestNewPlaneClient(t *testing.T) {
 	}
 }
 
-// ready() must also tolerate the nil receiver — the admin page may
-// invoke methods on a nil client when config wiring is partial.
+// Nil receiver must not panic — admin page may call methods on a partial
+// startup config.
 func TestPlaneClientNilReady(t *testing.T) {
 	var c *PlaneClient
 	if c.ready() {
@@ -103,158 +85,136 @@ func TestPlaneClientNilReady(t *testing.T) {
 	}
 }
 
-// ----- email encoding -----
+// ----- silent fallback when unconfigured -----
 
-// UserByEmail must URL-encode the email so `+` survives transit (gmail
-// addressing). The mock asserts the raw query string contains the
-// percent-encoded form.
-func TestUserByEmailEncoding(t *testing.T) {
+// UserStats with empty container → (zero, nil) without ever shelling out.
+// (We can't observe the absence of a shell-out directly, but we verify
+// the function returns instantly with no error and zero values.)
+func TestUserStatsUnconfigured(t *testing.T) {
+	c := NewPlaneClient("", "", "", "")
+	stats, err := c.UserStats(context.Background(), "alice@example.com")
+	if err != nil {
+		t.Errorf("expected nil error on unconfigured client, got %v", err)
+	}
+	if stats.Tasks != 0 || stats.AttBytes != 0 || stats.UserExists {
+		t.Errorf("expected zero stats on unconfigured client, got %+v", stats)
+	}
+}
+
+// Empty email is a no-op (admin page may pass "" for users with no email
+// claim from Authelia).
+func TestUserStatsEmptyEmail(t *testing.T) {
+	c := NewPlaneClient("plane-db", "vikunja", "vikunja", "/dev/null")
+	stats, err := c.UserStats(context.Background(), "")
+	if err != nil {
+		t.Errorf("expected nil error on empty email, got %v", err)
+	}
+	if stats.UserExists || stats.Tasks != 0 {
+		t.Errorf("expected zero stats on empty email, got %+v", stats)
+	}
+}
+
+// ----- .env password parsing -----
+
+func TestPasswordReadsEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
 	cases := []struct {
-		name      string
-		email     string
-		wantQuery string
+		name     string
+		contents string
+		want     string
 	}{
 		{
-			name:      "plain email",
-			email:     "alice@example.com",
-			wantQuery: "email=alice%40example.com",
+			name:     "plain value",
+			contents: "POSTGRES_PASSWORD=secret123\nOTHER=x\n",
+			want:     "secret123",
 		},
 		{
-			name:      "plus addressing (gmail)",
-			email:     "alice+plane@example.com",
-			wantQuery: "email=alice%2Bplane%40example.com",
+			name:     "single-quoted value",
+			contents: "POSTGRES_PASSWORD='quoted-secret'\n",
+			want:     "quoted-secret",
 		},
 		{
-			name:      "space in local-part (rare but legal)",
-			email:     "a b@example.com",
-			wantQuery: "email=a+b%40example.com",
+			name:     "double-quoted value",
+			contents: "POSTGRES_PASSWORD=\"another secret\"\n",
+			want:     "another secret",
+		},
+		{
+			name:     "leading whitespace tolerated",
+			contents: "   POSTGRES_PASSWORD=trimmed\n",
+			want:     "trimmed",
+		},
+		{
+			name:     "absent key → empty",
+			contents: "OTHER=x\nFOO=bar\n",
+			want:     "",
+		},
+		{
+			name:     "first-match wins",
+			contents: "POSTGRES_PASSWORD=first\nPOSTGRES_PASSWORD=second\n",
+			want:     "first",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			seen := ""
-			_, c := newMockPlane(t, func(w http.ResponseWriter, r *http.Request) {
-				seen = r.URL.RawQuery
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"results": []map[string]any{
-						{"id": "u1", "email": tc.email},
-					},
-				})
-			})
-			user, err := c.UserByEmail(context.Background(), tc.email)
-			if err != nil {
-				t.Fatalf("UserByEmail: %v", err)
+			if err := os.WriteFile(envPath, []byte(tc.contents), 0o600); err != nil {
+				t.Fatalf("write env: %v", err)
 			}
-			if user == nil || user.ID != "u1" {
-				t.Fatalf("expected user id=u1, got %+v", user)
-			}
-			if !strings.Contains(seen, tc.wantQuery) {
-				t.Errorf("query %q does not contain %q", seen, tc.wantQuery)
+			c := NewPlaneClient("plane-db", "vikunja", "vikunja", envPath)
+			// Force a fresh read by zeroing the cache.
+			c.cachedPwd, c.cachedPwdAt = "", time.Time{}
+			got := c.password()
+			if got != tc.want {
+				t.Errorf("password() = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-// UserByEmail returns nil/nil when the API returns 404 (graceful
-// fallback so the admin page silently shows zeros for users who
-// haven't logged into Plane yet).
-func TestUserByEmailNotFound(t *testing.T) {
-	_, c := newMockPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, `{"detail":"not found"}`, http.StatusNotFound)
-	})
-	user, err := c.UserByEmail(context.Background(), "ghost@example.com")
-	if err != nil {
-		t.Fatalf("expected nil error on 404 (graceful fallback), got %v", err)
-	}
-	if user != nil {
-		t.Errorf("expected nil user on 404, got %+v", user)
+// Missing env file → empty password (silent fallback). Must not panic
+// or surface the os.Open error.
+func TestPasswordMissingFile(t *testing.T) {
+	c := NewPlaneClient("plane-db", "vikunja", "vikunja", "/nonexistent/.env.noway")
+	if got := c.password(); got != "" {
+		t.Errorf("password() on missing file = %q, want empty", got)
 	}
 }
 
-// UserByEmail with an unconfigured client (empty token) returns nil/nil
-// without ever issuing an HTTP request. Critical for Wave B to land
-// before Plane is deployed.
-func TestUserByEmailUnconfigured(t *testing.T) {
-	called := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	}))
-	t.Cleanup(srv.Close)
-	c := NewPlaneClient(srv.URL, "") // empty token → not ready
-	user, err := c.UserByEmail(context.Background(), "alice@example.com")
-	if err != nil {
-		t.Fatalf("expected nil error on unconfigured client, got %v", err)
+// requireConfigured returns a sentinel-wrapped error when partial; nil
+// when fully configured. Used by potential future tests asserting
+// "deployed mode".
+func TestRequireConfigured(t *testing.T) {
+	cfg := NewPlaneClient("plane-db", "vikunja", "vikunja", "/opt/stacks/plane/.env")
+	if err := cfg.requireConfigured(); err != nil {
+		t.Errorf("fully-configured client should not error, got %v", err)
 	}
-	if user != nil {
-		t.Errorf("expected nil user on unconfigured client, got %+v", user)
-	}
-	if called {
-		t.Errorf("unconfigured client should NOT issue an HTTP request")
+	empty := NewPlaneClient("", "", "", "")
+	if err := empty.requireConfigured(); err == nil {
+		t.Errorf("empty client should error")
 	}
 }
 
-// ----- JSON parsing -----
+// ----- shim methods preserving the old call surface -----
+//
+// storage.go still uses ListWorkspaces / UserByEmail / IssueCount /
+// FileAssetBytes — make sure they don't panic on a nil/empty client.
 
-// ListWorkspaces must decode Plane's pagination envelope ({"results":
-// [...]}) into the typed Workspace slice.
-func TestListWorkspacesParsesEnvelope(t *testing.T) {
-	_, c := newMockPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/workspaces/" {
-			t.Errorf("unexpected path %q", r.URL.Path)
-		}
-		// Bearer header is mandatory for the live API; assert we send it.
-		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") {
-			t.Errorf("missing Bearer header, got %q", got)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"results": []map[string]any{
-				{"id": "w1", "name": "Engineering", "slug": "eng"},
-				{"id": "w2", "name": "Design", "slug": "design"},
-			},
-		})
-	})
-	ws, err := c.ListWorkspaces(context.Background())
-	if err != nil {
-		t.Fatalf("ListWorkspaces: %v", err)
+func TestShimsSafeOnUnconfigured(t *testing.T) {
+	c := NewPlaneClient("", "", "", "")
+	ctx := context.Background()
+	if ws, _ := c.ListWorkspaces(ctx); ws != nil {
+		t.Errorf("ListWorkspaces should return nil on unconfigured client")
 	}
-	if len(ws) != 2 {
-		t.Fatalf("got %d workspaces, want 2", len(ws))
+	if u, _ := c.UserByEmail(ctx, "x@y"); u != nil {
+		t.Errorf("UserByEmail should return nil on unconfigured client")
 	}
-	if ws[0].Slug != "eng" || ws[1].Slug != "design" {
-		t.Errorf("workspaces[].Slug = [%q,%q], want [eng,design]", ws[0].Slug, ws[1].Slug)
+	if n, _ := c.IssueCount(ctx, "any", "x@y"); n != 0 {
+		t.Errorf("IssueCount should return 0 on unconfigured client")
 	}
-}
-
-// IssueCount + FileAssetBytes both return zero/nil on a 5xx so the
-// admin page degrades cleanly when Plane is up-but-broken.
-func TestIssueCountGraceful5xx(t *testing.T) {
-	_, c := newMockPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "server error", http.StatusInternalServerError)
-	})
-	n, err := c.IssueCount(context.Background(), "eng", "u1")
-	if err != nil {
-		t.Errorf("expected nil err on 500, got %v", err)
+	if b, _ := c.FileAssetBytes(ctx, "any", "x@y"); b != 0 {
+		t.Errorf("FileAssetBytes should return 0 on unconfigured client")
 	}
-	if n != 0 {
-		t.Errorf("expected 0 issues on 500, got %d", n)
-	}
-}
-
-func TestFileAssetBytesSums(t *testing.T) {
-	_, c := newMockPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"results": []map[string]any{
-				{"size": 1024},
-				{"size": 2048},
-				{"size": 4096},
-			},
-		})
-	})
-	n, err := c.FileAssetBytes(context.Background(), "eng", "u1")
-	if err != nil {
-		t.Fatalf("FileAssetBytes: %v", err)
-	}
-	if n != 1024+2048+4096 {
-		t.Errorf("got sum %d, want %d", n, 1024+2048+4096)
+	if t0, _ := c.LastActivity(ctx, "x@y"); !t0.IsZero() {
+		t.Errorf("LastActivity should return zero time on unconfigured client")
 	}
 }

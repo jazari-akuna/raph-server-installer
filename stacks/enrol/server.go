@@ -134,7 +134,7 @@ func newServer(cfg config) (*server, error) {
 	if err := ensureArchiveDir(cfg); err != nil {
 		return nil, fmt.Errorf("ensure peers archive dir: %w", err)
 	}
-	plane := NewPlaneClient(cfg.planeAPIBaseURL, cfg.planeAPIToken)
+	plane := NewPlaneClient(cfg.planeDBContainer, cfg.planeDBName, cfg.planeDBUser, cfg.planeEnvFile)
 	return &server{cfg: cfg, tmpl: tmpl, plane: plane}, nil
 }
 

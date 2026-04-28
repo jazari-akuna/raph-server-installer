@@ -132,10 +132,16 @@ Author `mail@raph.io`, standard `Co-Authored-By: Claude Opus 4.7 (1M context)` f
 
 ---
 
-## ADR-009 — Plane: god-mode bootstrap is manual, by design
+## ADR-009 — `plane` stack uses Vikunja under the hood (not Plane)
 
-**Decision.** Plane's instance-admin claim (`/god-mode/`) and OIDC configuration paste are done manually in the browser by the operator on first deploy. No env-var skip, no automation.
+**Decision.** The `plane` stack runs `vikunja/vikunja` (single unified Go binary + Postgres). External naming, stack folder, internal URLs, OIDC client ID, and admin-page columns all stay `plane`. The upstream image is camouflaged per ADR-002.
 
-**Why.** Plane has no env-var path to bootstrap god-mode credentials — it's deliberate (first-user-wins on `/god-mode/sign-up`). Trying to script it via the API would require god-mode auth we don't have yet. Manual is the supported path.
+**Why.** We deployed Plane v0.27.1 first. Source-code probe of the running plane-api container (`/code/plane/authentication/provider/oauth/`) showed only `github.py`, `gitlab.py`, `google.py` — zero generic OIDC support. Latest Plane (v1.3.0) adds `gitea.py` but still no generic OIDC. With Authelia as the IdP (ADR-003), no generic OIDC = no SSO. Vikunja ships generic OIDC out of the box (`auth.openid.providers.*`) with callback at `/auth/openid/<provider_key>`, which integrates cleanly with Authelia. Tradeoff accepted: Vikunja is a smaller / simpler product than Plane (todo lists + projects + teams + Kanban + attachments; no full-bore issue tracker workflows), which fits a 2-admin home-server deploy better anyway.
 
-**Footgun.** First-user-wins means if `plane.${DOMAIN}` is reachable publicly before the operator claims god-mode, an attacker who finds the URL claims it instead. Mitigation: complete claim + OIDC paste **immediately** in the same deploy session as the first `docker compose up`. Document the URL gate (one-shot Authelia `one_factor` policy on `plane.${DOMAIN}` for the first 24 h, then flip to `bypass`) as the defensive fallback.
+**Why keep the camouflage name.** Renaming to `vikunja` would churn DNS, NPM proxy host, Authelia OIDC client ID, launcher tile icon, ADR references, and operator muscle memory. The camouflage convention exists exactly so we can swap underlying products without those churns; honoring it pays off here.
+
+**Bootstrap.** Vikunja has no first-user-wins god-mode footgun. `VIKUNJA_AUTH_LOCAL_ENABLED=false` + `VIKUNJA_SERVICE_ENABLEREGISTRATION=false` mean *every* account is OIDC-provisioned on first login — no operator claim race. Site-level admin powers (delete-anyone-account) require a one-time SQL update (`UPDATE users SET status = 1 WHERE username = ...`), documented in `stacks/plane/README.md`.
+
+**Storage tracking.** enrol's `PlaneClient` was rewritten from REST-with-bearer-token (Plane shape) to `docker exec plane-db psql` (Vikunja shape). Vikunja's REST API is per-user-authenticated and lacks an admin "list all users / show tasks for user X" endpoint, so the DB-direct path is the only practical option. Mirrors the cloud integration's `docker exec cloud occ` pattern.
+
+**Backups.** Single `pg_dump` of the plane-db container + rsync of `/srv/store/plane-files`. Old per-stack proliferation (`/srv/store/plane-{db,minio,mq,logs}` from the Plane-era 14-service stack) was wiped during the swap.
