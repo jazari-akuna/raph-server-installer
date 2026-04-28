@@ -12,7 +12,7 @@
 #               (gw0.conf is locally readable), we operate locally.
 #   AWG_ENDPOINT  Public endpoint to put in the client config. Required.
 #               (Bootstrap writes this into the script's environment via
-#                /etc/server-domain → "gw.${DOMAIN}:51820"; operators can
+#                /etc/server-domain → "gw.${DOMAIN}:443"; operators can
 #                override if running from outside the installer flow.)
 #   AWG_DIR     Server-side AmneziaWG config dir.
 #               Default: /etc/amnezia/amneziawg
@@ -56,9 +56,9 @@ AWG_IFACE="${AWG_IFACE:-gw0}"
 # operator's domain into the committed source. Bootstrap writes it from $DOMAIN.
 if [[ -z "${AWG_ENDPOINT:-}" ]]; then
     if [[ -r /etc/server-domain ]]; then
-        AWG_ENDPOINT="gw.$(tr -d '[:space:]' </etc/server-domain):51820"
+        AWG_ENDPOINT="gw.$(tr -d '[:space:]' </etc/server-domain):443"
     else
-        echo "AWG_ENDPOINT must be set (e.g. gw.example.com:51820)" >&2
+        echo "AWG_ENDPOINT must be set (e.g. gw.example.com:443)" >&2
         exit 2
     fi
 fi

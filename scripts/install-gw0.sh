@@ -359,8 +359,8 @@ echo "--- awg show gw0"
 awg show gw0
 echo "--- ip -d link show gw0"
 ip -d link show gw0
-echo "--- ss -ulpn :51820"
-ss -ulpn | grep 51820 || echo "    (no listener on 51820 — interface may be down)"
+echo "--- ss -ulpn :443 (gw0 listener; QUIC-shaped UDP/443 to dodge DPI)"
+ss -ulpn | grep -E '[*0]:443\b' || echo "    (no listener on 443 — interface may be down)"
 set -e
 
 cat <<'EOF'

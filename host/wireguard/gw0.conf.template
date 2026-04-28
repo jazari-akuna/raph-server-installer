@@ -20,7 +20,11 @@ PrivateKey = ${SERVER_PRIVATE_KEY}
 Address = 10.99.0.1/24
 
 # UDP listen port. Matches ufw allow rule staged in bootstrap-host.sh.
-ListenPort = 51820
+# 443 (instead of the WG-traditional 51820) so the flow looks like
+# UDP/443 — close enough to QUIC that DPI middleboxes are less likely to
+# bandwidth-shape it. Conflicts with qedge (Hysteria2 also wants UDP/443);
+# pick one or the other, not both, on the same host.
+ListenPort = 443
 
 # 1500 (typical path MTU) - 20 (IPv4) - 8 (UDP) - 32 (WG framing) = 1440
 # safe ceiling. AmneziaWG's junk parameters (S1/S2/Jc/Jmin/Jmax) only

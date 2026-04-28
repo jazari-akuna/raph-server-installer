@@ -241,7 +241,7 @@ probe() {
 
 # Section 3 — gateway
 probe awg_show         sudo awg show gw0
-probe ss_udp_51820     bash -c 'sudo ss -uln 2>/dev/null | grep -cE "[[:space:]](0\.0\.0\.0|\\*|\\[::\\]):51820([[:space:]]|\$)" || true'
+probe ss_udp_gw0       bash -c 'sudo ss -uln 2>/dev/null | grep -cE "[[:space:]](0\.0\.0\.0|\\*|\\[::\\]):443([[:space:]]|\$)" || true'
 probe iptables_nat     bash -c 'sudo iptables -t nat -S POSTROUTING 2>/dev/null | grep -c "10.99.0.0/24.*MASQUERADE" || true'
 probe gw0_conf_peers   bash -c 'sudo grep -c "^\[Peer\]" /etc/amnezia/amneziawg/gw0.conf 2>/dev/null || echo 0'
 probe awg_dump_peers   bash -c 'sudo awg show gw0 dump 2>/dev/null | tail -n +2 | wc -l'
@@ -318,11 +318,11 @@ check_awg_show() {
 
 check_udp_listen() {
     local out
-    out="$(extract_block ss_udp_51820 | tail -1 | tr -d '[:space:]')"
+    out="$(extract_block ss_udp_gw0 | tail -1 | tr -d '[:space:]')"
     if [[ "$out" =~ ^[0-9]+$ ]] && (( out >= 1 )); then
-        pass "udp/51820 listener (count=$out)"
+        pass "udp/443 gw0 listener (count=$out)"
     else
-        fail "udp/51820 listener" "expected >=1 listener, got '${out:-<empty>}'"
+        fail "udp/443 gw0 listener" "expected >=1 listener, got '${out:-<empty>}'"
     fi
 }
 

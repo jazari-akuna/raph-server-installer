@@ -202,7 +202,7 @@ services:
       ENROL_AWG_DIR: "/etc/amnezia/amneziawg"
       ENROL_AWG_IFACE: "gw0"
       ENROL_DOMAIN: "${DOMAIN:?DOMAIN must be set in /opt/stacks/.env}"
-      ENROL_AWG_ENDPOINT: "gw.${DOMAIN}:51820"
+      ENROL_AWG_ENDPOINT: "gw.${DOMAIN}:443"
       ENROL_PEER_SUBNET: "10.99.0.0/24"
       ENROL_PEER_START: "10"
       ENROL_HEADER_USER: "Remote-User"

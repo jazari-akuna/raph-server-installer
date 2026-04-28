@@ -38,7 +38,7 @@ import (
 type config struct {
 	// domain is the apex domain the installer is hosting on (e.g. "example.com").
 	// All user-facing URLs are derived from it: cloud.${domain}, auth.${domain},
-	// console.${domain}, gw.${domain}:51820. Set via ENROL_DOMAIN; bootstrap
+	// console.${domain}, gw.${domain}:443. Set via ENROL_DOMAIN; bootstrap
 	// writes this from $DOMAIN at install time.
 	domain string
 
@@ -125,7 +125,7 @@ func loadConfig() config {
 		listen:            envOr("ENROL_LISTEN", ":8080"),
 		awgDir:            envOr("ENROL_AWG_DIR", "/etc/amnezia/amneziawg"),
 		awgIface:          envOr("ENROL_AWG_IFACE", "gw0"),
-		awgEndpoint:       envOr("ENROL_AWG_ENDPOINT", "gw."+domain+":51820"),
+		awgEndpoint:       envOr("ENROL_AWG_ENDPOINT", "gw."+domain+":443"),
 		peerSubnet:        envOr("ENROL_PEER_SUBNET", "10.99.0.0/24"),
 		peerStart:         start,
 		headerUser:        envOr("ENROL_HEADER_USER", "Remote-User"),

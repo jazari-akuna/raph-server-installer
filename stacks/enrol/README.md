@@ -234,7 +234,7 @@ modifies it. There is no "import" step.
 | `ENROL_AWG_DIR`             | `/etc/amnezia/amneziawg` | gw0.conf + sidecars |
 | `ENROL_AWG_IFACE`           | `gw0` | interface |
 | `ENROL_DOMAIN`              | _(required)_                  | apex domain (e.g. `example.com`); URL roots derived from this |
-| `ENROL_AWG_ENDPOINT`        | `gw.${ENROL_DOMAIN}:51820`    | client endpoint |
+| `ENROL_AWG_ENDPOINT`        | `gw.${ENROL_DOMAIN}:443`      | client endpoint (UDP/443 — masquerading as QUIC to dodge UDP non-443 shaping; conflicts with qedge) |
 | `ENROL_PEER_SUBNET`         | `10.99.0.0/24` | peer subnet |
 | `ENROL_PEER_START`          | `10` | first host octet |
 | `ENROL_HEADER_USER`         | `Remote-User` | auth header |

@@ -52,7 +52,7 @@ func TestBuildSetupHelp_QRDataURI(t *testing.T) {
 	}
 	s := &server{cfg: config{
 		domain:      "example.com",
-		awgEndpoint: "gw.example.com:51820",
+		awgEndpoint: "gw.example.com:443",
 	}}
 	req := httptest.NewRequest("GET", "/peers/raph-laptop", nil)
 	req.Header.Set("User-Agent",
@@ -66,7 +66,7 @@ func TestBuildSetupHelp_QRDataURI(t *testing.T) {
 	if help.PeerName != "raph-laptop" {
 		t.Errorf("PeerName = %q, want raph-laptop", help.PeerName)
 	}
-	if help.Endpoint != "gw.example.com:51820" {
+	if help.Endpoint != "gw.example.com:443" {
 		t.Errorf("Endpoint = %q", help.Endpoint)
 	}
 	if help.ApexDomain != "example.com" {
@@ -116,7 +116,7 @@ func TestPeerCreatedRendersSetupHelp(t *testing.T) {
 		PeerName:        "raph-laptop",
 		ClientConf:      "[Interface]\nPrivateKey = STUB\n[Peer]\nPublicKey = STUB\n",
 		QRDataURI:       template.URL("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="),
-		Endpoint:        "gw.example.com:51820",
+		Endpoint:        "gw.example.com:443",
 		ApexDomain:      "example.com",
 		DefaultPlatform: "win",
 	}

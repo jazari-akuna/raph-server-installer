@@ -128,8 +128,8 @@ public-repo round-trip; it is not the primary install mechanism.
         │   /srv/store/mnt/<u>/  (one per user) ←──│ unlocked encrypted volume mountpoints
         │   /srv/store/data/<u>.img                 │ encrypted blobs at rest
         │                                          │
-        │ gw0   :51820/udp ── primary gateway, kernel module
-        │ qedge :443/udp   ── alternate ingress (TLS-camouflaged QUIC), idle by default
+        │ gw0   :443/udp   ── primary gateway, kernel module (QUIC-shape camouflage)
+        │ qedge :443/udp   ── alternate ingress (TLS-camouflaged QUIC); MUTUALLY EXCLUSIVE with gw0
         │ mesh                ── admin overlay network (private, no inbound port from internet)
         │ sshd  :22/tcp    ── key-auth only, fail2ban
         └──────────────────────────────────────────┘
@@ -159,7 +159,7 @@ Single-host, single-Docker-daemon, ingress (NPM) is the only thing on :80/:443. 
 | Admin overlay | **Tailscale** (referred to internally as `mesh`) | Useful for admins not currently behind heavy filtering; gives an out-of-band path to `console`/`ingress` admin UIs that never has to be exposed to the public internet. |
 | Regional split routing | **chnroutes2** (or another CIDR set) → `AllowedIPs` complement, refreshed monthly via cron | Client-side: gateway client adds domestic CIDRs as more-specific routes via the local gateway, defaults via VPS. Keeps domestic services fast and direct. Optional — operators outside the original problem domain can skip the split entirely. |
 | Backups | **restic over SSH (pulled from client)** | Client cron → `restic -r sftp:vps:… backup`. Server stores only ciphertext; client holds repo password. Off-host, deduped, snapshotted. |
-| Firewall | **ufw** + `ufw-docker` for Docker-aware rules | Default-deny inbound; only :22/tcp, :80/tcp, :443/tcp, :443/udp, :51820/udp open. |
+| Firewall | **ufw** + `ufw-docker` for Docker-aware rules | Default-deny inbound; only :22/tcp, :80/tcp, :443/tcp, :443/udp open (the single :443/udp slot serves either `gw0` or `qedge`, not both). |
 | Process supervision | systemd units for volume mount + gateway; everything else in Docker | Boundary between host concerns and app concerns stays clean. |
 
 ### Naming convention

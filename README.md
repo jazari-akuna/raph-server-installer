@@ -135,8 +135,8 @@ Adding another provider is a contribution-sized change: see
 | `cloud` | copyparty file server | `https://cloud.<your-domain>/` | SSO via Authelia |
 | `console` | Portainer (Docker management UI) | `https://console.<your-domain>/` | OIDC via Authelia |
 | `enrol` | Setup wizard + admin UI (Go) | `https://enrol.<your-domain>/` | SSO via Authelia |
-| `gw0` | AmneziaWG gateway (UDP :51820) | `gw.<your-domain>` | per-peer keys |
-| `qedge` | Hysteria 2 alternate ingress | `cdn.<your-domain>` (UDP :443) | per-client password |
+| `gw0` | AmneziaWG gateway (UDP :443 — masquerading as QUIC) | `gw.<your-domain>` | per-peer keys |
+| `qedge` | Hysteria 2 alternate ingress (UDP :443; mutually exclusive with `gw0`) | `cdn.<your-domain>` | per-client password |
 | `mesh` | Tailscale (optional, manual) | private overlay | tailnet ACL |
 
 The split between "what it actually is" and the neutral name is the

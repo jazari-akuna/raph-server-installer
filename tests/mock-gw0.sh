@@ -30,7 +30,7 @@ cat > "$AWG_CONF" <<'EOF'
 [Interface]
 PrivateKey = MOCK_PRIVATE_KEY
 Address    = 10.99.0.1/24
-ListenPort = 51820
+ListenPort = 443
 EOF
 chmod 0600 "$AWG_CONF"
 

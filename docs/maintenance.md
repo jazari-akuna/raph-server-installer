@@ -507,7 +507,7 @@ passing. A future session should:
 3. Adjust `scripts/bootstrap-host.sh` to install ufw-docker and run
    `ufw enable` as the final step — **but only after** the rule set is
    verified against a known-good list of expected open ports
-   (`22/tcp`, `80/tcp`, `443/tcp`, `443/udp`, `51820/udp`).
+   (`22/tcp`, `80/tcp`, `443/tcp`, `443/udp` — covers both `gw0` and `qedge`).
 4. Retire `gw0-nat.service`:
    ```sh
    sudo systemctl disable --now gw0-nat.service

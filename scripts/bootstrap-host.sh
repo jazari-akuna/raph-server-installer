@@ -228,8 +228,10 @@ else
   ufw allow OpenSSH
   ufw allow 80/tcp
   ufw allow 443/tcp
+  # 443/udp covers BOTH the qedge alternate-ingress (Hysteria2) AND the gw0
+  # AmneziaWG listener (moved off 51820 to dodge UDP/non-443 DPI shaping).
+  # They cannot run simultaneously on the same host — one or the other.
   ufw allow 443/udp
-  ufw allow 51820/udp
 fi
 echo
 echo "    NOTE: ufw is configured but NOT enabled. Docker installs its own"

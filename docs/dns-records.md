@@ -32,7 +32,7 @@ them — clearer intent for ops.
 | Subdomain                              | Service        | Public DNS? | Notes                                              |
 |----------------------------------------|----------------|-------------|----------------------------------------------------|
 | `cloud.<your-domain>`     | `cloud` (copyparty) | yes    | HTTPS via `ingress`; password-protected           |
-| `gw.<your-domain>`        | `gw0` endpoint | yes         | UDP/51820 — peers dial this hostname              |
+| `gw.<your-domain>`        | `gw0` endpoint | yes         | UDP/443 — peers dial this hostname (QUIC-shape camouflage; collides with `qedge`) |
 | `cdn.<your-domain>`       | `qedge` SNI    | yes         | UDP/443 (QUIC); presented as TLS handshake        |
 | `console.<your-domain>`   | `console` (Portainer) | **NO** | mesh-only; no public record by design             |
 | `ingress` admin (port 81)              | NPM admin UI   | **NO**      | mesh-only / SSH-tunnel; no public hostname        |
@@ -107,7 +107,7 @@ The following layers MUST NOT sit in front of any record on this zone:
 - OVH AlwaysOn / OVH Web Hosting redirect.
 - Any third-party CDN, WAF, or reverse-proxy fronting.
 
-Why: `gw0` (UDP/51820) and `qedge` (UDP/443 QUIC) ride raw IP — an
+Why: `gw0` and `qedge` (both UDP/443; pick one) ride raw IP — an
 HTTP-only proxy drops them. A TLS-terminating proxy in front of
 `ingress` also breaks the wildcard cert chain we issued and inserts an
 unwanted MITM. Re-opening this is a plan-level decision; see

@@ -230,8 +230,8 @@ We use OVH for **DNS only**. No reverse-proxy / CDN sits in front of the
 records (Cloudflare orange-cloud, OVH's "AlwaysOn", anything similar).
 Putting one in front would:
 
-- Break `gw0` (UDP/51820 — HTTP-only proxies don't carry it).
-- Break `qedge` (QUIC on :443/udp — same reason).
+- Break `gw0` (UDP/443 with AmneziaWG framing — HTTP-only proxies don't carry it).
+- Break `qedge` (Hysteria2/QUIC on UDP/443 — same reason; also collides with `gw0` if both run).
 - Insert a third-party-terminated TLS hop in front of `ingress`, which
   defeats the wildcard cert chain we just issued and adds an unwanted
   MITM.
