@@ -1,0 +1,20 @@
+[Unit]
+Description=iperf3 server bound to gw0 (10.99.0.1) — only reachable via the AmneziaWG tunnel
+After=network-online.target awg-quick@gw0.service
+Wants=network-online.target
+Requires=awg-quick@gw0.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/iperf3 --server --bind 10.99.0.1 --port 5201
+Restart=on-failure
+RestartSec=5
+User=nobody
+Group=nogroup
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

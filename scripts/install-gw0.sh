@@ -339,6 +339,18 @@ systemctl enable raph-tunnel-tunables.service
 # Restart (not just start) so re-runs pick up edits to the script.
 systemctl restart raph-tunnel-tunables.service
 
+# iperf3 server bound to the tunnel IP — only reachable from peers, used
+# by scripts/diag-from-client.sh to measure in-tunnel throughput in both
+# directions when diagnosing per-peer download slowness. Tiny memory
+# footprint, hardened systemd unit (User=nobody, ProtectSystem=strict).
+strict_step "install iperf3-gw0 server (tunnel-only)"
+apt-get install -y iperf3
+install -m 0644 "${REPO_HOST_DIR}/systemd/iperf3-gw0.service" \
+  /etc/systemd/system/iperf3-gw0.service
+systemctl daemon-reload
+systemctl enable iperf3-gw0.service
+systemctl restart iperf3-gw0.service
+
 echo "==> verification"
 # Each command is a probe with independent failure modes; do not bail out
 # on the first non-zero — surface all of them so the operator can triage.
