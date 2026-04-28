@@ -314,6 +314,12 @@ systemctl enable awg-quick@gw0.service
 # to start.
 systemctl restart awg-quick@gw0.service
 
+# Wire systemd-resolved as the in-tunnel caching resolver for peers. Must
+# come AFTER awg-quick@gw0 is up — the resolver binds to 10.99.0.1 which
+# only exists once the interface is configured. Idempotent.
+strict_step "configure host DNS (systemd-resolved on 10.99.0.1)"
+"${SCRIPT_DIR}/configure-host-dns.sh"
+
 echo "==> verification"
 # Each command is a probe with independent failure modes; do not bail out
 # on the first non-zero — surface all of them so the operator can triage.

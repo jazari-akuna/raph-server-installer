@@ -436,7 +436,12 @@ func renderClientConf(p peer, pc *parsedConf, cfg config) string {
 	if priv == "" {
 		priv = "<PRIVATE_KEY_NOT_AVAILABLE_AFTER_CREATION>"
 	}
-	allowed := "0.0.0.0/0,::/0"
+	// AllowedIPs default is v4-only — dual-stack defaults force every
+	// peer through Happy-Eyeballs (~250ms wait) on every dual-stack
+	// hostname when the gateway has no v6 forwarding (the current
+	// install posture). Operators who DO route v6 can drop the v6
+	// CIDR back in via /var/cache/raph/allowed-ips.txt.
+	allowed := "0.0.0.0/0"
 	for _, candidate := range []string{
 		"/var/cache/raph/allowed-ips.txt",
 		filepath.Join(cfg.awgDir, "allowed-ips.txt"),
@@ -446,13 +451,43 @@ func renderClientConf(p peer, pc *parsedConf, cfg config) string {
 			break
 		}
 	}
+	// DNS default is the public Cloudflare/Google pair. If the host
+	// has set up a local caching resolver (configure-host-dns.sh),
+	// /var/cache/raph/dns-servers.txt overrides with 10.99.0.1 — saves
+	// 5-40ms per warm lookup across all peers via shared cache.
+	dns := "1.1.1.1, 8.8.8.8"
+	for _, candidate := range []string{
+		"/var/cache/raph/dns-servers.txt",
+		filepath.Join(cfg.awgDir, "dns-servers.txt"),
+	} {
+		if b, err := os.ReadFile(candidate); err == nil && len(b) > 0 {
+			dns = strings.TrimSpace(string(b))
+			break
+		}
+	}
+	// Inner MTU. AmneziaWG per-data-packet overhead is the same as
+	// vanilla WG (32B); junk packets only fire at handshake init/resp.
+	// On a clean 1500B path: 1500 - 20(IPv4) - 8(UDP) - 32(WG) = 1440
+	// safe ceiling. 1420 leaves 20B for a PPPoE-style hop. Override
+	// at /var/cache/raph/peer-mtu.txt for paths with smaller PMTU.
+	mtu := "1420"
+	for _, candidate := range []string{
+		"/var/cache/raph/peer-mtu.txt",
+		filepath.Join(cfg.awgDir, "peer-mtu.txt"),
+	} {
+		if b, err := os.ReadFile(candidate); err == nil && len(b) > 0 {
+			mtu = strings.TrimSpace(string(b))
+			break
+		}
+	}
 	out := &strings.Builder{}
 	fmt.Fprintf(out, "# enrol peer: %s\n", sanitize(p.Name))
 	fmt.Fprintf(out, "# generated %s\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintln(out, "[Interface]")
 	fmt.Fprintf(out, "PrivateKey = %s\n", priv)
 	fmt.Fprintf(out, "Address = %s/32\n", p.IP)
-	fmt.Fprintln(out, "DNS = 1.1.1.1, 8.8.8.8")
+	fmt.Fprintf(out, "MTU = %s\n", mtu)
+	fmt.Fprintf(out, "DNS = %s\n", dns)
 	for _, k := range []string{"Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"} {
 		if v := get(k); v != "" {
 			fmt.Fprintf(out, "%s = %s\n", k, v)

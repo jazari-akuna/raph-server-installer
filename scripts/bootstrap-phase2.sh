@@ -162,6 +162,16 @@ else
   run_subscript "$REPO_DIR/scripts/install-gw0.sh"
 fi
 
+# Idempotent re-run for upgrade paths: install-gw0.sh ALSO calls this
+# script, so on a fresh install it runs twice (cheap, no-op the second
+# time). On an upgrade where SKIP_GW0=1 but gw0 already exists from a
+# prior install, running here delivers the DNS optimization without the
+# operator having to re-run install-gw0.sh.
+if ip link show gw0 >/dev/null 2>&1; then
+  strict_step "configure host DNS (systemd-resolved on 10.99.0.1)"
+  run_subscript "$REPO_DIR/scripts/configure-host-dns.sh"
+fi
+
 # ──────────────────────────────────────────────────────────────────────────
 # Step 3 — shared volume (Parcel 2B).
 # ──────────────────────────────────────────────────────────────────────────

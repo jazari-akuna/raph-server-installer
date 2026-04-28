@@ -16,6 +16,18 @@
 -A POSTROUTING -s 10.99.0.0/24 -o ${PUBLIC_IFACE} -j MASQUERADE
 COMMIT
 
+# Mangle table: TCP MSS clamp on every TCP SYN traversing gw0. Without
+# this, new flows wait 2-3 RTTs for tcp_mtu_probing to discover the
+# right MSS — visible as "first request feels slow". --clamp-mss-to-pmtu
+# uses the gw0 interface MTU (1420 today), so this stays correct if MTU
+# is tuned. Both directions matter: clients dialling out (-o gw0) AND
+# return SYN-ACKs from servers (-i gw0).
+*mangle
+:FORWARD - [0:0]
+-A FORWARD -o gw0 -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+-A FORWARD -i gw0 -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+COMMIT
+
 # Filter table additions: ufw's default FORWARD policy is DROP. These two
 # rules let packets enter and leave gw0 freely. The install script appends
 # them inside the existing *filter section of before.rules (before its

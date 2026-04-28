@@ -22,10 +22,14 @@ Address = 10.99.0.1/24
 # UDP listen port. Matches ufw allow rule staged in bootstrap-host.sh.
 ListenPort = 51820
 
-# 1380 leaves headroom under the typical 1500-byte path MTU once the
-# AmneziaWG header (variable, larger than vanilla WG due to junk) is added.
-# Tune downward only if PMTUD black-holes are observed.
-MTU = 1380
+# 1500 (typical path MTU) - 20 (IPv4) - 8 (UDP) - 32 (WG framing) = 1440
+# safe ceiling. AmneziaWG's junk parameters (S1/S2/Jc/Jmin/Jmax) only
+# affect HANDSHAKE packets, not data packets, so per-packet overhead is
+# the same as vanilla WG. 1420 leaves 20B for a PPPoE-style intermediate
+# hop. Tune downward only if PMTUD black-holes are observed (combine
+# with `iptables -t mangle ... TCPMSS --clamp-mss-to-pmtu` already
+# spliced via host/ufw/before.rules.fragment).
+MTU = 1420
 
 # NAT MASQUERADE for 10.99.0.0/24. We program this from PostUp/PostDown
 # rather than relying solely on /etc/ufw/before.rules — the ufw fragment
