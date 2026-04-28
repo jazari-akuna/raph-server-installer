@@ -81,6 +81,13 @@ services:
       # shared audit log (peers + users + LUKS lifecycle entries).
       - /etc/amnezia/amneziawg:/etc/amnezia/amneziawg:rw
 
+      # Host-side override files that renderClientConf reads (DNS server,
+      # AllowedIPs, peer MTU). configure-host-dns.sh writes
+      # /var/cache/raph/dns-servers.txt; without this mount enrol falls
+      # back to the public-DNS default and the local resolver
+      # optimization is silently skipped.
+      - /var/cache/raph:/var/cache/raph:ro
+
       # LUKS blobs (/srv/store/data/<u>.img) and mountpoints
       # (/srv/store/mnt/<u>). Bind-propagation: rshared lets mounts
       # done inside the container appear on the host (so `cloud` —
