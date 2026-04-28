@@ -106,13 +106,16 @@
 <section>
   <h2>create user</h2>
   <p class="hint">
-    Creates the Authelia entry, host system user, 50&nbsp;GB LUKS volume,
-    and a fresh TOTP secret. The TOTP QR is shown once on the next page —
-    save it before navigating away. The same password feeds both the
-    Authelia argon2id hash and the LUKS unlock secret, so login auto-
-    unlocks the user's data volume. Tick "is admin" to grant the same
-    powers as the wizard-created admin (enrol UI + Portainer); leave it
-    off for a regular user (apps launcher + cloud only).
+    Creates the Authelia entry, host system user, and 50&nbsp;GB LUKS volume.
+    {{if .TOTPEnabled}}A fresh TOTP secret is also minted; the QR is shown
+    once on the next page — save it before navigating away.{{else}}TOTP is
+    disabled for this installation, so no second-factor QR will be shown
+    (sign-in is password-only).{{end}}
+    The same password feeds both the Authelia argon2id hash and the LUKS
+    unlock secret, so login auto-unlocks the user's data volume. Tick "is
+    admin" to grant the same powers as the wizard-created admin (enrol UI
+    + Portainer); leave it off for a regular user (apps launcher + cloud
+    only).
   </p>
   <form method="POST" action="/users">
     <input type="hidden" name="csrf" value="{{.CSRF}}">

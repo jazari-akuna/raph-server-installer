@@ -47,6 +47,7 @@
   </form>
 </section>
 
+{{if .TOTPEnabled}}
 <section>
   <h2>regenerate TOTP</h2>
   <p class="hint">
@@ -59,6 +60,7 @@
     <button type="submit" class="warn-btn">regenerate TOTP</button>
   </form>
 </section>
+{{end}}
 
 <section>
   <h2>storage volume</h2>

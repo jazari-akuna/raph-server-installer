@@ -5,6 +5,7 @@
 
   {{if .Flash}}<div class="warn">{{.Flash}}</div>{{end}}
 
+  {{if .TOTPEnabled}}
   <p>
     The user account has been created in Authelia, the LUKS volume
     was provisioned, and a TOTP secret has been generated. The QR
@@ -22,6 +23,18 @@
   {{if .OtpauthURI}}
   <h3>otpauth URI (for password managers)</h3>
   <pre class="conf">{{.OtpauthURI}}</pre>
+  {{end}}
+  {{else}}
+  <p>
+    The user account has been created in Authelia and the LUKS volume
+    was provisioned. TOTP is disabled for this installation, so no
+    second-factor secret was minted — the user signs in with password
+    only. To switch on TOTP later, flip <code>enable_totp</code> in
+    <code>/srv/store/setup/state.json</code>, change the matching
+    Authelia access rules from <code>one_factor</code> to
+    <code>two_factor</code>, and restart enrol; subsequent user-create
+    runs will display a fresh QR.
+  </p>
   {{end}}
 
   <p>

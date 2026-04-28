@@ -242,13 +242,15 @@ func isMounted(path string) bool {
 
 // luksCreate creates a fresh LUKS2 blob + ext4 fs at /srv/store/data/<u>.img,
 // initializes the mountpoint, leaves the volume CLOSED on return. Mirrors
-// scripts/create-store-volume.sh. Uses cfg.luksSizeGB for the envelope —
-// this is the day-2 /users/new path, which has no per-user size override
-// (the env-var default applies). Use luksCreateWithSize when a specific
-// size is known (e.g. finalize provisioning the admin's volume from the
-// wizard-captured PersonalLUKSSize).
+// scripts/create-store-volume.sh. Resolves the envelope via the same
+// precedence the dashboard uses (setupState.PersonalLUKSSize first, then
+// the ENROL_LUKS_SIZE_GB env fallback) so the size shown for prospective
+// users in the storage panel matches what their .img will actually be at
+// create time. Use luksCreateWithSize when a specific size is known
+// (e.g. finalize provisioning the admin's volume from a literal byte
+// count).
 func luksCreate(cfg config, user, passphrase string) error {
-	return luksCreateWithSize(cfg, user, passphrase, int64(cfg.luksSizeGB)<<30)
+	return luksCreateWithSize(cfg, user, passphrase, defaultPersonalNominalBytes(cfg))
 }
 
 // luksCreateWithSize is luksCreate parametrised by an explicit envelope in
@@ -452,24 +454,29 @@ func luksChangePassphrase(cfg config, user, oldPass, newPass string) error {
 	return nil
 }
 
-// luksDelete: lock first if needed, then shred the .img, remove the
-// mountpoint dir. Best-effort; logs and continues on per-step failure.
+// luksDelete: lock the volume if open, then unlink the .img and remove
+// the mountpoint dir. Best-effort; logs and continues on per-step failure.
+//
+// Why a plain unlink rather than `shred`: the .img is a LUKS2 ciphertext
+// blob — every block is encrypted under a master key wrapped in the
+// LUKS header at the start of the file. Once the file is unlinked the
+// header (and therefore the wrapped master key) is gone; the underlying
+// extents may linger on the disk for some time, but they're statistically
+// unrecoverable without that key. `shred -z` on a 50 GB sparse image
+// writes 4 passes (random + zero) over EVERY block, which (a) takes
+// 5–15 minutes per volume on commodity hardware and (b) inflates the
+// sparse file to its full envelope size BEFORE deleting it — so a
+// "delete" can briefly need 50 GB of free disk per volume. For this
+// installer's threat model (encrypted at rest, host-level wipe is
+// out-of-scope) plain unlink is the right choice.
 func luksDelete(cfg config, user string) error {
 	if err := luksLock(cfg, user); err != nil {
 		// Continue — the blob may not be open.
 	}
 	img, mnt, _ := volumePaths(cfg, user)
 	if _, err := os.Stat(img); err == nil {
-		// shred -u -v -z: overwrite + zero pass + unlink.
-		// 50 GB sparse file -> shred actually only writes the allocated
-		// blocks; on a sparse image with little real data this is fast
-		// (seconds), on a fully-allocated one it's GB-scale. For our
-		// 50 GB sparse images that may have grown: bounded by the
-		// actual data written, which is fine for our threat model.
-		if err := runCommand("shred", "-u", "-v", "-z", img); err != nil {
-			// Fallback: rm -f if shred is unavailable for any reason.
-			_ = os.Remove(img)
-			return fmt.Errorf("shred: %w (file removed without overwrite)", err)
+		if err := os.Remove(img); err != nil {
+			return fmt.Errorf("rm img: %w", err)
 		}
 	}
 	if err := os.RemoveAll(mnt); err != nil {

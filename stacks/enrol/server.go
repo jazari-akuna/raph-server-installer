@@ -294,6 +294,7 @@ type usersListData struct {
 	Users         []userRow
 	Storage       StorageInfo
 	Flash         string
+	TOTPEnabled   bool
 }
 
 type userRow struct {
@@ -332,6 +333,7 @@ func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash s
 		Users:         rows,
 		Storage:       storageSnapshot(s.cfg, names),
 		Flash:         flash,
+		TOTPEnabled:   s.totpEnabled(),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "users.html", data); err != nil {
@@ -458,7 +460,14 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	writeAudit(auditPath, auditEntry{Action: "luks.create", Actor: actor,
 		Target: name, Result: "ok"})
 
-	// 6. TOTP generate.
+	// 6. TOTP generate — only if the operator opted into 2FA at setup.
+	// When EnableTOTP is false the user authenticates with password only
+	// (Authelia policy stays one_factor); minting a secret here would just
+	// produce a confusing QR for an unenforced second factor.
+	if !s.totpEnabled() {
+		s.renderUserCreated(w, r, name, "", nil, "")
+		return
+	}
 	otpauth, qrPNG, err := totpGenerate(s.cfg, name)
 	if err != nil {
 		writeAudit(auditPath, auditEntry{Action: "totp.generate", Actor: actor,
@@ -471,6 +480,18 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Target: name, Result: "ok"})
 
 	s.renderUserCreated(w, r, name, otpauth, qrPNG, "")
+}
+
+// totpEnabled returns whether the operator opted into TOTP at setup time.
+// On any read/parse error we conservatively return false: an unknown
+// state is treated the same as "disabled" so a missing setup file never
+// produces a confusing QR for an unenforced second factor.
+func (s *server) totpEnabled() bool {
+	st, err := s.loadSetupState()
+	if err != nil || st == nil {
+		return false
+	}
+	return st.EnableTOTP
 }
 
 func (s *server) renderUserCreated(w http.ResponseWriter, r *http.Request,
@@ -493,6 +514,7 @@ func (s *server) renderUserCreated(w http.ResponseWriter, r *http.Request,
 		OtpauthURI    string
 		QRDataURI     template.URL
 		Flash         string
+		TOTPEnabled   bool
 	}{
 		Title:         "user created: " + name,
 		User:          r.Header.Get("X-Enrol-User"),
@@ -502,6 +524,7 @@ func (s *server) renderUserCreated(w http.ResponseWriter, r *http.Request,
 		OtpauthURI:    otpauth,
 		QRDataURI:     qrDataURI,
 		Flash:         flash,
+		TOTPEnabled:   s.totpEnabled(),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "user-created.html", data); err != nil {
@@ -561,6 +584,7 @@ type userDetailData struct {
 	Volume        VolumeInfo
 	Devices       []peer
 	Flash         string
+	TOTPEnabled   bool
 }
 
 // isAdminUser returns true iff the user has the `admins` Authelia group.
@@ -600,6 +624,7 @@ func (s *server) handleUserDetail(w http.ResponseWriter, r *http.Request, name s
 		ViewerIsAdmin: true, // requireAdmin gates this route
 		Target:        u, Name: name, IsAdmin: isAdminUser(u),
 		Volume: v, Devices: devices,
+		TOTPEnabled: s.totpEnabled(),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "user-detail.html", data); err != nil {
@@ -735,6 +760,11 @@ func (s *server) handleUserPassword(w http.ResponseWriter, r *http.Request, name
 func (s *server) handleUserTOTP(w http.ResponseWriter, r *http.Request, name string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.totpEnabled() {
+		http.Error(w, "TOTP is disabled for this installation — enable it in setup state before regenerating",
+			http.StatusBadRequest)
 		return
 	}
 	s.mu.Lock()
