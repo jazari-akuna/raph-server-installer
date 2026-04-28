@@ -174,19 +174,21 @@ one-time step (plus auto-renewal, which NPM handles).
 
 ### 3e. First proxy host: `cloud.${DOMAIN}`
 
-This proves the stack works end-to-end and gives `cloud` (copyparty) a
-public HTTPS front.
+This proves the stack works end-to-end and gives `cloud` (Nextcloud) a
+public HTTPS front. (Note: the wizard's `finalizeWireNPM` does this for
+you automatically; the manual recipe below is for diagnostics / reference.)
 
 In the admin UI -> **Hosts** -> **Proxy Hosts** -> **Add Proxy Host**:
 
 - **Domain Names**: `cloud.${DOMAIN}`
 - **Scheme**: `http`
-- **Forward Hostname / IP**: `cloud`  (the container name on the `edge`
-  network — Docker DNS resolves it)
-- **Forward Port**: `3923`  (copyparty default)
-- **Cache Assets**: off (copyparty handles this)
+- **Forward Hostname / IP**: `cloud-web`  (the nginx-sidecar container
+  on the `edge` network — Docker DNS resolves it)
+- **Forward Port**: `80`  (cloud-web nginx-sidecar listens on :80; NPM
+  terminates TLS upstream)
+- **Cache Assets**: off (Nextcloud's own cache headers are preferred)
 - **Block Common Exploits**: on
-- **Websockets Support**: on
+- **Websockets Support**: on (required for Nextcloud Talk signaling)
 - **SSL** tab:
   - SSL Certificate: the wildcard issued in step 3d.
   - **Force SSL**: on

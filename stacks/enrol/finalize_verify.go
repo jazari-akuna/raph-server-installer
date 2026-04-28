@@ -72,32 +72,11 @@ func (s *server) verifyUsersDB(adminUsername string) error {
 	return nil
 }
 
-// verifySharedVolume asserts the LUKS keyfile exists with non-zero size
-// AND the mapper device is mounted at the expected mountpoint. Both checks
-// are observable from /proc — no docker, no luks unlock attempt.
-func (s *server) verifySharedVolume() error {
-	const keyPath = "/etc/luks/_shared.key"
-	const mountPoint = "/srv/store/mnt/_shared"
-	info, err := os.Stat(keyPath)
-	if err != nil {
-		return fmt.Errorf("verify shared_volume: %s: %w", keyPath, err)
-	}
-	if info.Size() == 0 {
-		return fmt.Errorf("verify shared_volume: %s is empty (cloud's [/shared] block will fail-closed)", keyPath)
-	}
-	mounts, err := os.ReadFile("/proc/mounts")
-	if err != nil {
-		return fmt.Errorf("verify shared_volume: read /proc/mounts: %w", err)
-	}
-	for _, line := range strings.Split(string(mounts), "\n") {
-		fields := strings.Fields(line)
-		// fields: <device> <mountpoint> <fstype> <opts> <dump> <pass>
-		if len(fields) >= 2 && fields[1] == mountPoint {
-			return nil
-		}
-	}
-	return fmt.Errorf("verify shared_volume: %s is not mounted (expected /dev/mapper/store_shared)", mountPoint)
-}
+// (Pre-Wave-1: verifySharedVolume asserted the LUKS keyfile + mapper
+// mountpoint for the system-wide /shared volume copyparty bind-mounted.
+// With Nextcloud-managed cloud-data there's no shared LUKS volume to
+// verify — Nextcloud's group-folders app provides shared space inside
+// the regular datadir.)
 
 // unrendered matches an envsubst-style placeholder of the form
 // ${SHOUTY_SNAKE_CASE} — the exact shape envsubst leaves behind when an
@@ -302,9 +281,6 @@ func (s *server) verifySentinel() error {
 func (s *server) finalizeVerifyAll(ctx context.Context, st *setupState) *finalizeErr {
 	if err := s.verifyUsersDB(st.AdminUsername); err != nil {
 		return &finalizeErr{Step: "users_db", Message: err.Error()}
-	}
-	if err := s.verifySharedVolume(); err != nil {
-		return &finalizeErr{Step: "shared_volume", Message: err.Error()}
 	}
 	if err := s.verifyTemplatesRendered(); err != nil {
 		return &finalizeErr{Step: "templates", Message: err.Error()}

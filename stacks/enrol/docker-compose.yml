@@ -1,4 +1,4 @@
-# enrol — server admin UI (users, LUKS storage, TOTP, devices).
+# enrol — server admin UI (users, storage tracking, TOTP, peers).
 #
 # Camouflage: external hostname is `enrol.${DOMAIN}` (e.g. enrol.example.com).
 # Internal container/service name `enrol` is fine.
@@ -7,37 +7,29 @@
 # time from the operator-supplied $DOMAIN. Compose substitutes it before
 # starting the container.
 #
-# Auth is delegated entirely to Authelia via NPM forward-auth. enrol
-# trusts the Remote-User and Remote-Groups headers and rejects any
-# request missing them. CSRF tokens further gate every mutating POST.
-# See DESIGN.md.
+# Auth is delegated to Authelia via NPM forward-auth (ADR-003). enrol trusts
+# the Remote-User and Remote-Groups headers and rejects any request missing
+# them. CSRF tokens further gate every mutating POST. See DESIGN.md.
 #
 # === PRIVILEGE WARNING ====================================================
-# enrol runs PRIVILEGED. It can:
-#   - format/wipe LUKS blobs under /srv/store
-#   - mount / unmount filesystems on the host
-#   - rewrite Authelia's users_database.yml (create/delete users,
-#     change passwords, change group membership)
-#   - exec into any container via the bind-mounted docker socket
-# Anyone with admin access to enrol is effectively root on this host.
-# Mitigations: NPM HTTPS + Authelia 2FA + CSRF + audit log. See
-# README.md "Security & Threat Model" and DESIGN.md § 3.
+# enrol holds the docker socket (`/var/run/docker.sock:rw`). With it the
+# container can spawn privileged sibling containers and pivot to host root
+# via `docker run -v /:/host`. Anyone with admin access to enrol is
+# effectively root on this host. Mitigations: NPM HTTPS + Authelia 2FA +
+# CSRF + audit log. See README.md "Security & Threat Model" and DESIGN.md.
+#
+# Per-user LUKS was removed (ADR-004). The container no longer needs
+# `privileged: true` / `pid: host` / cryptsetup / loop devices / dm-mapper
+# — Wave 1C of the Nextcloud migration ripped all of that. The remaining
+# attack surface (docker socket) is unchanged but the casual blast radius
+# from accidental mount/loop syscalls is gone.
 # ==========================================================================
 #
 # Privilege model:
-#   - privileged: true — covers loop devices, dm-crypt, mount, shred.
-#     We considered a surgical alternative (cap_add SYS_ADMIN/MKNOD/
-#     NET_ADMIN + --device=/dev/loop-control + cgroup rule for /dev/loopN
-#     + AppArmor=unconfined), but the practical access set is the same
-#     and the surgical version is fragile across kernel updates. See
-#     DESIGN.md § 0.4.
-#   - network_mode: host — kept from prior compose. `awg syncconf gw0`
-#     needs to run in the host's net namespace and is simpler with
-#     network_mode: host than with nsenter.
-#   - The container exposes ENROL_LISTEN on 172.17.0.1:8080. NPM (on the
-#     edge bridge) reaches us via that bridge gateway IP. The public WAN
-#     interface is NOT bound. We cannot bind 127.0.0.1 because edge-network
-#     containers reach the host as 172.17.0.1, not as loopback.
+#   - network_mode: host — `awg syncconf gw0` needs the host's net namespace
+#     and is simpler with network_mode: host than via nsenter. The container
+#     binds ENROL_LISTEN on 172.17.0.1:8080 (docker bridge gateway); the
+#     public WAN interface is NOT bound. Public exposure stays via NPM only.
 
 services:
   enrol:
@@ -47,38 +39,15 @@ services:
     image: enrol:local
     container_name: enrol
     restart: unless-stopped
-    # 128 MiB is enough for the Go binary itself but cryptsetup's
-    # luksFormat invokes argon2id KDF which sizes itself to *available
-    # memory* on the system (cryptsetup --pbkdf-memory or --iter-time
-    # default targets ~1 s of CPU regardless of how much RAM that ends
-    # up costing). On the 4 GB VPS it picks ~1 GiB; under our prior
-    # 128 MiB cgroup limit the kernel OOM-kills the cryptsetup process
-    # mid-format. Lift the limit to 1.5 GiB — the steady-state RSS of
-    # the Go binary is still tiny (~10 MiB), this is just headroom for
-    # the bursty luksFormat/luksAddKey paths.
-    mem_limit: 1500m
 
     # Share the host's network namespace directly. syncconf runs in the
     # same namespace as gw0, so no nsenter / no /proc/1/ns/net access
     # needed. Mutually exclusive with `networks:` and `ports:`.
     network_mode: host
 
-    # pid: host is required so `nsenter --target 1 --mount` can find
-    # the host's init process (PID 1). Without it, the container has
-    # its own PID namespace and "PID 1" is the container's entrypoint;
-    # nsenter would land in our own mount namespace, defeating the
-    # purpose. nsenter is what we use to run useradd/userdel/getent
-    # against the host's /etc — see luks.go § hostUserAdd.
-    pid: host
-
-    # privileged: true covers the entire LUKS toolchain: loop devices,
-    # dm-mapper, mount syscalls, raw block-device shred. cap_add is
-    # implied but listed for documentation.
-    privileged: true
-
     volumes:
       # Source of truth for peers: gw0.conf + sidecar metadata + the
-      # shared audit log (peers + users + LUKS lifecycle entries).
+      # shared audit log (peers + users lifecycle entries).
       - /etc/amnezia/amneziawg:/etc/amnezia/amneziawg:rw
 
       # Host-side override files that renderClientConf reads (DNS server,
@@ -88,17 +57,14 @@ services:
       # optimization is silently skipped.
       - /var/cache/raph:/var/cache/raph:ro
 
-      # LUKS blobs (/srv/store/data/<u>.img) and mountpoints
-      # (/srv/store/mnt/<u>). Bind-propagation: rshared lets mounts
-      # done inside the container appear on the host (so `cloud` —
-      # which mounts /srv/store/mnt:/w with rslave — picks them up),
-      # AND lets host-driven mounts come back into the container.
-      # See ../enrol/DESIGN.md § 0.3 and stacks/cloud/docker-compose.yml.
-      - type: bind
-        source: /srv/store
-        target: /srv/store
-        bind:
-          propagation: rshared
+      # /srv/store holds: enrol's setup wizard state (/srv/store/setup),
+      # the launcher tile dir (/srv/store/enrol-launcher), the peer
+      # archive (/srv/store/enrol-peers-archive), and Nextcloud's per-
+      # user data dir (/srv/store/cloud-data, owned by uid 33). enrol
+      # reads cloud-data via `du -sb` for the admin storage page (see
+      # storage.go). Plain rw bind — no rshared propagation needed
+      # since we no longer mount LUKS volumes from inside the container.
+      - /srv/store:/srv/store:rw
 
       # Authelia's source-of-truth directory — we bind the parent dir
       # (not just users_database.yml) so atomic tmpfile+rename writes
@@ -112,19 +78,11 @@ services:
       - /opt/stacks/authelia:/etc/authelia:rw
 
       # Docker socket for `docker exec authelia authelia storage user
-      # totp generate <user>`. This is the second-most-sensitive bind
-      # after /srv/store; together they make this container effectively
-      # root-equivalent on the host. See DESIGN.md § 3.
+      # totp generate <user>` and `docker exec cloud occ user:delete`.
+      # This is the most-sensitive bind on this container; together
+      # with /opt/stacks below it makes enrol effectively root-equivalent
+      # on the host. See DESIGN.md.
       - /var/run/docker.sock:/var/run/docker.sock:rw
-
-      # NOTE on host-user management: we do NOT bind-mount the host's
-      # /etc/passwd into the container. useradd writes via rename-onto-
-      # /etc/passwd which replaces the inode; a single-file bind would
-      # then point at the OLD inode and the container would see stale
-      # data. Instead, both reads (`getent`) and writes (`useradd`,
-      # `userdel`) go through `nsenter --target 1 --mount` to enter the
-      # host's mount namespace. See luks.go § lookupHostUser /
-      # hostUserAdd / hostUserDel.
 
       # AmneziaWG userspace tools live on the host (the kernel module
       # understands the Jc/Jmin/H1-H4 params; vanilla wg-quick strip
@@ -141,37 +99,21 @@ services:
       # reads it once at startup and constant-time-compares against
       # the operator's ?token=. The repo + stacks dirs are needed by
       # the finalize pipeline so it can re-run render-templates.sh
-      # and wire-npm-routes.sh, and so it can `docker compose run`
-      # the certbot one-shot from the ingress stack.
+      # and so it can `docker compose run` the certbot one-shot from
+      # the ingress stack.
       #
-      # Both repo + stacks are bind-mounted RW (not ro) because
+      # Both repo + stacks are bind-mounted RW (not :ro) because
       # render-templates.sh writes the rendered sibling next to each
       # *.template file under /opt/raph-server-installer, and the
       # finalize handler appends operator-supplied secrets to
       # /opt/stacks/.env (NPM admin password etc.). With `:ro` here
       # the wizard's templates step fails with EROFS on the mv into
-      # the rendered output.
-      # RW (not :ro) — finalize's OIDC rotation step (oidc.go) writes the
-      # plaintext client_secret here for the operator to paste into Portainer.
-      # The directory also holds /etc/raph-installer/setup-token (read-only
-      # to us in practice) and /etc/raph-installer/npm-bootstrap.pass (read
-      # by finalizeWireNPM). Threat model unchanged: enrol is already
-      # privileged + holds the docker socket; whether this bind is :ro or :rw
-      # makes no real difference to the attack surface.
+      # the rendered output. Finalize's OIDC rotation step also writes
+      # the plaintext client_secret under /etc/raph-installer/ for the
+      # operator to paste into Portainer / Nextcloud user_oidc.
       - /etc/raph-installer:/etc/raph-installer:rw
       - /opt/raph-server-installer:/opt/raph-server-installer:rw
       - /opt/stacks:/opt/stacks:rw
-
-      # Shared LUKS keyfile directory. create-shared-volume.sh runs INSIDE
-      # this container during finalize and writes /etc/luks/_shared.key (mode
-      # 0400 root:root) — the boot-time shared-store.service unit on the host
-      # later reads that same keyfile to auto-mount /dev/mapper/store_shared
-      # after reboot. Without this bind, the keyfile lands in the container's
-      # overlay fs, evaporates on rebuild, the host's shared-store.service
-      # fails on boot, and verifySharedVolume (which stats this path) fails.
-      # Mode is rw because the script creates the directory + file from
-      # scratch on first run.
-      - /etc/luks:/etc/luks:rw
 
       # DNS-01 credentials hand-off. enrol writes the operator-supplied
       # provider creds to /run/raph-certbot/<provider>.ini at finalize
@@ -226,20 +168,8 @@ services:
       ENROL_USERS_DB: "/etc/authelia/users_db/users_database.yml"
       ENROL_AUTHELIA_CONTAINER: "authelia"
 
-      # Where to proxy /api/firstfactor for the auto-unlock-on-login path
-      # (see loginintercept.go). The Authelia compose binds 9091 to the
-      # host loopback for exactly this — never bind it to 0.0.0.0.
-      # network_mode: host means 127.0.0.1 here is the host loopback.
-      ENROL_AUTHELIA_URL: "http://127.0.0.1:9091"
-
-      # LUKS storage layout. Match scripts/create-store-volume.sh.
-      ENROL_STORE_DATA_DIR: "/srv/store/data"
-      ENROL_STORE_MNT_DIR: "/srv/store/mnt"
-      ENROL_LUKS_SIZE_GB: "50"
-
-      # Launcher (post-login app tile grid). Lives under /srv/store so it
-      # rides the same bind mount as the user volumes; the directory is
-      # bootstrapped on startup with three default tiles.
+      # Launcher (post-login app tile grid). Lives under /srv/store; the
+      # directory is bootstrapped on startup with the default tiles.
       ENROL_LAUNCHER_DIR: "/srv/store/enrol-launcher"
 
       # Authoritative on-disk archive of rendered peer .conf files.

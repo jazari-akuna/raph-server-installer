@@ -7,12 +7,13 @@
 
   {{if .TOTPEnabled}}
   <p>
-    The user account has been created in Authelia, the LUKS volume
-    was provisioned, and a TOTP secret has been generated. The QR
-    below is the <strong>only</strong> opportunity to capture the TOTP
-    seed — it is not stored in any log and cannot be retrieved later.
-    If you navigate away without scanning, regenerate from the user
-    page (this invalidates any previously displayed secret).
+    The user account has been created in Authelia and a TOTP secret has
+    been generated. The QR below is the <strong>only</strong>
+    opportunity to capture the TOTP seed — it is not stored in any log
+    and cannot be retrieved later. If you navigate away without
+    scanning, regenerate from the user page (this invalidates any
+    previously displayed secret). The Nextcloud account is auto-created
+    the first time the user signs in to <code>cloud.{{domain}}</code>.
   </p>
 
   {{if .QRDataURI}}
@@ -26,10 +27,11 @@
   {{end}}
   {{else}}
   <p>
-    The user account has been created in Authelia and the LUKS volume
-    was provisioned. TOTP is disabled for this installation, so no
-    second-factor secret was minted — the user signs in with password
-    only. To switch on TOTP later, flip <code>enable_totp</code> in
+    The user account has been created in Authelia. TOTP is disabled for
+    this installation, so no second-factor secret was minted — the user
+    signs in with password only. The Nextcloud account is auto-created
+    the first time the user signs in to <code>cloud.{{domain}}</code>.
+    To switch on TOTP later, flip <code>enable_totp</code> in
     <code>/srv/store/setup/state.json</code>, change the matching
     Authelia access rules from <code>one_factor</code> to
     <code>two_factor</code>, and restart enrol; subsequent user-create

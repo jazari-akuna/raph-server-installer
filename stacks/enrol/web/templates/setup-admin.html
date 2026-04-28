@@ -4,10 +4,10 @@
   <h2>first admin</h2>
   <p>
     This is the operator account. It gets the <code>admins</code> group
-    in Authelia (which is required to reach the enrol UI and Portainer)
-    and a host-side OS user. The login password is also used as the LUKS
-    passphrase for the per-user encrypted volume; the login interceptor
-    auto-unlocks it on every successful sign-in.
+    in Authelia (which is required to reach the enrol UI and Portainer).
+    The Nextcloud account is auto-created the first time the operator
+    signs in to <code>cloud.{{.Domain}}</code> — the user_oidc app
+    pulls uid/name/email/group from the Authelia OIDC claims.
   </p>
   <p class="hint">
     Add additional users from the enrol UI after setup completes. There

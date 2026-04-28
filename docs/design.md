@@ -24,10 +24,14 @@ the operator controls. The stack delivers five things:
    should not need SSH for day-to-day operations.
 2. **Reverse-proxy** those apps behind clean HTTPS via Nginx Proxy
    Manager with an automatic Let's Encrypt wildcard cert.
-3. **Per-user encrypted file storage** via copyparty, with a per-user
-   LUKS2 sparse blob underneath (maintainer-blessed pattern:
-   <https://ocv.me/doc/unix/portable-luks.sh>) plus a shared LUKS volume
-   for cross-user collaboration.
+3. **Multi-user file storage and collaboration** via Nextcloud (with
+   Talk for WebRTC calls and groupfolders for shared spaces), backed by
+   Postgres + Redis. User data lives in plaintext on the host's
+   encrypted-at-rest filesystem; per-user isolation is enforced at the
+   application layer (Nextcloud's per-user data dir + ACLs). See
+   `docs/architecture-decisions.md` ADR-004 for why per-user LUKS was
+   removed and how to opt into Nextcloud Server-side Encryption if
+   cold-disk protection becomes important again.
 4. **Remote-access gateway** (AmneziaWG, branded internally as `gw0`)
    that lets each admin "use the internet as if they were on the
    server," with optional **client-side regional split** so that
@@ -39,10 +43,11 @@ the operator controls. The stack delivers five things:
    opaque ciphertext to the backup script).
 
 Small admin set (typically 1–4), shared Docker daemon, single host
-kernel. Threat model is **encrypted at rest from disk theft, hosting-
-provider snapshots, and leaked backups**, not "zero-trust against a
-co-admin with root." Operators who need hard tenant isolation should
-look elsewhere.
+kernel. Threat model is **trusted co-admins on a host whose underlying
+filesystem is encrypted by the VPS provider** (Layerstack provides
+full-disk encryption for the boot volume). Per-user file isolation is
+application-layer (Nextcloud ACLs), not block-layer. Operators who need
+hard tenant isolation should look elsewhere.
 
 A secondary requirement is **operational discretion** ("camouflage" in
 the README): the externally visible footprint (DNS labels, SNI strings,
@@ -75,7 +80,7 @@ gitignored — only declarative source lives in version control.
 ├── stacks/                              # console-managed compose stacks
 │   ├── ingress/docker-compose.yml       # NPM (reverse proxy)
 │   ├── console/docker-compose.yml       # Portainer (Docker UI)
-│   ├── cloud/docker-compose.yml         # copyparty (file server)
+│   ├── cloud/docker-compose.yml         # Nextcloud + Postgres + Redis + nginx sidecar
 │   ├── authelia/docker-compose.yml      # Authelia (SSO / OIDC)
 │   ├── enrol/docker-compose.yml         # custom Go service: setup wizard + admin UI
 │   └── qedge/docker-compose.yml         # alternate ingress (off by default)
@@ -83,16 +88,13 @@ gitignored — only declarative source lives in version control.
 │   ├── sysctl/99-host.conf              # → /etc/sysctl.d/99-host.conf
 │   ├── ufw/before.rules.fragment        # NAT MASQUERADE block for /etc/ufw/before.rules
 │   ├── wireguard/gw0.conf.template      # gateway server config (peers stripped)
-│   └── systemd/
-│       └── store-mount@.service         # → /etc/systemd/system/store-mount@.service
+│   └── systemd/                         # gateway / cert-watcher / bootstrap-continue units
 ├── scripts/
 │   ├── bootstrap-host.sh                # base host hardening
 │   ├── install-docker.sh                # Docker CE + edge network
 │   ├── install-gw0.sh                   # AmneziaWG DKMS install
 │   ├── install-mesh.sh                  # optional Tailscale
 │   ├── render-templates.sh              # envsubst over .template files
-│   ├── mount-stores.sh                  # interactive: prompts for LUKS passphrases on reboot
-│   ├── create-store-volume.sh           # creates a per-user .img
 │   ├── provision-peer.sh                # produces peer .conf + QR for a device
 │   ├── update-route-tables.sh           # regenerates regional-split CIDR set
 │   └── smoke-test.sh                    # end-to-end probes (laptop-side)
@@ -122,11 +124,10 @@ public-repo round-trip; it is not the primary install mechanism.
         │ └──┬──────────┬──────────┬─────────────┘ │
         │    ▼          ▼          ▼               │
         │  console     cloud    user apps          │ Docker network "edge"
-        │ (Portainer) (copyparty) (compose stacks) │
+        │ (Portainer) (Nextcloud) (compose stacks) │
         │                ▲                         │
         │                │ bind-mounts             │
-        │   /srv/store/mnt/<u>/  (one per user) ←──│ unlocked encrypted volume mountpoints
-        │   /srv/store/data/<u>.img                 │ encrypted blobs at rest
+        │   /srv/store/cloud-{data,config,apps,db} │ Nextcloud + Postgres state on host
         │                                          │
         │ gw0   :443/udp   ── primary gateway, kernel module (QUIC-shape camouflage)
         │ qedge :443/udp   ── alternate ingress (TLS-camouflaged QUIC); MUTUALLY EXCLUSIVE with gw0
@@ -139,10 +140,10 @@ public-repo round-trip; it is not the primary install mechanism.
    gateway client (default) →  AllowedIPs = world − domestic CIDR set
    mesh client (optional)   →  reach internal services via overlay
    sing-box client (reserve) → alternate ingress + GeoIP-direct rules
-   restic client (cron)     →  pulls /srv/store/data/$user.img over ssh
+   backup workflow          →  rsync /srv/store/cloud-* + pg_dump (ADR-001)
 ```
 
-Single-host, single-Docker-daemon, ingress (NPM) is the only thing on :80/:443. Every other service is internal to a Docker network and only reachable through ingress (or via the overlay mesh). Encrypted blobs live on the host filesystem (not inside Docker volumes) so they survive container churn and can be backed up as plain files.
+Single-host, single-Docker-daemon, ingress (NPM) is the only thing on :80/:443. Every other service is internal to a Docker network and only reachable through ingress (or via the overlay mesh). Per ADR-001, every stack's persistent state lives under `/srv/store/<stack>-*` host bind-mounts so backup is one rsync per box plus a `pg_dump` per Postgres-backed stack — never inside opaque Docker named volumes.
 
 ## Component Decisions
 
@@ -152,8 +153,8 @@ Single-host, single-Docker-daemon, ingress (NPM) is the only thing on :80/:443. 
 | Container runtime | Docker CE + compose v2 | Already familiar, manageable from the web UI, vast image ecosystem. |
 | Container UI | **Portainer CE** (referred to internally as `console`) | Mature, supports compose stacks, custom containers, image build, volume/network management. ~150 MB RAM. |
 | Reverse proxy | **Nginx Proxy Manager** (referred to internally as `ingress`) | Click-driven UI, auto-Let's Encrypt with DNS-01 wildcard via the operator's chosen DNS provider (Cloudflare / OVH / Route53 / DigitalOcean / Google / Linode / RFC2136), per-host access lists. ~100 MB RAM. |
-| File server | **copyparty** in Docker (referred to internally as `cloud`) | Lightweight, single-binary, IdP-mode ACLs per-user, zero-config TLS via NPM. |
-| At-rest encryption | **LUKS2** sparse file per user, mounted at unlock time via systemd | Maintainer-recommended; portable single-file blob; ~0% perf overhead; trivial backup target. |
+| File server + collaboration | **Nextcloud** (fpm + Postgres + Redis + nginx sidecar) in Docker (referred to internally as `cloud`) | Drag-and-drop file moves, share-link semantics, integrated Talk for WebRTC calls, groupfolders for shared spaces, OIDC via the Authelia `cloud` client. |
+| At-rest encryption | **VPS-provider full-disk encryption** (e.g. Layerstack Layerstack-encrypted host filesystem). Optional Nextcloud Server-side Encryption (`occ app:enable encryption`) if cold-disk-from-host-image protection is needed beyond what the provider gives. | Per-user LUKS was removed in ADR-004 — see that decision for rationale and the SSE opt-in path. |
 | Primary gateway | **AmneziaWG** kernel module via DKMS, interface `gw0` | WireGuard variant with anti-DPI junk packets + randomized init headers. Single-digit-% overhead. Survives "reliable for daily work" regional pressure. Interface name `gw0`, not `awg0`/`wg0`, to avoid the obvious banner. |
 | Alternate ingress | **Hysteria2** (referred to internally as `qedge`) | QUIC on :443/udp, presents as ordinary TLS handshake. 50–500 Mbps single-stream on 2 vCPU, ~5–10% overhead. Stays stopped by default; switched on only when the primary path is being actively probed/blocked. |
 | Admin overlay | **Tailscale** (referred to internally as `mesh`) | Useful for admins not currently behind heavy filtering; gives an out-of-band path to `console`/`ingress` admin UIs that never has to be exposed to the public internet. |
@@ -170,20 +171,21 @@ The installer uses these neutral identifiers consistently:
 |---|---|
 | `ingress` | Nginx Proxy Manager (reverse proxy + ACME) |
 | `console` | Portainer (Docker management UI) |
-| `cloud` | copyparty (file server) |
+| `cloud` | Nextcloud (file server + Talk + groupfolders) |
 | `gw0` | AmneziaWG kernel interface |
 | `qedge` | Hysteria2 QUIC service (kept stopped by default) |
 | `mesh` | Tailscale (admin overlay) |
-| `store` | the per-user encrypted volume system (LUKS blob + mountpoint) |
+| `store` | the host bind-mount root for every stack's persistent state (`/srv/store/<stack>-*`, ADR-001) |
 
-Subdomains, paths, container names, systemd units all follow this naming. Public-facing artifacts never use the words "vpn", "wireguard", "tunnel", "stealth", "vault", "luks", or "crypt".
+Subdomains, paths, container names, systemd units all follow this naming. Public-facing artifacts never use the words "vpn", "wireguard", "tunnel", "stealth", or upstream project names. See ADR-002 for the camouflage policy.
 
 ### Things explicitly NOT in scope
 
 - Hard multi-tenant isolation (LXC/VM per user). The threat model assumes
   trusted co-admins, not adversarial users with shell access.
 - Client-side end-to-end encryption (Cryptomator etc.). The installer
-  delivers encrypted-at-rest only; clients see plaintext.
+  delivers application-layer access control on a provider-encrypted
+  filesystem; clients see plaintext.
 - CDN / DNS-proxy fronting (Cloudflare orange-cloud, OVH AlwaysOn, etc.)
   on the apex or any subdomain. The installer uses the chosen DNS
   provider for DNS-01 ACME only; records stay direct (no proxy in
@@ -212,7 +214,7 @@ Setup-time and steady-state subdomains created/used by the installer:
 |---|---|---|
 | `setup.<your-domain>` | NPM proxy host → `enrol` on `172.17.0.1:8080` | setup phase only — proxy host removed and `enrol` returns 404 on `/setup*` once the wizard is done |
 | `auth.<your-domain>` | `authelia` | SSO login portal + OIDC issuer |
-| `cloud.<your-domain>` | `cloud` (copyparty) | public, gated by Authelia forward-auth |
+| `cloud.<your-domain>` | `cloud-web` (nginx → Nextcloud-fpm) | public, Authelia rule = `bypass`; Nextcloud owns the session via the Authelia OIDC `cloud` client (ADR-003) |
 | `enrol.<your-domain>` | `enrol` | admin UI for user / peer / volume management |
 | `console.<your-domain>` | `console` (Portainer) | OIDC-gated Docker UI |
 | `gw.<your-domain>` | `gw0` | AmneziaWG endpoint (UDP) |
@@ -231,25 +233,25 @@ edge to a passive observer.
 /etc/wireguard/peers/<device>.conf           # generated peer configs (one per device)
 /etc/sysctl.d/99-host.conf                   # ip_forward=1, BBR, fs.inotify limits, etc.
 /etc/ufw/before.rules                        # NAT MASQUERADE for gw0
-/etc/systemd/system/store-mount@.service     # per-user volume unlock unit (template)
 /etc/cron.monthly/update-route-tables        # refresh domestic-CIDR set
 
-/srv/store/data/<u>.img                      # 50 GB sparse, LUKS2 (one per user)
-/srv/store/mnt/<u>/                          # mountpoint when unlocked (one per user)
+/srv/store/cloud-data/                       # Nextcloud user data (uid 33 www-data, ADR-001)
+/srv/store/cloud-config/                     # Nextcloud config.php + per-instance state
+/srv/store/cloud-apps/                       # Nextcloud custom_apps (operator-installed apps)
+/srv/store/cloud-db/                         # Postgres data dir (uid 70)
 
 /opt/stacks/                                 # console-managed compose stacks
   ingress/                                   # NPM
   console/                                   # Portainer (bootstrap-deployed)
-  cloud/                                     # copyparty + bind-mounts /srv/store/mnt
+  cloud/                                     # Nextcloud + Postgres + Redis + nginx sidecar
   qedge/                                     # alternate ingress (off by default)
 
 /opt/scripts/
-  mount-stores.sh                            # interactive: prompts for passphrases on (re)boot
   update-route-tables.sh                     # regenerates AllowedIPs complement
   provision-peer.sh                          # produces peer .conf + QR for a device
 ```
 
-No path on this filesystem contains the words `luks`, `vault`, `vpn`, `wireguard`, `amnezia`, `hysteria`, `tailscale`, or `stealth`. Backup blobs leak only as `${user}.img` files under a directory called `store`.
+No path on this filesystem contains the words `vpn`, `wireguard`, `amnezia`, `hysteria`, `tailscale`, or `stealth`. Per ADR-001, every stack's persistent state lives under `/srv/store/<stack>-*` so a single `rsync` (plus `pg_dump` for Postgres-backed stacks) covers backup.
 
 ## Build Sequence
 
@@ -287,8 +289,11 @@ command; everything else is computed.
    `bootstrap-continue.service` and reboots; phase 1 resumes
    automatically post-reboot. Falls back to `amneziawg-go` userspace
    if DKMS fails entirely.
-5. **`/srv/store` skeleton** — create `data/` and `mnt/` directories,
-   install `store-mount@.service` systemd template.
+5. **`/srv/store` skeleton + cloud bind-mount targets** — create
+   `/srv/store/cloud-{data,config,apps,db}` with the right uid/gid
+   (33:33 for the three Nextcloud dirs, 70:70 for Postgres). Per
+   ADR-001 these host bind-mounts replace the previous LUKS-blob
+   layout; the Nextcloud stack refuses to init if perms are wrong.
 6. **Bring up the Docker stacks in setup mode** —
    `docker compose up -d` for `ingress`, `authelia`, `cloud`, `console`,
    `enrol`. `enrol` keeps its host-mode listener on `172.17.0.1:8080`;
@@ -311,8 +316,8 @@ step is idempotent: refreshing or going back does not corrupt state.
    operator can override the check if propagation is still in flight.
 2. **First admin** — collect username, password, email. Generates the
    argon2id digest, writes the bootstrap `users_database.yml` for
-   Authelia, registers the OS account that owns the admin's LUKS
-   volume.
+   Authelia. The Nextcloud account is provisioned automatically by
+   the `user_oidc` app on first OIDC login (no `occ user:add` here).
 3. **DNS provider credentials** — operator chooses Cloudflare, OVH,
    Route53, DigitalOcean, Google, Linode, or RFC2136 from a dropdown
    and pastes the relevant token / API key. The wizard writes the
@@ -321,19 +326,23 @@ step is idempotent: refreshing or going back does not corrupt state.
 4. **Cert issuance + ingress wireup** — `enrol` talks to NPM's REST API
    to issue the wildcard cert (DNS-01 via the operator's chosen provider)
    and upsert the four steady-state proxy hosts (`auth`, `cloud`,
-   `enrol`, `console`) on HTTPS. The bootstrap `setup.<your-domain>`
-   proxy host is removed. From here on the operator reaches the admin
-   surface at `enrol.<your-domain>` (HTTPS, behind Authelia).
-5. **Storage** — create the admin's LUKS volume and the shared LUKS
-   volume (`_shared.img`). The admin chooses passphrases here; they
-   are never written to disk on the server. The shared volume's
-   keyfile lives at `/etc/luks/_shared.key` (`mode 0600`, root-owned)
-   so it survives reboots without prompting.
+   `enrol`, `console`) on HTTPS. The `cloud` proxy host uses the
+   Nextcloud advanced_config template (50 GB upload chain, no
+   forward-auth — Nextcloud owns its session via OIDC). The bootstrap
+   `setup.<your-domain>` proxy host is removed. From here on the
+   operator reaches the admin surface at `enrol.<your-domain>` (HTTPS,
+   behind Authelia).
+5. **Storage** — set the Nextcloud per-user quota default (default
+   50 GB; 0 = unlimited). Applied at first OIDC login via
+   `occ user:setting <u> files quota`. No passphrases collected; user
+   data lives in plaintext on the host's encrypted-at-rest filesystem
+   (ADR-004).
 6. **Done** — write `/srv/store/.setup-complete`, redirect to the
    Authelia login portal. From this point the `setup.<your-domain>`
    proxy host is gone and `enrol` returns 404 on every `/setup*` route;
-   the operator manages users, peers, and volumes through the regular
-   admin UI at `enrol.<your-domain>`.
+   the operator manages users and peers through the regular admin UI at
+   `enrol.<your-domain>` (which also surfaces per-user usage via
+   `occ user:info`, see ADR-005).
 
 ### Optional post-install steps
 
@@ -386,13 +395,14 @@ real but slow.
 End-to-end checks before declaring done. Run from outside the VPS unless noted.
 
 1. **Public HTTPS reachability**
-   - `curl -sI https://cloud.<your-domain>` → 200, valid Let's Encrypt cert covering `*.<your-domain>`.
-   - `curl -sI https://console.<your-domain>` → connection refused or DNS NXDOMAIN (admin UI is **not** publicly exposed; this is the intended state).
-2. **Encrypted volume round-trip**
-   - With a user's volume unlocked: upload `test.bin` via `cloud`.
-   - On host: `umount /srv/store/mnt/<u> && cryptsetup close store_<u>`.
-   - Browse `cloud.<your-domain>` → volume appears empty / inaccessible.
-   - Re-unlock → `test.bin` reappears.
+   - `curl -sk https://cloud.<your-domain>/ | grep -qi nextcloud` → matches (Nextcloud owns the session, Authelia rule is `bypass`).
+   - `curl -sI https://console.<your-domain>` → 302 to Authelia (forward-auth), or NXDOMAIN if the operator chose to keep it on the mesh only.
+2. **Cloud (Nextcloud) round-trip**
+   - Open `cloud.<your-domain>` in a private window → bounces to Authelia → land in Nextcloud as the same user, admin role inherited from the `admins` claim (see ADR-003).
+   - Drag a file row onto a folder row → file moves.
+   - Share a file → "Share link" tab → open URL in incognito → file downloads.
+   - Talk → New conversation → start call in two browsers → audio + video work.
+   - Upload a 100 MB file → completes (proves the 50 GB upload chain end-to-end).
 3. **Gateway throughput (primary path)**
    - From a client outside heavy filtering: `iperf3 -c <vps>` over `gw0`
      → close to the VPS's advertised bandwidth (sanity check).
@@ -412,8 +422,8 @@ End-to-end checks before declaring done. Run from outside the VPS unless noted.
    - Switch client to the sing-box profile → all the above checks should still pass.
    - Throughput delta < 20% vs `gw0`.
 6. **Backup recoverability**
-   - On client: `restic snapshots` → recent snapshot of `<u>.img` exists.
-   - `restic restore latest --target /tmp/recover` → recovered `.img` mounts, unlocks with the passphrase, and the test file from check (2) is present.
+   - On the backup host: `pg_dump` of `cloud-db` plus `rsync` of `/srv/store/cloud-{data,config,apps}` produces a full snapshot.
+   - Restore drill: `psql -U nextcloud < dump.sql` then rsync back, then `docker compose up -d` reproduces the install on a fresh box. See `docs/backups.md` § Cloud (Nextcloud).
 7. **Resource budget sanity**
    - `free -m` on the server with everything running (`ingress`, `console`, `cloud`, `gw0`, `mesh`, `qedge` stopped): used RAM ≤ 2.5 GB, leaving ~1.5 GB headroom for user-deployed apps.
    - If headroom is tight, document which container memory-limits to set in `console`.
@@ -427,23 +437,22 @@ End-to-end checks before declaring done. Run from outside the VPS unless noted.
   This is not a hostile-host model. Operators with stronger threat
   models should run the installer on their own iron.
 - **Admin SSO (Authelia)** — Authelia is the single authentication
-  authority. `cloud` (copyparty) trusts an Authelia
-  `Remote-User` header injected by NPM's forward-auth snippet;
-  `console` (Portainer) trusts Authelia's OIDC issuer.
-- **Per-user LUKS volumes** — each user controls a passphrase that the
-  installer never sees after the wizard step. Passphrases are kept on
-  the operator's password manager; reboot unlock is manual and
-  intentional.
-- **Shared LUKS volume** — the `_shared.img` blob is unlocked with a
-  keyfile under root's control. This is a deliberate trade-off: the
-  shared volume mounts unattended so collaboration paths inside `cloud`
-  Just Work after a reboot, at the cost of "anyone with root on the
-  host can read /shared at rest." Per-user blobs do not have this
-  property.
-- **Operator's laptop** — backups (restic) and peer configs are
-  generated client-side. The repo password and peer private keys live
-  only on the laptop; the VPS holds ciphertext blobs and public peer
-  keys.
+  authority. `cloud` (Nextcloud) and `console` (Portainer) authenticate
+  via the Authelia OIDC issuer; `enrol` and the Authelia portal itself
+  use NPM forward-auth. ADR-003 documents the one-pattern-per-service
+  rule: never mix OIDC and forward-auth on the same hostname.
+- **Per-user file isolation** — enforced at the application layer:
+  Nextcloud's per-user data dir under `/srv/store/cloud-data/<u>/`
+  with the standard ACL/quota model. ADR-004 explains why per-user
+  LUKS was removed and how to opt into Nextcloud Server-side
+  Encryption (`occ app:enable encryption`) if cold-disk-from-host-image
+  protection becomes important again.
+- **At-rest encryption** — the VPS provider's full-disk encryption
+  (Layerstack-encrypted boot volume) is the cold-disk boundary. Anyone
+  with root on the running host can read every user's files; that's the
+  intended trust model for a small-operator test setup.
+- **Operator's laptop** — peer configs are generated client-side. Peer
+  private keys live only on the laptop; the VPS holds public peer keys.
 
 ### Authelia policy
 
@@ -455,20 +464,22 @@ and re-render. Authelia's first-login TOTP enrolment flow is enabled
 by default, so the operator can opt in per-user without the wizard
 having to render a QR code itself.
 
-The OIDC client used by `console` (Portainer) has its client secret
-hashed (pbkdf2-sha512) at config render time; the plaintext secret
-is presented to the operator exactly once during wizard step 4 and
-otherwise never written.
+Each OIDC-using service (`console` Portainer, `cloud` Nextcloud) gets
+its own Authelia client with the secret hashed (pbkdf2-sha512) at
+config render time; the plaintext secret lives at
+`/etc/raph-installer/oidc-<service>-client-secret` (mode 0600) and is
+rotated by enrol's finalize via the per-service `rotate*Secret` helper
+in `stacks/enrol/oidc.go` (ADR-003).
 
 ### Camouflage posture
 
 The installer ships with neutral identifiers (`gw0`, `qedge`, `mesh`,
 `cloud`, `console`, `enrol`, `store`). Public-facing artefacts —
 hostnames, container names, systemd units, on-disk paths — never use
-the words `vpn`, `wireguard`, `tunnel`, `stealth`, `vault`, `luks`,
-or `crypt`. The `cdn.<your-domain>` subdomain backing `qedge` is
-designed to look like an ordinary CDN edge under TLS handshake
-inspection.
+the words `vpn`, `wireguard`, `tunnel`, `stealth`, or upstream project
+names (Nextcloud, Portainer, AmneziaWG, etc.). See ADR-002. The
+`cdn.<your-domain>` subdomain backing `qedge` is designed to look like
+an ordinary CDN edge under TLS handshake inspection.
 
 This is defense-in-depth against:
 
@@ -496,10 +507,11 @@ camouflage cannot stop: a leaked admin credential.
   Keeping it off public DNS and reachable only via `mesh` (or SSH
   tunnel) is doing a lot of the heavy lifting here. Enable Portainer's
   MFA on top.
-- **Manual volume unlock on every reboot.** Intentional — passphrases
-  not on disk. If the VPS reboots while the operator is asleep,
-  `cloud` is unavailable for that user until someone unlocks. The
-  shared volume mounts automatically and remains available.
+- **No cold-disk encryption beyond what the VPS provider offers.**
+  Per ADR-004, per-user LUKS was removed; user data is plaintext on the
+  Layerstack-encrypted host filesystem. Nextcloud Server-side
+  Encryption is one `occ app:enable encryption` away if the threat
+  model changes.
 - **Wildcard cert via DNS-01** means a DNS provider API token lives in
   NPM's encrypted config on the server. Scope it tightly (DNS
   read/write on the single zone), rotate yearly, never share between

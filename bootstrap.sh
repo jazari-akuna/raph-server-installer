@@ -70,7 +70,6 @@ LOG_DIR="/var/log/raph-installer"
 LOG_FILE="${LOG_DIR}/phase1.log"
 TOKEN_DIR="/etc/raph-installer"
 TOKEN_FILE="${TOKEN_DIR}/setup-token"
-LUKS_DIR="/etc/luks"
 CONTINUE_UNIT="bootstrap-continue.service"
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -102,9 +101,9 @@ log "log: $LOG_FILE"
 
 # TEST_MODE: when set to 1 (by the tests/ harness), the installer skips
 # irreversible host-mutating actions — actual reboots, real cert issuance,
-# real LUKS formats on multi-GiB blobs, real DKMS builds. Each skip emits a
-# `TEST_MODE: skipping <thing>` line so failures are debuggable. The script
-# otherwise behaves identically. Production runs leave TEST_MODE unset.
+# real DKMS builds. Each skip emits a `TEST_MODE: skipping <thing>` line so
+# failures are debuggable. The script otherwise behaves identically.
+# Production runs leave TEST_MODE unset.
 if [[ "${TEST_MODE:-0}" == "1" ]]; then
   log "TEST_MODE=1: irreversible actions will be short-circuited (search 'TEST_MODE: skipping')"
 fi
@@ -152,6 +151,8 @@ export ADMIN_EMAIL="${ADMIN_EMAIL:-admin@${DOMAIN}}"
 # values; until then these are intentionally placeholders.
 export QEDGE_PASSWORD="${QEDGE_PASSWORD:-bootstrap-placeholder-rotate-in-wizard}"
 export AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH="${AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH:-\$pbkdf2-sha512\$bootstrap-placeholder}"
+export AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH="${AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH:-\$pbkdf2-sha512\$bootstrap-placeholder}"
+export AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH="${AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH:-\$pbkdf2-sha512\$bootstrap-placeholder}"
 
 # Setup token: persistent random secret printed to console at end of
 # Phase 2; the wizard requires it as an out-of-band check that whoever's
@@ -190,15 +191,10 @@ chmod 0644 /etc/server-domain
 printf '%s\n' "$ADMIN_EMAIL" > /etc/server-admin-email
 chmod 0644 /etc/server-admin-email
 
-# Coordination with Parcel 2B: shared LUKS keyfile lives under /etc/luks/.
-# Both phase 1 and the shared-volume scripts expect this dir to exist with
-# strict perms. Idempotent.
-install -d -m 0700 -o root -g root "$LUKS_DIR"
-
-# /srv/store is the persistent state anchor (sentinels + data dirs).
+# /srv/store is the persistent state anchor (sentinels + per-stack
+# bind-mount targets). Per ADR-001, every stack's persistent state lives
+# under /srv/store/<stack>-* so backup is a single rsync per box.
 install -d -m 0755 /srv/store
-install -d -m 0755 /srv/store/data
-install -d -m 0755 /srv/store/mnt
 install -d -m 0755 /srv/secrets
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -230,7 +226,7 @@ fi
 log "==> apt-get update + base packages"
 export DEBIAN_FRONTEND=noninteractive
 if [[ "${TEST_MODE:-0}" == "1" ]]; then
-  log "TEST_MODE: skipping apt-get update + install of base packages (git curl ca-certificates gnupg jq gettext-base cryptsetup e2fsprogs rsync python3 iproute2 iptables ufw)"
+  log "TEST_MODE: skipping apt-get update + install of base packages (git curl ca-certificates gnupg jq gettext-base rsync python3 iproute2 iptables ufw)"
 else
   apt-get update -y
   apt-get install -y \
@@ -240,8 +236,6 @@ else
     gnupg \
     jq \
     gettext-base \
-    cryptsetup \
-    e2fsprogs \
     rsync \
     python3 \
     iproute2 \
@@ -322,6 +316,8 @@ ENROL_DOMAIN='${DOMAIN}'
 SETUP_TOKEN='${SETUP_TOKEN}'
 QEDGE_PASSWORD='${QEDGE_PASSWORD}'
 AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH='${AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH}'
+AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH='${AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH}'
+AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH='${AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH}'
 EOF
   chmod 0640 "$ENV_FILE"
   log "    wrote $ENV_FILE"

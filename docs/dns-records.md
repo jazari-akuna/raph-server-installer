@@ -31,7 +31,7 @@ them — clearer intent for ops.
 
 | Subdomain                              | Service        | Public DNS? | Notes                                              |
 |----------------------------------------|----------------|-------------|----------------------------------------------------|
-| `cloud.<your-domain>`     | `cloud` (copyparty) | yes    | HTTPS via `ingress`; password-protected           |
+| `cloud.<your-domain>`     | `cloud` (Nextcloud) | yes    | HTTPS via `ingress`; OIDC via Authelia (`cloud` client) |
 | `gw.<your-domain>`        | `gw0` endpoint | yes         | UDP/443 — peers dial this hostname (QUIC-shape camouflage; collides with `qedge`) |
 | `cdn.<your-domain>`       | `qedge` SNI    | yes         | UDP/443 (QUIC); presented as TLS handshake        |
 | `console.<your-domain>`   | `console` (Portainer) | **NO** | mesh-only; no public record by design             |

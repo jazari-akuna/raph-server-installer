@@ -8,11 +8,10 @@
   <ol class="setup-summary">
     <li><strong>users_database.yml</strong> &mdash; write
       <code>{{.State.AdminUsername}}</code> with the argon2id-hashed password.</li>
-    <li><strong>shared LUKS volume</strong> &mdash; provision
-      <code>/srv/store/data/_shared.img</code> at the size you chose on
-      the storage step (idempotent: skipped if a blob already exists),
-      generate <code>/etc/luks/_shared.key</code>, and mount at
-      <code>/srv/store/mnt/_shared</code>.</li>
+    <li><strong>OIDC client secrets</strong> &mdash; rotate the
+      Authelia&harr;Portainer and Authelia&harr;Nextcloud client secrets
+      (overwrites the bootstrap placeholder so the rendered Authelia
+      config doesn't restart-loop).</li>
     <li><strong>render templates</strong> &mdash; re-run
       <code>scripts/render-templates.sh</code> so the chosen domain
       flows through Authelia config + nginx snippets.</li>
@@ -21,8 +20,7 @@
       <code>*.{{.Domain}}</code>. This is the slowest step (1&ndash;3
       minutes); progress streams below.</li>
     <li><strong>NPM proxy hosts</strong> &mdash; create the four
-      proxy hosts (auth/enrol/cloud/console) via
-      <code>wire-npm-routes.sh</code>.</li>
+      proxy hosts (auth/enrol/cloud/console) via the typed NPM client.</li>
     <li><strong>setup sentinel</strong> &mdash; touch
       <code>/srv/store/.setup-complete</code>. From this moment the
       wizard is locked and the launcher takes over.</li>
@@ -37,7 +35,7 @@
     <h3>progress</h3>
     <ol class="setup-step-list" id="finalize-steps">
       <li data-step="users_db">write users_database.yml</li>
-      <li data-step="shared_volume">provision shared LUKS volume</li>
+      <li data-step="oidc">rotate OIDC client secrets</li>
       <li data-step="templates">render templates</li>
       <li data-step="cert">issue wildcard certificate</li>
       <li data-step="npm">wire NPM proxy hosts</li>
@@ -104,7 +102,6 @@
               '</div><a class="setup-back" href="/setup/' +
               (d.step === 'cert' ? 'dns' :
                d.step === 'users_db' ? 'admin' :
-               d.step === 'shared_volume' ? 'storage' :
                'finalize') +
               '">&larr; back to fix and retry</a>';
           } catch (e) { appendLog('[error] ' + ev.data); }

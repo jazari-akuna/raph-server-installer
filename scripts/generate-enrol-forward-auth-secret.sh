@@ -7,7 +7,7 @@
 # enrol publishes its admin UI on 172.17.0.1:8080 — the docker bridge
 # gateway IP. That address is reachable from EVERY container on the
 # docker bridge (cloud, console, authelia, certbot, any future user-
-# added stack, OR an in-container compromise of e.g. copyparty).
+# added stack, OR an in-container compromise of e.g. Nextcloud).
 #
 # Without a shared secret, the only thing standing between such a
 # container and full enrol admin (root-equivalent on the host: enrol is

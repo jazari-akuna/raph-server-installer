@@ -46,8 +46,9 @@ stacks/authelia/
 │   ├── authelia-location.conf
 │   ├── authelia-authrequest.conf
 │   └── proxy.conf
-└── scripts/
-    └── wire-npm-routes.sh     # NPM API helper to create/update proxy hosts
+└── scripts/                  # (formerly held wire-npm-routes.sh — removed;
+                              #  proxy-host wiring now lives in
+                              #  stacks/enrol/setup.go via finalizeWireNPM)
 ```
 
 ## Deploy runbook
@@ -139,8 +140,11 @@ docker compose logs -f authelia      # wait for "Server listening on..." line
 
 ### 5. Wire NPM
 
-Create the four proxy hosts via `scripts/wire-npm-routes.sh` (see
-that script's `--help`).
+Proxy hosts (auth, enrol, cloud, console, plane) are upserted by enrol's
+finalize step — see `finalizeWireNPM` in `stacks/enrol/setup.go`. The
+wizard runs it once during install; re-running enrol's finalize is
+idempotent and updates any host whose `forward_host` / `advanced_config`
+has drifted.
 
 ## First-login flow (operator)
 

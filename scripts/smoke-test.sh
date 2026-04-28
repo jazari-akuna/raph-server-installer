@@ -147,6 +147,19 @@ auth_redirect_check() {
     fi
 }
 
+# Cloud (Nextcloud) owns its own session and the Authelia rule is bypass —
+# the front page must return 200 with Nextcloud's login HTML, NOT a 302
+# to Authelia. ADR-003: each service uses exactly one auth pattern.
+cloud_login_check() {
+    local body
+    body="$(curl -sk -m 10 "https://${CLOUD_HOST}/" 2>/dev/null || true)"
+    if printf '%s' "$body" | grep -qi 'nextcloud'; then
+        pass "cloud.${APEX} serves Nextcloud login"
+    else
+        fail "cloud.${APEX}" "did not serve Nextcloud login HTML"
+    fi
+}
+
 auth_health_check() {
     local code
     code="$(curl -sI -m 10 -o /dev/null -w '%{http_code}' "https://${AUTH_HOST}/api/health" 2>/dev/null || true)"
@@ -186,7 +199,7 @@ cert_cn_check() {
 
 run_https_section() {
     section "2/7" "HTTPS"
-    auth_redirect_check "$CLOUD_HOST"
+    cloud_login_check
     auth_redirect_check "$ENROL_HOST"
     auth_redirect_check "$CONSOLE_HOST"
     auth_health_check
@@ -282,9 +295,6 @@ for u in awg-quick@gw0 tailscaled fail2ban gw0-nat.service; do
     state="$(sudo systemctl is-active "$u" 2>&1 || true)"
     printf "%s\t%s\n" "$u" "$state"
 done
-# store-mount@.service is a template — list any active instances.
-inst="$(sudo systemctl list-units --type=service --state=active --no-legend "store-mount@*.service" 2>/dev/null | awk "{print \$1}" | tr "\n" "," | sed "s/,\$//")"
-printf "store-mount-instances\t%s\n" "${inst:-<none-active>}"
 '
 probe fail2ban_banned  bash -c 'sudo fail2ban-client status sshd 2>/dev/null | awk -F: "/Total banned/ {gsub(/ /,\"\",\$2); print \$2}" || echo 0'
 
@@ -504,23 +514,11 @@ check_systemd_units() {
     block="$(extract_block systemctl_active)"
     while IFS=$'\t' read -r name state; do
         [[ -z "$name" ]] && continue
-        case "$name" in
-            store-mount-instances)
-                # Informational — store volumes can legitimately be locked.
-                if [[ "$state" == "<none-active>" ]]; then
-                    skip "store-mount instances" "no active instances (volumes locked)"
-                else
-                    pass "store-mount instances active: ${state}"
-                fi
-                ;;
-            *)
-                if [[ "$state" == "active" ]]; then
-                    pass "${name} active"
-                else
-                    fail "${name}" "is-active=${state}"
-                fi
-                ;;
-        esac
+        if [[ "$state" == "active" ]]; then
+            pass "${name} active"
+        else
+            fail "${name}" "is-active=${state}"
+        fi
     done <<<"$block"
 }
 

@@ -9,8 +9,10 @@ Final configuration happens through a web wizard at
 The stack delivers:
 
 - **SSO with optional TOTP** (Authelia) — single login for every service.
-- **Encrypted file storage** (copyparty + LUKS2) — per-user encrypted
-  volumes, plus a shared encrypted volume for collaboration.
+- **File storage and collaboration** (Nextcloud + Talk + groupfolders) —
+  drag-and-drop file moves, share-link semantics, integrated WebRTC calls,
+  per-user quotas. Server-side encryption is available as an operator
+  opt-in via `occ` if cold-disk protection is needed.
 - **AmneziaWG gateway** (`gw0`) — anti-DPI WireGuard variant for remote
   access, with optional client-side regional split routing.
 - **Reverse proxy with auto-renewing wildcard TLS** (Nginx Proxy
@@ -22,9 +24,10 @@ The stack delivers:
 
 Operational discretion ("camouflage") is built in: hostnames, paths,
 container names, and systemd units never use the words `vpn`,
-`wireguard`, `vault`, `luks`, etc. The public-facing footprint is
-designed to look like an ordinary application server under passive
-observation.
+`wireguard`, `vault`, etc., nor the upstream project names of the
+services they front. The public-facing footprint is designed to look
+like an ordinary application server under passive observation. See
+ADR-002 in `docs/architecture-decisions.md`.
 
 ---
 
@@ -94,7 +97,7 @@ every config decision interactively and explains what each step does.
    2. First admin (username, password, email)
    3. DNS provider credentials (cert issuance)
    4. Wildcard certificate issuance + reverse-proxy wireup
-   5. Encrypted storage (admin's per-user volume + shared volume)
+   5. Storage (default per-user Nextcloud quota)
    6. Done — redirect to login
 
    At completion the server is fully configured. The wizard closes
@@ -132,7 +135,7 @@ Adding another provider is a contribution-sized change: see
 |---|---|---|---|
 | `ingress` | Nginx Proxy Manager | (admin: loopback only) | NPM admin user |
 | `auth` | Authelia | `https://auth.<your-domain>/` | password / TOTP |
-| `cloud` | copyparty file server | `https://cloud.<your-domain>/` | SSO via Authelia |
+| `cloud` | Nextcloud (file server + Talk + groupfolders) | `https://cloud.<your-domain>/` | OIDC via Authelia |
 | `console` | Portainer (Docker management UI) | `https://console.<your-domain>/` | OIDC via Authelia |
 | `enrol` | Setup wizard + admin UI (Go) | `https://enrol.<your-domain>/` | SSO via Authelia |
 | `gw0` | AmneziaWG gateway (UDP :443 — masquerading as QUIC) | `gw.<your-domain>` | per-peer keys |
@@ -154,24 +157,25 @@ a hostile-host model. Operators with stronger threat models should run
 the installer on their own iron.
 
 **SSO is the trust authority.** Authelia is the single source of
-identity. `cloud` (copyparty) trusts an `Remote-User` header injected
-by NPM's forward-auth snippet; `console` (Portainer) trusts Authelia's
-OIDC issuer. The default Authelia policy is `one_factor` (password) on
-every protected route — operators who want enforced TOTP flip
-the per-rule policy to `two_factor` in
-`stacks/authelia/configuration.yml.template` and re-render. Authelia's
-first-login TOTP enrolment flow is enabled by default, so users can
-opt in per-account without the wizard rendering QR codes itself.
+identity. `cloud` (Nextcloud) and `console` (Portainer) authenticate
+via the Authelia OIDC issuer; `enrol` and the Authelia portal use
+NPM forward-auth. ADR-003 documents the one-pattern-per-service rule:
+never mix OIDC and forward-auth on the same hostname. The default
+Authelia policy is `one_factor` (password) on every protected route —
+operators who want enforced TOTP flip the per-rule policy to
+`two_factor` in `stacks/authelia/configuration.yml.template` and
+re-render. Authelia's first-login TOTP enrolment flow is enabled by
+default, so users can opt in per-account without the wizard rendering
+QR codes itself.
 
-**Encryption is at-rest, not end-to-end.** Each user gets a LUKS2
-sparse blob at `/srv/store/data/<user>.img` (default size: chosen by
-the operator at user-create time). The user controls the passphrase
-and types it at every reboot — passphrases are never stored on disk
-and the installer does not see them after the wizard step. A
-**shared volume** at `/srv/store/data/_shared.img` mounts unattended
-via a root-owned keyfile; this is a deliberate trade-off that lets
-collaboration paths inside `cloud` survive a reboot at the cost of
-"anyone with root on the host can read /shared at rest."
+**Encryption is at-rest via the VPS provider's full-disk encryption.**
+User data lives in plaintext under `/srv/store/cloud-data/<user>/` on
+the host's encrypted-at-rest filesystem (Layerstack provides FDE on
+the boot volume). Per-user isolation is enforced at the application
+layer via Nextcloud's per-user data dir + ACLs. Server-side encryption
+is available as an operator opt-in (`occ app:enable encryption`) if
+cold-disk-from-host-image protection becomes important — see ADR-004
+for rationale.
 
 **Admin UIs are not on public DNS.** Portainer's admin UI and NPM's own
 admin panel bind to loopback. Operators reach them via SSH tunnel from
@@ -210,18 +214,19 @@ explanation.
   installer.
 - [`docs/maintenance.md`](docs/maintenance.md) — day-2 operations
   runbook. Cadence at a glance, image bumps, cert renewal, kernel
-  updates, LUKS rotation, user lifecycle CLI fallbacks, triage table.
+  updates, Nextcloud `occ` recipes, user lifecycle CLI fallbacks,
+  triage table.
 - [`docs/verification.md`](docs/verification.md) — seven-check sign-off
   procedure. Run before declaring an install "in service."
-- [`docs/backups.md`](docs/backups.md) — restic recovery procedures.
-  Pull-from-client backup model.
+- [`docs/backups.md`](docs/backups.md) — bind-mount + `pg_dump` backup
+  recipe (ADR-001). Pull-from-laptop, restic-optional dataflow.
 - [`docs/dns-records.md`](docs/dns-records.md) — required DNS layout +
   per-subdomain notes.
 - [`docs/perf-tuning.md`](docs/perf-tuning.md) — `gw0` AmneziaWG
   throughput tuning and DKMS troubleshooting.
 - Per-stack READMEs under `stacks/<name>/README.md` cover stack-local
-  details (NPM cert configuration, Authelia secret rotation, copyparty
-  ACL syntax, `qedge` switchover procedure).
+  details (NPM cert configuration, Authelia secret rotation, Nextcloud
+  `occ` recipes + Talk HPB threshold, `qedge` switchover procedure).
 
 ---
 
@@ -261,9 +266,10 @@ Conventions:
   `.gitignore` lists every output the runtime generates.
 - **Camouflage naming.** Public-facing artefacts (DNS labels, container
   names, systemd units, paths, scripts) never use the words `vpn`,
-  `wireguard`, `amnezia`, `tunnel`, `stealth`, `vault`, `luks`,
-  `crypt`, `tailscale`, or `hysteria`. The neutral vocabulary is in
-  `docs/design.md` § Naming convention.
+  `wireguard`, `amnezia`, `tunnel`, `stealth`, `vault`, `tailscale`,
+  `hysteria`, or upstream project names (`nextcloud`, `portainer`).
+  The neutral vocabulary is in `docs/design.md` § Naming convention
+  (and ADR-002 in `docs/architecture-decisions.md`).
 - **Small, reviewable PRs.** Prefer single-purpose changes. Touching
   the bootstrap script or the wizard state machine should come with a
   smoke-test update under `tests/`.

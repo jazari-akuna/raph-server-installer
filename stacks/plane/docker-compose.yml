@@ -1,0 +1,512 @@
+# plane — project tracker (internally: makeplane/plane).
+#
+# Camouflage: external hostname is `plane.${DOMAIN}`. Internal service /
+# container / network names are all `plane*`. The upstream Plane compose
+# at https://github.com/makeplane/plane/blob/preview/deployments/cli/community/docker-compose.yml
+# uses bare names (`web`, `api`, `worker`, `proxy`, …); we rename
+# everything to the `plane-` prefix to satisfy ADR-002. Internal service
+# references (API_BASE_URL, RABBITMQ_HOST, REDIS_HOST, AWS_S3_ENDPOINT_URL,
+# DATABASE_URL, AMQP_URL) are updated to match the renamed targets.
+#
+# Architecture: 4 Next.js frontends (web/admin/space/live) +
+# Django/gunicorn API + 3 Celery roles (worker/beat/migrator) + Postgres
+# + Valkey (Redis-compatible) + RabbitMQ + MinIO + Caddy proxy. NPM
+# proxies plane.${DOMAIN} → plane-proxy:80; Plane's own proxy fans out
+# to web/admin/space/live/api internally. Nothing is published to the
+# host; everything is internal to the `edge` network.
+#
+# Auth: Authelia OIDC, but configured at runtime via Plane's god-mode
+# admin UI (NOT env vars — Plane has no env-var path for OIDC bootstrap;
+# see ADR-009). NPM does not inject Remote-User / X-Forward-Auth-Secret
+# for this stack — Plane owns its own session.
+#
+# Persistent state lives on EXTERNAL bind-mounts under /srv/store/plane-*
+# on the host (NOT docker named volumes) so backup is a single rsync per
+# ADR-001. bootstrap-phase2.sh creates these dirs with the right uid/gid
+# (70:70 plane-db, 1000:1000 plane-minio, 100:101 plane-mq, 1001:1001
+# plane-logs) before this stack comes up.
+#
+# Resource fit (ADR-008): every service has a `mem_limit:` so a runaway
+# container is OOM-killed rather than the whole box. Postgres
+# `max_connections=50` (vs upstream's 1000), Valkey capped at 64 MB,
+# RabbitMQ watermark 0.4, Celery concurrency 1, gunicorn workers 1.
+# Total tuned RSS ~1.45 GB. Documented fallback if Plane OOMs steady-
+# state: drop plane-mq and route Celery through plane-redis (saves
+# ~120 MB). See README.md.
+#
+# Pinned images per ADR-006 (NEVER `latest`/`stable`). All
+# makeplane/plane-* images at v0.27.1 (verify against
+# https://github.com/makeplane/plane/releases at deploy time; the README
+# documents which release this file was authored against).
+#
+# Image-pin policy applies to one-shot init containers too (plane-mc
+# minio init, plane-migrator) — they can break on floating tags too.
+
+# Reusable env blocks. Mirror upstream's YAML anchors so future merges
+# from upstream stay diff-able. All anchors here have one-to-one parity
+# with the upstream `x-*-env` blocks at preview/deployments/cli/community/
+# docker-compose.yml lines 1-60, with values redirected to our renamed
+# service hosts and runtime-required vars switched to `:?` (fail loudly)
+# instead of `:-default` (silently accept dev defaults).
+x-db-env: &db-env
+  PGHOST: plane-db
+  PGDATABASE: ${POSTGRES_DB:-plane}
+  POSTGRES_USER: ${POSTGRES_USER:-plane}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in /opt/stacks/plane/.env}
+  POSTGRES_DB: ${POSTGRES_DB:-plane}
+  POSTGRES_PORT: 5432
+  PGDATA: /var/lib/postgresql/data
+
+x-redis-env: &redis-env
+  REDIS_HOST: plane-redis
+  REDIS_PORT: 6379
+  REDIS_URL: redis://plane-redis:6379/
+
+x-minio-env: &minio-env
+  MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID must be set in /opt/stacks/plane/.env}
+  MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY must be set in /opt/stacks/plane/.env}
+
+x-aws-s3-env: &aws-s3-env
+  AWS_REGION: ${AWS_REGION:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID must be set in /opt/stacks/plane/.env}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY must be set in /opt/stacks/plane/.env}
+  AWS_S3_ENDPOINT_URL: http://plane-minio:9000
+  AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME:-uploads}
+
+x-proxy-env: &proxy-env
+  # Plane's bundled Caddy proxy. We DO NOT publish 80/443 to the host
+  # (NPM is the TLS terminator + edge); plane-proxy listens on :80
+  # internally only. APP_DOMAIN is kept for Plane's self-references in
+  # generated URLs. CERT_* vars are intentionally blank — no in-stack
+  # ACME, NPM owns the cert.
+  APP_DOMAIN: ${APP_DOMAIN:-plane.example.com}
+  FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-5368709120}
+  CERT_EMAIL: ""
+  CERT_ACME_CA: ""
+  CERT_ACME_DNS: ""
+  LISTEN_HTTP_PORT: 80
+  LISTEN_HTTPS_PORT: 443
+  BUCKET_NAME: ${AWS_S3_BUCKET_NAME:-uploads}
+  SITE_ADDRESS: ":80"
+
+x-mq-env: &mq-env
+  RABBITMQ_HOST: plane-mq
+  RABBITMQ_PORT: 5672
+  RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-plane}
+  RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?RABBITMQ_DEFAULT_PASS must be set in /opt/stacks/plane/.env}
+  RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_DEFAULT_VHOST:-plane}
+  RABBITMQ_VHOST: ${RABBITMQ_DEFAULT_VHOST:-plane}
+  # ADR-008: cap RabbitMQ to 40% of its container's mem_limit (192 MB *
+  # 0.4 ≈ 77 MB). Default is 0.4 of host RAM, which on a 2 GB box is
+  # ~800 MB — would blow the budget instantly.
+  RABBITMQ_VM_MEMORY_HIGH_WATERMARK: "0.4"
+
+x-live-env: &live-env
+  API_BASE_URL: http://plane-api:8000
+  LIVE_SERVER_SECRET_KEY: ${LIVE_SERVER_SECRET_KEY:?LIVE_SERVER_SECRET_KEY must be set in /opt/stacks/plane/.env}
+
+x-app-env: &app-env
+  WEB_URL: ${WEB_URL:-https://plane.example.com}
+  DEBUG: "0"
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://plane.example.com}
+  # ADR-008: 1 gunicorn worker (default upstream is also 1; documented
+  # here as the explicit knob the operator can raise if the API CPU-
+  # bound under load).
+  GUNICORN_WORKERS: ${GUNICORN_WORKERS:-1}
+  USE_MINIO: "1"
+  DATABASE_URL: postgresql://${POSTGRES_USER:-plane}:${POSTGRES_PASSWORD}@plane-db/${POSTGRES_DB:-plane}
+  SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in /opt/stacks/plane/.env (Django secret, 64-char random)}
+  AMQP_URL: amqp://${RABBITMQ_DEFAULT_USER:-plane}:${RABBITMQ_DEFAULT_PASS}@plane-mq:5672/${RABBITMQ_DEFAULT_VHOST:-plane}
+  API_KEY_RATE_LIMIT: ${API_KEY_RATE_LIMIT:-60/minute}
+  MINIO_ENDPOINT_SSL: "0"
+  LIVE_SERVER_SECRET_KEY: ${LIVE_SERVER_SECRET_KEY:?LIVE_SERVER_SECRET_KEY must be set in /opt/stacks/plane/.env}
+  # ADR-008: 1 Celery worker process (default `auto` = one per CPU core
+  # = ~200 MB per core on a 2-core VPS = budget-blown).
+  CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
+
+services:
+  # ────────────────────────────────────────────────────────────────────
+  # Frontends — 4 Next.js apps, each ~120 MB RSS
+  # ────────────────────────────────────────────────────────────────────
+
+  plane-web:
+    # End-user UI (workspace dashboard, projects, issues).
+    image: makeplane/plane-frontend:v0.27.1
+    container_name: plane-web
+    restart: unless-stopped
+    mem_limit: 192m
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-worker:
+        condition: service_started
+    networks:
+      - edge
+
+  plane-space:
+    # Public-share UI (read-only project / issue links).
+    image: makeplane/plane-space:v0.27.1
+    container_name: plane-space
+    restart: unless-stopped
+    mem_limit: 192m
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-web:
+        condition: service_started
+    networks:
+      - edge
+
+  plane-admin:
+    # God-mode panel — the URL the operator visits FIRST after deploy
+    # to claim instance admin and paste the OIDC config (see ADR-009
+    # and README "First-time setup"). Reachable at /god-mode/ via the
+    # plane-proxy fan-out.
+    image: makeplane/plane-admin:v0.27.1
+    container_name: plane-admin
+    restart: unless-stopped
+    mem_limit: 192m
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-web:
+        condition: service_started
+    networks:
+      - edge
+
+  plane-live:
+    # WebSocket / live-collaboration server. Fans through plane-proxy
+    # at /live/ with WebSocket upgrade (NPM's AllowWebsocketUpgrade
+    # also has to be on for the outer hop — see Wave B's setup.go).
+    image: makeplane/plane-live:v0.27.1
+    container_name: plane-live
+    restart: unless-stopped
+    mem_limit: 192m
+    environment:
+      <<: [*live-env, *redis-env]
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-web:
+        condition: service_started
+    networks:
+      - edge
+
+  # ────────────────────────────────────────────────────────────────────
+  # Backend — Django/gunicorn + 3 Celery roles, all on the same image
+  # ────────────────────────────────────────────────────────────────────
+
+  plane-api:
+    # Django REST API + gunicorn. The biggest single RSS in the stack
+    # (~300 MB tuned). All Plane API endpoints (used by enrol's admin
+    # page and by the Plane frontends) terminate here.
+    image: makeplane/plane-backend:v0.27.1
+    container_name: plane-api
+    command: ./bin/docker-entrypoint-api.sh
+    restart: unless-stopped
+    mem_limit: 512m
+    volumes:
+      # ADR-001: bind-mount, not named volume. uid:gid 1001:1001 = the
+      # `plane` user inside the plane-backend image; bootstrap-phase2.sh
+      # chowns the dir before this stack comes up.
+      - /srv/store/plane-logs:/code/plane/logs
+    environment:
+      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
+    depends_on:
+      plane-migrator:
+        condition: service_completed_successfully
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+      plane-mc:
+        condition: service_completed_successfully
+    healthcheck:
+      # Plane exposes a JSON health endpoint at /api/health/ that
+      # returns 200 + `{"status": "ok"}` once the DB connection +
+      # migrations are healthy. Used both for downstream depends_on
+      # gating (web/admin/space/live wait for api to be healthy) and
+      # for the proxy's health gate.
+      test: ["CMD-SHELL", "curl --fail -sS http://localhost:8000/api/health/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - edge
+
+  plane-worker:
+    # Celery default queue. Background work: webhooks, email send,
+    # file-upload post-processing.
+    image: makeplane/plane-backend:v0.27.1
+    container_name: plane-worker
+    command: ./bin/docker-entrypoint-worker.sh
+    restart: unless-stopped
+    mem_limit: 384m
+    volumes:
+      - /srv/store/plane-logs:/code/plane/logs
+    environment:
+      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
+    depends_on:
+      plane-migrator:
+        condition: service_completed_successfully
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+      plane-mc:
+        condition: service_completed_successfully
+    networks:
+      - edge
+
+  plane-beat:
+    # Celery beat scheduler — emits periodic tasks onto the queue (DB
+    # cleanup, recurring webhooks, etc.).
+    image: makeplane/plane-backend:v0.27.1
+    container_name: plane-beat
+    command: ./bin/docker-entrypoint-beat.sh
+    restart: unless-stopped
+    mem_limit: 192m
+    volumes:
+      - /srv/store/plane-logs:/code/plane/logs
+    environment:
+      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
+    depends_on:
+      plane-migrator:
+        condition: service_completed_successfully
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+      plane-mc:
+        condition: service_completed_successfully
+    networks:
+      - edge
+
+  plane-migrator:
+    # One-shot DB schema migrator. Runs Django migrations and exits.
+    # `restart: no` per upstream + ADR-006 (image-pinned even for
+    # one-shots). The api/worker/beat services depend on this with
+    # `condition: service_completed_successfully` so they refuse to
+    # start until migrations land.
+    image: makeplane/plane-backend:v0.27.1
+    container_name: plane-migrator
+    command: ./bin/docker-entrypoint-migrator.sh
+    restart: "no"
+    mem_limit: 128m
+    volumes:
+      - /srv/store/plane-logs:/code/plane/logs
+    environment:
+      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
+    depends_on:
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+    networks:
+      - edge
+
+  # ────────────────────────────────────────────────────────────────────
+  # Datastores — Postgres, Valkey, RabbitMQ, MinIO
+  # ────────────────────────────────────────────────────────────────────
+
+  plane-db:
+    # Postgres 15 (Plane requires 14 ≤ PG ≤ 16; pin to upstream's
+    # choice). ADR-008: override upstream `max_connections=1000` (which
+    # alone allocates ~3 MB × 1000 = 3 GB of process memory worst case)
+    # down to 50; cap shared_buffers at 64 MB; effective_cache_size at
+    # 192 MB so the planner picks reasonable plans on the small box.
+    image: postgres:15.7-alpine
+    container_name: plane-db
+    restart: unless-stopped
+    mem_limit: 256m
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=50
+      - -c
+      - effective_cache_size=192MB
+    environment:
+      <<: *db-env
+    volumes:
+      # 70:70 = postgres uid/gid in the alpine image. Set by
+      # bootstrap-phase2.sh before this stack comes up.
+      - /srv/store/plane-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-plane} -d ${POSTGRES_DB:-plane}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - edge
+
+  plane-redis:
+    # Valkey 7 (Redis-compatible fork). Used for Plane's cache + as
+    # Celery result backend; the Celery broker is RabbitMQ (plane-mq)
+    # not this. Intentionally NOT bind-mounted — losing this on
+    # restart is safe (cache rebuilds, broker durability lives on
+    # plane-mq).
+    image: valkey/valkey:7.2.11-alpine
+    container_name: plane-redis
+    restart: unless-stopped
+    mem_limit: 96m
+    command:
+      - valkey-server
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - edge
+
+  plane-mq:
+    # RabbitMQ 3.13. Celery broker for durable task queueing — long
+    # workflows (issue creation with attachments, webhook fan-out)
+    # need broker durability that Redis-as-broker doesn't provide.
+    # Documented fallback in README: drop this service and set
+    # CELERY_BROKER_URL=redis://plane-redis:6379/1 to save ~120 MB at
+    # the cost of broker durability.
+    image: rabbitmq:3.13.6-management-alpine
+    container_name: plane-mq
+    restart: unless-stopped
+    mem_limit: 192m
+    environment:
+      <<: *mq-env
+    volumes:
+      # 100:101 = rabbitmq uid:gid in the alpine image.
+      - /srv/store/plane-mq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - edge
+
+  plane-minio:
+    # S3-compatible attachment store. Plane writes issue attachments,
+    # avatars, and exports here. Pinned to a specific RELEASE.* tag
+    # per ADR-006 — upstream's `latest` is the OIDC-style breaking-
+    # change risk we already burnt on once.
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: plane-minio
+    restart: unless-stopped
+    mem_limit: 192m
+    command:
+      - server
+      - /export
+      - --console-address
+      - ":9090"
+    environment:
+      <<: *minio-env
+    volumes:
+      # 1000:1000 = the minio default uid/gid. Verify on the actual
+      # image with `docker run --rm minio/minio:RELEASE.2024-12-18T13-15-44Z id`
+      # before chowning the host dir; bootstrap-phase2.sh does this
+      # check.
+      - /srv/store/plane-minio:/export
+    healthcheck:
+      # MinIO exposes /minio/health/live as an unauthenticated 200 once
+      # the server is ready to accept S3 ops. `mc` is a separate image
+      # (we run it as plane-mc); using curl from within the minio image
+      # avoids the chicken-and-egg of needing mc to health-check minio.
+      test: ["CMD-SHELL", "curl -fSs http://localhost:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - edge
+
+  # ────────────────────────────────────────────────────────────────────
+  # plane-mc — one-shot bucket-init job (ours, NOT upstream)
+  # ────────────────────────────────────────────────────────────────────
+  #
+  # Upstream Plane's compose has no `createbuckets` job — it expects
+  # `uploads` to magically exist or for the API's first attachment
+  # write to silently 500. We create the bucket here, before the api/
+  # worker/beat services come up. They depend on this with
+  # `condition: service_completed_successfully` so the stack refuses
+  # to come up until the bucket exists.
+
+  plane-mc:
+    image: minio/mc:RELEASE.2024-12-18T13-15-44Z
+    container_name: plane-mc
+    restart: "no"
+    mem_limit: 128m
+    depends_on:
+      plane-minio:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID must be set}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY must be set}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        until mc alias set local http://plane-minio:9000 "$$AWS_ACCESS_KEY_ID" "$$AWS_SECRET_ACCESS_KEY"; do
+          sleep 2
+        done
+        mc mb -p local/uploads || true
+        mc anonymous set download local/uploads
+    networks:
+      - edge
+
+  # ────────────────────────────────────────────────────────────────────
+  # plane-proxy — Plane's bundled Caddy proxy, fans out to web/admin/
+  # space/live/api on the internal port :80. NPM is the EXTERNAL TLS
+  # terminator; we do NOT publish 80/443 to the host (no `ports:`
+  # block, unlike upstream).
+  # ────────────────────────────────────────────────────────────────────
+
+  plane-proxy:
+    image: makeplane/plane-proxy:v0.27.1
+    container_name: plane-proxy
+    restart: unless-stopped
+    mem_limit: 64m
+    environment:
+      <<: *proxy-env
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-web:
+        condition: service_started
+      plane-space:
+        condition: service_started
+      plane-admin:
+        condition: service_started
+      plane-live:
+        condition: service_started
+    healthcheck:
+      # Caddy returns 200 on / once the upstream fan-out is reachable.
+      # We don't probe a deeper path because the actual application
+      # paths (e.g. /god-mode/) are SPA routes that depend on the
+      # frontends being warm; the front door is enough for orchestration.
+      test: ["CMD-SHELL", "wget --quiet --spider http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - edge
+
+networks:
+  edge:
+    external: true

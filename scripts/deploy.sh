@@ -251,8 +251,9 @@ echo ":: rsync stacks/  -> ${SSH_TARGET}:/opt/stacks/"
 # No --delete: stacks have generated state on the VPS (data/, letsencrypt/, tls/).
 # Excludes guard against accidentally overwriting that state if the laptop
 # ever ends up with same-named dirs. NOTE: do NOT exclude conf/ — stacks/cloud/conf/
-# is checked-in source-of-truth (copyparty.conf), and qedge's rendered config
-# lives at qedge/config/ (different name) so doesn't collide.
+# is checked-in source-of-truth (Nextcloud nginx + php-fpm tuning), and
+# qedge's rendered config lives at qedge/config/ (different name) so
+# doesn't collide.
 STACKS_LOG="$(rsync "${RSYNC_COMMON[@]}" \
     --exclude='data/' \
     --exclude='letsencrypt/' \

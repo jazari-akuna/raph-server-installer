@@ -1,4 +1,4 @@
-// enrol — server admin UI (users, LUKS storage, TOTP, devices).
+// enrol — server admin UI (users, cloud storage usage, TOTP, devices).
 //
 // Trusts Authelia-injected `Remote-User` and `Remote-Groups` headers.
 // All mutating routes require membership of $ENROL_REQUIRED_GROUP and
@@ -16,7 +16,7 @@
 //   audit.go     append-only JSONL audit log
 //   peers.go     gw0.conf parser/writer, peer keypair gen, reload
 //   users.go     users_database.yml read/write + argon2id hashing
-//   luks.go      cryptsetup / mkfs / mount / shred host-side ops
+//   storage.go   /srv/store statfs + per-user du snapshot for the dashboard
 //   totp.go      docker-exec into authelia for TOTP generate/delete
 //
 // See DESIGN.md for the full design.
@@ -70,10 +70,10 @@ type config struct {
 	autheliaContainer string // "authelia"
 	autheliaURL       string // base URL for proxying /api/firstfactor (loopback)
 
-	// LUKS storage layout.
-	storeDataDir string // /srv/store/data
-	storeMntDir  string // /srv/store/mnt
-	luksSizeGB   int
+	// (Pre-Wave-1: LUKS storage layout fields lived here. With Nextcloud-
+	// managed cloud-data the per-user LUKS volumes are gone; the only
+	// host-side path the dashboard cares about is /srv/store/cloud-data,
+	// hardcoded in storage.go's cloudDataRoot const.)
 
 	// Launcher (post-login app tile grid).
 	launcherDir string // /srv/store/enrol-launcher
@@ -111,11 +111,6 @@ func loadConfig() config {
 	if err != nil {
 		log.Fatalf("ENROL_PEER_START: %v", err)
 	}
-	luksSizeStr := envOr("ENROL_LUKS_SIZE_GB", "50")
-	luksSize, err := strconv.Atoi(luksSizeStr)
-	if err != nil || luksSize < 1 {
-		log.Fatalf("ENROL_LUKS_SIZE_GB: must be a positive integer, got %q", luksSizeStr)
-	}
 	domain := os.Getenv("ENROL_DOMAIN")
 	if domain == "" {
 		log.Fatal("ENROL_DOMAIN is required (set by bootstrap from $DOMAIN)")
@@ -137,9 +132,6 @@ func loadConfig() config {
 		usersDBPath:       envOr("ENROL_USERS_DB", "/etc/authelia/users_database.yml"),
 		autheliaContainer: envOr("ENROL_AUTHELIA_CONTAINER", "authelia"),
 		autheliaURL:       envOr("ENROL_AUTHELIA_URL", "http://127.0.0.1:9091"),
-		storeDataDir:      envOr("ENROL_STORE_DATA_DIR", "/srv/store/data"),
-		storeMntDir:       envOr("ENROL_STORE_MNT_DIR", "/srv/store/mnt"),
-		luksSizeGB:        luksSize,
 		launcherDir:       envOr("ENROL_LAUNCHER_DIR", "/srv/store/enrol-launcher"),
 		peersArchiveDir:   envOr("ENROL_PEERS_ARCHIVE_DIR", "/srv/store/enrol-peers-archive"),
 
@@ -194,8 +186,8 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	log.Printf("enrol listening on %s; awgDir=%s iface=%s usersDB=%s storeData=%s",
-		cfg.listen, cfg.awgDir, cfg.awgIface, cfg.usersDBPath, cfg.storeDataDir)
+	log.Printf("enrol listening on %s; awgDir=%s iface=%s usersDB=%s",
+		cfg.listen, cfg.awgDir, cfg.awgIface, cfg.usersDBPath)
 	if err := hs.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}

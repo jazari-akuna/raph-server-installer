@@ -93,7 +93,7 @@ strict_hint_for_step() {
       printf '%s' "Check: docker logs enrol; verify /etc/raph-installer/setup-token exists and is readable; SETUP_TOKEN in /opt/stacks/.env."
       ;;
     *compose*cloud*)
-      printf '%s' "Check: docker logs cloud; ensure /srv/store/mnt and stacks/cloud/conf/copyparty.conf exist."
+      printf '%s' "Check: docker logs cloud cloud-db cloud-redis cloud-web; verify /srv/store/cloud-{data,config,apps,db} exist with right uid/gid (33:33 / 70:70)."
       ;;
     *compose*console*)
       printf '%s' "Check: docker logs console; portainer needs /var/run/docker.sock readable."
@@ -112,9 +112,6 @@ strict_hint_for_step() {
       ;;
     *install-docker*|*docker*install*)
       printf '%s' "Check: apt-get install docker-ce; cat /etc/docker/daemon.json | jq; systemctl status docker."
-      ;;
-    *shared*volume*|*create-shared-volume*|*luks*)
-      printf '%s' "Check: cryptsetup status store_shared; ls -la /etc/luks/_shared.key (mode 0400); /srv/store/data/_shared.img exists."
       ;;
     *cert*|*letsencrypt*)
       printf '%s' "Check: ls /opt/stacks/ingress/letsencrypt/live/; openssl x509 -in fullchain.pem -noout -ext subjectAltName."

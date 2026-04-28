@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# retrofit-enrol-forward-auth.sh — patch the four production NPM proxy
-# hosts (auth/enrol/cloud/console) on an existing finalized deployment so
-# they inject X-Forward-Auth-Secret on every proxied request.
+# retrofit-enrol-forward-auth.sh — patch the production NPM proxy hosts
+# (auth/enrol/console) on an existing finalized deployment so they inject
+# X-Forward-Auth-Secret on every proxied request.
 #
 # Why this script exists
 # ----------------------
-# Earlier installer revisions wired the four proxy hosts WITHOUT the
+# Earlier installer revisions wired the proxy hosts WITHOUT the
 # forward-auth secret (because the secret didn't exist yet). Recent enrol
 # revisions fail closed on missing/wrong X-Forward-Auth-Secret — so on
 # upgrade, every protected endpoint behind those hosts (the enrol admin
-# UI, copyparty UI, Portainer UI, anything fronted by Authelia) starts
+# UI, Portainer UI, anything fronted by Authelia forward-auth) starts
 # returning 401 until each proxy host's advanced_config is re-rendered.
+#
+# Cloud (Nextcloud) is intentionally NOT retrofitted: per ADR-003 it
+# uses Authelia OIDC (not forward-auth), the rule is `bypass`, and the
+# advanced_config is `npmAdvNextcloudTmpl` (no forward-auth header).
 #
 # This script does the re-render, in place, on a live deployment:
 #   1. Verifies /etc/raph-installer/enrol-forward-auth.secret exists
@@ -18,13 +22,13 @@
 #   2. Reads $DOMAIN from /opt/stacks/.env.
 #   3. Logs into NPM with the bootstrap admin creds at
 #      /etc/raph-installer/npm-bootstrap.pass.
-#   4. For each of auth.${DOMAIN} / enrol.${DOMAIN} / cloud.${DOMAIN} /
-#      console.${DOMAIN}, GETs the existing proxy host and PUTs it back
-#      with an updated advanced_config carrying the secret. The
-#      advanced_config templates here are byte-for-byte the same as the
-#      ones in stacks/enrol/setup.go (npmAdvFwdAuthTmpl /
-#      npmAdvAuthPortalTmpl). For the auth host we use the auth-portal
-#      template; for the other three we use the regular template.
+#   4. For each of auth.${DOMAIN} / enrol.${DOMAIN} / console.${DOMAIN},
+#      GETs the existing proxy host and PUTs it back with an updated
+#      advanced_config carrying the secret. The advanced_config
+#      templates here are byte-for-byte the same as the ones in
+#      stacks/enrol/setup.go (npmAdvFwdAuthTmpl / npmAdvAuthPortalTmpl).
+#      For the auth host we use the auth-portal template; for the other
+#      two we use the regular template.
 #
 # Idempotent: re-running on an already-retrofitted host is a no-op (PUT
 # with the same body is fine). The script never deletes hosts — that
@@ -178,22 +182,20 @@ AUTH_HEADER=(-H "Authorization: Bearer $TOKEN")
 # secret twice).
 ADV_FWD_AUTH="$(printf 'include /snippets/authelia-location.conf;\n\nproxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n\nlocation / {\n    include /snippets/proxy.conf;\n    include /snippets/authelia-authrequest.conf;\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_pass $forward_scheme://$server:$port;\n}\n' "$FWD_SECRET" "$FWD_SECRET")"
 
-# Cloud variant: same as ADV_FWD_AUTH but with an extra `location /share/`
-# that proxies to copyparty WITHOUT authelia-authrequest. copyparty's
-# share-link feature (configured in stacks/cloud/conf/copyparty.conf via
-# `shr: /share`) issues token-keyed URLs at /share/<token>; the token IS
-# the auth, so forcing recipients through Authelia would defeat the point.
-# nginx prefix-match precedence means /share/ wins for share URLs and the
-# default `location /` still runs the auth gate for everything else.
-ADV_FWD_AUTH_CLOUD="$(printf 'include /snippets/authelia-location.conf;\n\nproxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n\nlocation /share/ {\n    include /snippets/proxy.conf;\n    proxy_pass $forward_scheme://$server:$port;\n}\n\nlocation / {\n    include /snippets/proxy.conf;\n    include /snippets/authelia-authrequest.conf;\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_pass $forward_scheme://$server:$port;\n}\n' "$FWD_SECRET" "$FWD_SECRET")"
-
-# Auth-portal template (two slots: domain for the bare-GET 302, then the
-# secret for /api/firstfactor → /login-intercept). Three location blocks:
-# bare-GET redirect, SSO post-rewrite, and a catch-all `location /` that
-# proxies static assets (/static/js/*, /static/css/*, etc.) verbatim to
-# authelia. Without that catch-all NPM 404s on the SPA's static assets
-# and the login page renders as a blank black screen.
-ADV_AUTH_PORTAL="$(printf 'location = / {\n    if ($arg_rd = "") {\n        return 302 /?rd=https://enrol.%s/;\n    }\n    include conf.d/include/proxy.conf;\n}\n\nlocation = /api/firstfactor {\n    proxy_pass http://172.17.0.1:8080/login-intercept;\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    proxy_set_header X-Forwarded-Proto $scheme;\n    proxy_set_header X-Forwarded-Host $host;\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_http_version 1.1;\n}\n\nlocation / {\n    include conf.d/include/proxy.conf;\n}\n' "$DOMAIN" "$FWD_SECRET")"
+# Auth-portal template (one slot: domain for the bare-GET 302). Two
+# location blocks: bare-GET redirect to the enrol portal, and a
+# catch-all `location /` that proxies static assets (/static/js/*,
+# /static/css/*, etc.) verbatim to authelia. Without that catch-all
+# NPM 404s on the SPA's static assets and the login page renders as a
+# blank black screen.
+#
+# Note: the previous version of this template rewrote /api/firstfactor
+# onto enrol's /login-intercept handler (which proxied to Authelia and
+# auto-unlocked the user's LUKS volume on success). With per-user LUKS
+# removed (ADR-004) and Nextcloud handling its own OIDC session
+# (ADR-003), the rewrite is gone and Authelia's POST handler runs
+# unmodified.
+ADV_AUTH_PORTAL="$(printf 'location = / {\n    if ($arg_rd = "") {\n        return 302 /?rd=https://enrol.%s/;\n    }\n    include conf.d/include/proxy.conf;\n}\n\nlocation / {\n    include conf.d/include/proxy.conf;\n}\n' "$DOMAIN")"
 
 # ──────────────────────────────────────────────────────────────────────────
 # Walk the proxy-host list and PUT each match
@@ -260,11 +262,10 @@ retrofit_one() {
 rc=0
 retrofit_one "auth.$DOMAIN"    "$ADV_AUTH_PORTAL"   || rc=1
 retrofit_one "enrol.$DOMAIN"   "$ADV_FWD_AUTH"      || rc=1
-retrofit_one "cloud.$DOMAIN"   "$ADV_FWD_AUTH_CLOUD" || rc=1
 retrofit_one "console.$DOMAIN" "$ADV_FWD_AUTH"      || rc=1
 
 if (( rc == 0 )); then
-  log "done — all four production proxy hosts now inject X-Forward-Auth-Secret"
+  log "done — auth/enrol/console proxy hosts now inject X-Forward-Auth-Secret (cloud uses OIDC and is intentionally untouched per ADR-003)"
 else
   die "one or more proxy hosts failed to update — see warnings above; re-run after investigating"
 fi

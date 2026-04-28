@@ -6,8 +6,7 @@
   <h2>storage</h2>
   <p class="hint">
     {{gb .Storage.TotalBytes}}&nbsp;GB filesystem hosting <code>/srv/store</code>:
-    {{gb .Storage.UserOnDisk}}&nbsp;GB used by user volumes,
-    {{gb .Storage.Shared.OnDiskBytes}}&nbsp;GB by the shared volume,
+    {{gb .Storage.UserOnDisk}}&nbsp;GB used by Nextcloud user data,
     {{gb .Storage.SystemBytes}}&nbsp;GB by the system,
     {{gb .Storage.FreeBytes}}&nbsp;GB free.
   </p>
@@ -15,17 +14,14 @@
     <div class="seg seg-system" style="width:{{pct .Storage.SystemBytes .Storage.TotalBytes}}%" title="system {{gb .Storage.SystemBytes}} GB"></div>
     {{range .Storage.Users}}
       {{if .Exists}}
-      <div class="seg seg-user{{if not .Mounted}} seg-locked{{end}}" style="width:{{pct .OnDiskBytes $.Storage.TotalBytes}}%" title="{{.Name}} {{gb .OnDiskBytes}} GB on-disk"></div>
+      <div class="seg seg-user" style="width:{{pct .OnDiskBytes $.Storage.TotalBytes}}%" title="{{.Name}} {{gb .OnDiskBytes}} GB on-disk"></div>
       {{end}}
-    {{end}}
-    {{if .Storage.Shared.Provisioned}}
-    <div class="seg seg-user{{if not .Storage.Shared.Mounted}} seg-locked{{end}}" style="width:{{pct .Storage.Shared.OnDiskBytes .Storage.TotalBytes}}%" title="_shared {{gb .Storage.Shared.OnDiskBytes}} GB on-disk"></div>
     {{end}}
     <div class="seg seg-free" style="width:{{pct .Storage.FreeBytes .Storage.TotalBytes}}%" title="free {{gb .Storage.FreeBytes}} GB"></div>
   </div>
   <table class="storage-legend">
     <thead>
-      <tr><th></th><th>segment</th><th>on-disk</th><th>used inside</th><th>nominal</th></tr>
+      <tr><th></th><th>segment</th><th>on-disk</th><th>quota</th></tr>
     </thead>
     <tbody>
       <tr>
@@ -33,39 +29,22 @@
         <td>apps (OS, docker, logs)</td>
         <td>{{gb .Storage.SystemBytes}} GB</td>
         <td>—</td>
-        <td>—</td>
       </tr>
       {{range .Storage.Users}}
       <tr>
-        <td><span class="swatch swatch-user{{if not .Mounted}} swatch-locked{{end}}"></span></td>
+        <td><span class="swatch swatch-user"></span></td>
         <td>
           {{.Name}}
-          {{if not .Exists}}<span class="muted">(no volume)</span>
-          {{else if .Mounted}}<span class="ok">unlocked</span>
-          {{else}}<span class="muted">locked</span>{{end}}
+          {{if not .Exists}}<span class="muted">(no files yet)</span>{{end}}
         </td>
         <td>{{gb .OnDiskBytes}} GB</td>
-        <td>{{if .Mounted}}{{gb .UsedInner}} / {{gb .InnerCapacity}} GB{{else}}—{{end}}</td>
-        <td>{{gb .NominalBytes}} GB</td>
+        <td>{{if eq .NominalBytes 0}}—{{else}}{{gb .NominalBytes}} GB{{end}}</td>
       </tr>
       {{end}}
-      <tr>
-        <td><span class="swatch swatch-user{{if not .Storage.Shared.Mounted}} swatch-locked{{end}}"></span></td>
-        <td>
-          _shared <span class="muted">(all users, keyfile-unlocked)</span>
-          {{if .Storage.Shared.Mounted}}<span class="ok">mounted</span>
-          {{else if .Storage.Shared.Provisioned}}<span class="warn">not mounted</span>
-          {{else}}<span class="muted">not provisioned</span>{{end}}
-        </td>
-        <td>{{gb .Storage.Shared.OnDiskBytes}} GB</td>
-        <td>{{if .Storage.Shared.Mounted}}{{gb .Storage.Shared.UsedInner}} / {{gb .Storage.Shared.InnerCapacity}} GB{{else}}—{{end}}</td>
-        <td>—</td>
-      </tr>
       <tr>
         <td><span class="swatch swatch-free"></span></td>
         <td>free</td>
         <td>{{gb .Storage.FreeBytes}} GB</td>
-        <td>—</td>
         <td>—</td>
       </tr>
     </tbody>
@@ -77,7 +56,7 @@
   {{if .Users}}
   <table>
     <thead>
-      <tr><th>name</th><th>display</th><th>email</th><th>role</th><th>volume</th><th></th></tr>
+      <tr><th>name</th><th>display</th><th>email</th><th>role</th><th></th></tr>
     </thead>
     <tbody>
     {{range .Users}}
@@ -86,13 +65,6 @@
         <td>{{.DisplayName}}</td>
         <td><code>{{.Email}}</code></td>
         <td>{{if .IsAdmin}}<strong>admin</strong>{{else}}user{{end}}</td>
-        <td>
-          {{if .HasVolume}}
-            {{if .VolMounted}}<span class="ok">unlocked</span>{{else}}<span class="muted">locked</span>{{end}}
-          {{else}}
-            <span class="warn">none</span>
-          {{end}}
-        </td>
         <td><a class="button" href="/users/{{.Name}}">manage</a></td>
       </tr>
     {{end}}
@@ -106,16 +78,16 @@
 <section>
   <h2>create user</h2>
   <p class="hint">
-    Creates the Authelia entry, host system user, and 50&nbsp;GB LUKS volume.
-    {{if .TOTPEnabled}}A fresh TOTP secret is also minted; the QR is shown
-    once on the next page — save it before navigating away.{{else}}TOTP is
-    disabled for this installation, so no second-factor QR will be shown
-    (sign-in is password-only).{{end}}
-    The same password feeds both the Authelia argon2id hash and the LUKS
-    unlock secret, so login auto-unlocks the user's data volume. Tick "is
-    admin" to grant the same powers as the wizard-created admin (enrol UI
-    + Portainer); leave it off for a regular user (apps launcher + cloud
-    only).
+    Creates the Authelia entry for this user. Their Nextcloud account is
+    auto-provisioned the first time they sign into
+    <code>https://cloud.{{domain}}/</code> via OIDC (uid, name, email,
+    and group come straight from the Authelia claims). Tick "is admin"
+    to grant the same powers as the wizard-created admin (enrol UI +
+    Portainer); leave it off for a regular user (apps launcher + cloud
+    only).{{if .TOTPEnabled}} A fresh TOTP secret is also minted; the
+    QR is shown once on the next page — save it before navigating
+    away.{{else}} TOTP is disabled for this installation, so no second-
+    factor QR will be shown (sign-in is password-only).{{end}}
   </p>
   <form method="POST" action="/users">
     <input type="hidden" name="csrf" value="{{.CSRF}}">

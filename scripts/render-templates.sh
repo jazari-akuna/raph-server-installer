@@ -105,6 +105,10 @@ if [[ "$MODE" == "check" ]]; then
   # shellcheck disable=SC2016  # literal $pbkdf2 prefix — pbkdf2 hashes
   # always start with this token; the wizard supplies the real hash later.
   export AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH='$pbkdf2-sha512$check-mode-placeholder'
+  # shellcheck disable=SC2016
+  export AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH='$pbkdf2-sha512$check-mode-placeholder'
+  # shellcheck disable=SC2016
+  export AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH='$pbkdf2-sha512$check-mode-placeholder'
   echo "[render-templates] --check: rendering with sample env to $CHECK_ROOT"
 else
   # Default: source --env-file if given, else fall back to /opt/stacks/.env
@@ -146,10 +150,11 @@ template_scope() {
   local base="$1"
   case "$base" in
     configuration.yml.template)
-      # Authelia config: DOMAIN + Portainer OIDC client secret hash. The
+      # Authelia config: DOMAIN + per-OIDC-client secret hashes. The
       # nginx-style YAML strings (none here, but the file uses `$pbkdf2`
       # in comment text) survive because $pbkdf2 isn't in our scope.
-      printf '%s' '${DOMAIN} ${AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH}'
+      # When adding a new OIDC client, add its hash env var here too.
+      printf '%s' '${DOMAIN} ${AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH} ${AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH} ${AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH}'
       ;;
     authelia-authrequest.conf.template)
       # nginx snippet — protect $scheme, $upstream_http_remote_user etc.

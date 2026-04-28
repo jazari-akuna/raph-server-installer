@@ -4,8 +4,8 @@
 //   - cfg: loaded config
 //   - tmpl: parsed templates
 //   - mu:   global mutex around all mutating operations (gw0.conf,
-//           users_database.yml, LUKS, host useradd/userdel). The UI
-//           is operator-only with at most a couple of admins, so
+//           users_database.yml, occ user:delete shell-out, peer cascade).
+//           The UI is operator-only with at most a couple of admins, so
 //           serialising everything has zero practical cost and
 //           eliminates a whole class of races.
 
@@ -21,6 +21,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -157,17 +158,10 @@ func (s *server) routes() http.Handler {
 	// completes.
 	s.registerSetupRoutes(mux)
 
-	// IS the auth endpoint — no requireAuth, no CSRF. NPM rewrites only
-	// POST /api/firstfactor here; we proxy verbatim to Authelia and on
-	// success fire-and-forget a LUKS unlock for the user.
-	//
-	// We CAN'T wrap this in requireAuth (Authelia hasn't issued a cookie
-	// yet — Remote-User isn't set), but we MUST still refuse direct calls
-	// from the docker bridge, otherwise any container can POST forged
-	// credentials and trigger the LUKS-unlock side-effect. requireForwardAuth
-	// applies just the X-Forward-Auth-Secret check — NPM injects the
-	// header on the /api/firstfactor rewrite, bridge attackers don't.
-	mux.HandleFunc("/login-intercept", requireForwardAuth(s.cfg, s.handleLoginIntercept))
+	// (Pre-Wave-1: /login-intercept proxied Authelia's first-factor POST
+	// and auto-unlocked the user's LUKS volume on success. With Nextcloud
+	// + OIDC there's nothing to unlock — Nextcloud manages its own session
+	// via user_oidc — so the route is gone.)
 
 	// Two-tier access model (see auth.go):
 	//   - requireAuth(cfg, false, ...): any authenticated user (admin OR
@@ -227,8 +221,7 @@ func (s *server) routes() http.Handler {
 //     setupToken is wiped from the env after finalize, but defence in
 //     depth is cheap. The bare `/` falls through to the launcher.
 //
-// The /login-intercept and /healthz endpoints bypass the gate entirely
-// in both directions.
+// The /healthz endpoint bypasses the gate entirely in both directions.
 //
 // The public URL of the wizard is `http://setup.${DOMAIN}/` — fronted by
 // an NPM proxy host whose host header matches `setup.${DOMAIN}` and which
@@ -242,8 +235,6 @@ func (s *server) setupRouteGate(next http.Handler) http.Handler {
 		isStatic := strings.HasPrefix(path, "/static/")
 		isHealth := path == "/healthz"
 		isRoot := path == "/"
-		// /login-intercept always passes through (in setup mode it just
-		// fails because Authelia isn't routable yet, but that's fine).
 
 		if s.setupModeActive() {
 			// Wizard mode: serve the wizard at `/` (the subdomain root) by
@@ -303,8 +294,6 @@ type userRow struct {
 	Email       string
 	Groups      []string
 	IsAdmin     bool
-	HasVolume   bool
-	VolMounted  bool
 }
 
 func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash string) {
@@ -318,11 +307,9 @@ func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash s
 	rows := make([]userRow, 0, len(names))
 	for _, name := range names {
 		u := db.Users[name]
-		v := describeVolume(s.cfg, name)
 		rows = append(rows, userRow{
 			Name: name, DisplayName: u.DisplayName, Email: u.Email,
 			Groups: u.Groups, IsAdmin: isAdminUser(u),
-			HasVolume: v.Exists, VolMounted: v.Mounted,
 		})
 	}
 	data := usersListData{
@@ -341,10 +328,11 @@ func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash s
 	}
 }
 
-// handleCreateUser is the orchestration of: validate → useradd →
-// users_database.yml write → cryptsetup → mount → totp generate.
-// On any step failure we audit the partial state so the operator can
-// remediate.
+// handleCreateUser is the orchestration of: validate → argon2id hash →
+// users_database.yml write → flush → optional TOTP. Nextcloud's user_oidc
+// app auto-provisions the cloud-side user on first login (uid, name,
+// email, groups come from the OIDC claims), so enrol does NOT call
+// `occ user:add` here.
 func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -361,12 +349,6 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	email := strings.TrimSpace(r.Form.Get("email"))
 	password := r.Form.Get("password")
 	isAdmin := r.Form.Get("is_admin") != ""
-	// One password field; it feeds both the Authelia argon2id hash AND
-	// the LUKS unlock secret so loginintercept.go's auto-unlock works
-	// without a second prompt. Operator verifies typo on first sign-in
-	// (browser autofill is the source-of-truth for "did I type the
-	// right thing").
-	luksPass := password
 
 	if !validUsername(name) {
 		http.Error(w, "invalid username (allowed: lowercase a-z, then a-z0-9_-, 1..32)",
@@ -406,15 +388,7 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. host useradd (idempotent).
-	if err := hostUserAdd(name); err != nil {
-		http.Error(w, "useradd: "+err.Error(), http.StatusInternalServerError)
-		writeAudit(auditPath, auditEntry{Action: "user.create", Actor: actor,
-			Target: name, Result: "fail", Note: "useradd: " + err.Error()})
-		return
-	}
-
-	// 4. Splice into YAML and atomic-rename write.
+	// 3. Splice into YAML and atomic-rename write.
 	//
 	// Group convention (matches setup.go finalizeWriteAdmin and the
 	// `admins`-only Authelia ACL on console.${DOMAIN}): admins get
@@ -447,20 +421,12 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	writeAudit(auditPath, auditEntry{Action: "user.create", Actor: actor,
 		Target: name, Result: "ok", Note: "displayname=" + displayname})
 
-	// 5. LUKS create.
-	if err := luksCreate(s.cfg, name, luksPass); err != nil {
-		writeAudit(auditPath, auditEntry{Action: "luks.create", Actor: actor,
-			Target: name, Result: "fail", Note: err.Error()})
-		// Render the user-created page anyway with the LUKS error
-		// surfaced; the operator can retry from /users/<name>.
-		s.renderUserCreated(w, r, name, "", nil, fmt.Sprintf(
-			"LUKS volume creation FAILED: %v — fix and retry from the user page.", err))
-		return
-	}
-	writeAudit(auditPath, auditEntry{Action: "luks.create", Actor: actor,
-		Target: name, Result: "ok"})
+	// 4. Nextcloud-side provisioning is intentionally NOT done here. The
+	// user_oidc app auto-creates the Nextcloud user on first sign-in via
+	// auth.<domain>; the operator hands the credentials to the user and
+	// asks them to visit https://cloud.<domain> once.
 
-	// 6. TOTP generate — only if the operator opted into 2FA at setup.
+	// 5. TOTP generate — only if the operator opted into 2FA at setup.
 	// When EnableTOTP is false the user authenticates with password only
 	// (Authelia policy stays one_factor); minting a secret here would just
 	// produce a confusing QR for an unenforced second factor.
@@ -560,12 +526,6 @@ func (s *server) handleUserSub(w http.ResponseWriter, r *http.Request) {
 		s.handleUserPassword(w, r, name)
 	case "totp":
 		s.handleUserTOTP(w, r, name)
-	case "luks/passphrase":
-		s.handleLUKSPassphrase(w, r, name)
-	case "luks/unlock":
-		s.handleLUKSUnlock(w, r, name)
-	case "luks/lock":
-		s.handleLUKSLock(w, r, name)
 	case "delete":
 		s.handleUserDelete(w, r, name)
 	default:
@@ -581,7 +541,6 @@ type userDetailData struct {
 	Target        User
 	Name          string
 	IsAdmin       bool // target user's admin status (drives checkbox)
-	Volume        VolumeInfo
 	Devices       []peer
 	Flash         string
 	TOTPEnabled   bool
@@ -615,7 +574,6 @@ func (s *server) handleUserDetail(w http.ResponseWriter, r *http.Request, name s
 		http.NotFound(w, r)
 		return
 	}
-	v := describeVolume(s.cfg, name)
 	devices := s.devicesForUser(name)
 	data := userDetailData{
 		Title:         "user " + name,
@@ -623,7 +581,7 @@ func (s *server) handleUserDetail(w http.ResponseWriter, r *http.Request, name s
 		CSRF:          csrf,
 		ViewerIsAdmin: true, // requireAdmin gates this route
 		Target:        u, Name: name, IsAdmin: isAdminUser(u),
-		Volume: v, Devices: devices,
+		Devices:     devices,
 		TOTPEnabled: s.totpEnabled(),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -711,11 +669,8 @@ func (s *server) handleUserPassword(w http.ResponseWriter, r *http.Request, name
 	pw := r.Form.Get("password")
 	// Single password field — no confirm. Browser autofill is the source
 	// of truth for "did I type the right thing"; the operator verifies on
-	// the user's first sign-in. Note that this rotates ONLY the Authelia
-	// hash, not the LUKS passphrase: if the operator wants the auto-
-	// unlock-on-login invariant to keep holding, they must also rotate
-	// LUKS via the "change LUKS passphrase" form below (which still
-	// requires the old one).
+	// the user's first sign-in. Nextcloud picks up the new password on
+	// the next OIDC sign-in — no separate Nextcloud-side rotation needed.
 	if pw == "" {
 		http.Error(w, "password required", http.StatusBadRequest)
 		return
@@ -784,95 +739,6 @@ func (s *server) handleUserTOTP(w http.ResponseWriter, r *http.Request, name str
 	s.renderUserCreated(w, r, name, otpauth, qrPNG, "TOTP secret regenerated.")
 }
 
-func (s *server) handleLUKSPassphrase(w http.ResponseWriter, r *http.Request, name string) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	actor := r.Header.Get("X-Enrol-User")
-	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
-
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	old := r.Form.Get("old")
-	newp := r.Form.Get("new")
-	// Single-field new passphrase (no confirm) — the operator verifies
-	// on the next unlock attempt; if it's wrong they still have the old
-	// keyslot intact (luksChangePassphrase adds the new slot first then
-	// removes the old). Browser autofill is the source of truth.
-	if newp == "" {
-		http.Error(w, "new passphrase required", http.StatusBadRequest)
-		return
-	}
-	if len(newp) < 12 {
-		http.Error(w, "passphrase must be at least 12 characters",
-			http.StatusBadRequest)
-		return
-	}
-	if err := luksChangePassphrase(s.cfg, name, old, newp); err != nil {
-		writeAudit(auditPath, auditEntry{Action: "luks.passphrase", Actor: actor,
-			Target: name, Result: "fail", Note: err.Error()})
-		http.Error(w, "luks passphrase: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeAudit(auditPath, auditEntry{Action: "luks.passphrase", Actor: actor,
-		Target: name, Result: "ok"})
-	http.Redirect(w, r, "/users/"+name, http.StatusSeeOther)
-}
-
-func (s *server) handleLUKSUnlock(w http.ResponseWriter, r *http.Request, name string) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	actor := r.Header.Get("X-Enrol-User")
-	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	pass := r.Form.Get("passphrase")
-	if pass == "" {
-		http.Error(w, "passphrase required", http.StatusBadRequest)
-		return
-	}
-	if err := luksUnlock(s.cfg, name, pass); err != nil {
-		writeAudit(auditPath, auditEntry{Action: "luks.unlock", Actor: actor,
-			Target: name, Result: "fail", Note: err.Error()})
-		http.Error(w, "luks unlock: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeAudit(auditPath, auditEntry{Action: "luks.unlock", Actor: actor,
-		Target: name, Result: "ok"})
-	http.Redirect(w, r, "/users/"+name, http.StatusSeeOther)
-}
-
-func (s *server) handleLUKSLock(w http.ResponseWriter, r *http.Request, name string) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	actor := r.Header.Get("X-Enrol-User")
-	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
-	if err := luksLock(s.cfg, name); err != nil {
-		writeAudit(auditPath, auditEntry{Action: "luks.lock", Actor: actor,
-			Target: name, Result: "fail", Note: err.Error()})
-		http.Error(w, "luks lock: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeAudit(auditPath, auditEntry{Action: "luks.lock", Actor: actor,
-		Target: name, Result: "ok"})
-	http.Redirect(w, r, "/users/"+name, http.StatusSeeOther)
-}
-
 func (s *server) handleUserDelete(w http.ResponseWriter, r *http.Request, name string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -894,22 +760,41 @@ func (s *server) handleUserDelete(w http.ResponseWriter, r *http.Request, name s
 		return
 	}
 
-	// 1. lock+remove LUKS volume.
-	if err := luksDelete(s.cfg, name); err != nil {
-		writeAudit(auditPath, auditEntry{Action: "luks.delete", Actor: actor,
-			Target: name, Result: "fail", Note: err.Error()})
-		// Continue — the YAML edit is more important to complete.
+	// 1. Nextcloud-side delete via `occ user:delete`. Tolerate non-zero
+	// exit because the user may never have logged into Nextcloud, in
+	// which case user_oidc has not auto-provisioned them yet and there
+	// is no NC user to remove. Surface the result to the audit log
+	// either way.
+	occCmd := exec.Command("docker", "exec", "-u", "www-data", "cloud", "php", "occ", "user:delete", name)
+	if out, err := occCmd.CombinedOutput(); err != nil {
+		writeAudit(auditPath, auditEntry{Action: "cloud.user.delete", Actor: actor,
+			Target: name, Result: "fail",
+			Note: "occ user:delete: " + strings.TrimSpace(string(out))})
+		// Continue — the user may simply not exist in Nextcloud yet.
 	} else {
-		writeAudit(auditPath, auditEntry{Action: "luks.delete", Actor: actor,
+		writeAudit(auditPath, auditEntry{Action: "cloud.user.delete", Actor: actor,
 			Target: name, Result: "ok"})
 	}
 
-	// 2. remove all peers prefixed `<name>-`.
+	// 2. Belt-and-braces wipe of the user's Nextcloud datadir. occ
+	// user:delete already removes /srv/store/cloud-data/<name> when it
+	// succeeds, but we re-assert the wipe here so a never-logged-in
+	// user (no NC entity) still has any stray files removed. Tolerates
+	// not-exists.
+	dataDir := filepath.Join(cloudDataRoot, name)
+	if err := os.RemoveAll(dataDir); err != nil && !os.IsNotExist(err) {
+		writeAudit(auditPath, auditEntry{Action: "cloud.user.delete", Actor: actor,
+			Target: name, Result: "fail",
+			Note: "rm cloud-data: " + err.Error()})
+		// Continue — YAML drop is more important.
+	}
+
+	// 3. remove all peers prefixed `<name>-`.
 	if err := s.removeUserPeers(name, actor, auditPath); err != nil {
 		log.Printf("removeUserPeers(%s): %v", name, err)
 	}
 
-	// 3. TOTP delete.
+	// 4. TOTP delete.
 	if err := totpDelete(s.cfg, name); err != nil {
 		writeAudit(auditPath, auditEntry{Action: "totp.delete", Actor: actor,
 			Target: name, Result: "fail", Note: err.Error()})
@@ -918,7 +803,7 @@ func (s *server) handleUserDelete(w http.ResponseWriter, r *http.Request, name s
 			Target: name, Result: "ok"})
 	}
 
-	// 4. users_database.yml drop entry.
+	// 5. users_database.yml drop entry.
 	db, err := loadUsersDB(s.cfg.usersDBPath)
 	if err != nil {
 		http.Error(w, "load users: "+err.Error(), http.StatusInternalServerError)
@@ -938,11 +823,6 @@ func (s *server) handleUserDelete(w http.ResponseWriter, r *http.Request, name s
 	}
 	writeAudit(auditPath, auditEntry{Action: "user.delete", Actor: actor,
 		Target: name, Result: "ok"})
-
-	// 5. host userdel (best-effort).
-	if err := hostUserDel(name); err != nil {
-		log.Printf("hostUserDel(%s): %v", name, err)
-	}
 
 	http.Redirect(w, r, "/users", http.StatusSeeOther)
 }

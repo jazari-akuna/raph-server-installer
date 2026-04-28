@@ -48,11 +48,12 @@
 //     "completed_steps": {"admin_db_written": true, "cert_issued": false, ...}
 //   }
 //
-//   The plaintext admin password and the LUKS passphrase are NEVER
-//   persisted. They live in memory only while finalize is running; if
-//   the operator refreshes the finalize page after a partial failure,
-//   the wizard surfaces a "we need your passphrase again" prompt rather
-//   than silently re-trying with a blank.
+//   The plaintext admin password is NEVER persisted in state.json — only
+//   the argon2id hash. It lives in setupSecretCache during finalize so
+//   the NPM bootstrap step can rotate NPM's default credentials. If the
+//   operator refreshes the finalize page after a partial failure, the
+//   wizard surfaces a "re-enter your password" prompt rather than
+//   silently re-trying with a blank.
 
 package main
 
@@ -106,56 +107,40 @@ const (
 // configuration.yml, exiting 0, and Authelia then restart-looping on
 // the resulting hash).
 type setupCompletedSteps struct {
-	UsersDBWritten   bool `json:"users_db_written,omitempty"`
-	SharedVolReady   bool `json:"shared_volume_ready,omitempty"`
-	// AdminVolReady tracks whether the operator's personal LUKS volume
-	// at /srv/store/data/<admin>.img has been created. Sized from
-	// PersonalLUKSSize (state.json), unlocked by the operator's plaintext
-	// password from setupSecretCache. Skipped (with a logged warning) if
-	// the cache is empty post-restart — the operator can re-walk
-	// /setup/admin to repopulate it before re-running finalize.
-	AdminVolReady    bool `json:"admin_volume_ready,omitempty"`
-	OIDCRotated      bool `json:"oidc_rotated,omitempty"`
-	TemplatesRender  bool `json:"templates_rendered,omitempty"`
-	CertIssued       bool `json:"cert_issued,omitempty"`
-	NPMRoutesWired   bool `json:"npm_routes_wired,omitempty"`
-	SentinelTouched  bool `json:"sentinel_touched,omitempty"`
+	UsersDBWritten  bool `json:"users_db_written,omitempty"`
+	OIDCRotated     bool `json:"oidc_rotated,omitempty"`
+	TemplatesRender bool `json:"templates_rendered,omitempty"`
+	CertIssued      bool `json:"cert_issued,omitempty"`
+	NPMRoutesWired  bool `json:"npm_routes_wired,omitempty"`
+	SentinelTouched bool `json:"sentinel_touched,omitempty"`
 }
 
 type setupState struct {
-	Step             setupStepName       `json:"step"`
-	Domain           string              `json:"domain,omitempty"`
-	DNSProvider      string              `json:"dns_provider,omitempty"`
-	DNSProviderCreds map[string]string   `json:"dns_provider_creds,omitempty"`
-	AdminUsername    string              `json:"admin_username,omitempty"`
-	AdminDisplayName string              `json:"admin_display_name,omitempty"`
-	AdminEmail       string              `json:"admin_email,omitempty"`
-	AdminPasswordHash string             `json:"admin_password_hash,omitempty"`
-	EnableTOTP       bool                `json:"enable_totp,omitempty"`
+	Step              setupStepName     `json:"step"`
+	Domain            string            `json:"domain,omitempty"`
+	DNSProvider       string            `json:"dns_provider,omitempty"`
+	DNSProviderCreds  map[string]string `json:"dns_provider_creds,omitempty"`
+	AdminUsername     string            `json:"admin_username,omitempty"`
+	AdminDisplayName  string            `json:"admin_display_name,omitempty"`
+	AdminEmail        string            `json:"admin_email,omitempty"`
+	AdminPasswordHash string            `json:"admin_password_hash,omitempty"`
+	EnableTOTP        bool              `json:"enable_totp,omitempty"`
 
-	// Operator-chosen LUKS volume sizes, in raw bytes. PersonalLUKSSize
-	// is the per-user encrypted volume's size (applied to every user
-	// created post-setup as well — there's no per-user override yet).
-	// SharedLUKSSize is the size of the system-wide /shared volume that
-	// copyparty bind-mounts. Both are collected on the storage wizard
-	// step (between admin and finalize) and consumed at finalize time:
-	// PERSONAL_LUKS_SIZE_BYTES + SHARED_LUKS_SIZE_BYTES are exported as
-	// env vars when shelling out to the volume scripts, and
-	// PersonalLUKSSize is also reflected back into the runtime
-	// cfg.luksSizeGB so subsequent user creations from /users use it.
-	PersonalLUKSSize int64 `json:"personal_luks_size,omitempty"`
-	SharedLUKSSize   int64 `json:"shared_luks_size,omitempty"`
+	// CloudUserQuotaGB is the per-user Nextcloud quota in raw GB. 0
+	// means unlimited; the wizard default is 50. Collected on the
+	// storage wizard step (between admin and finalize) and consumed
+	// only by the dashboard's storageSnapshot — Nextcloud quota
+	// enforcement happens via `occ user:setting <u> files quota` once
+	// the user provisions on first sign-in.
+	CloudUserQuotaGB int `json:"cloud_user_quota_gb,omitempty"`
 
-	StartedAt        time.Time           `json:"started_at,omitempty"`
-	UpdatedAt        time.Time           `json:"updated_at,omitempty"`
-	CompletedSteps   setupCompletedSteps `json:"completed_steps,omitempty"`
-
+	StartedAt      time.Time           `json:"started_at,omitempty"`
+	UpdatedAt      time.Time           `json:"updated_at,omitempty"`
+	CompletedSteps setupCompletedSteps `json:"completed_steps,omitempty"`
 }
 
 // (The operator's plaintext password is never persisted onto setupState.
-// It rides in setupSecretCache during finalize and is wiped at the end.
-// The LUKS passphrase is the same string per the user spec; auto-unlock
-// at login is handled by loginintercept.go.)
+// It rides in setupSecretCache during finalize and is wiped at the end.)
 
 // supportedDNSProviders lists the certbot DNS plugins the wizard exposes.
 // Each entry maps the provider id (URL-safe) to the credentials shape the
@@ -489,16 +474,12 @@ type setupPageData struct {
 	Err              string
 
 	// Storage step (stepStorage). DiskFreeBytes / DiskTotalBytes describe
-	// the host disk underlying /srv/store; the suggested defaults below
-	// derive from those (small fraction for personal, half for shared).
-	// PersonalSizeGiB / SharedSizeGiB carry the operator's last-typed
-	// values back through validation re-renders.
-	DiskFreeBytes        int64
-	DiskTotalBytes       int64
-	PersonalSizeGiB      string
-	SharedSizeGiB        string
-	SuggestedPersonalGiB int64
-	SuggestedSharedGiB   int64
+	// the host disk underlying /srv/store; the operator picks a per-user
+	// Nextcloud quota in GB (0 = unlimited). CloudUserQuotaGB carries
+	// the operator's last-typed value back through validation re-renders.
+	DiskFreeBytes    int64
+	DiskTotalBytes   int64
+	CloudUserQuotaGB string
 }
 
 func (s *server) renderSetup(w http.ResponseWriter, name string, data setupPageData) {
@@ -688,12 +669,12 @@ func (s *server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Stash the plaintext password into the in-memory finalize cache
-		// (key = admin username). The finalize handler reads it and uses
-		// it as the LUKS passphrase. If the operator refreshes between
-		// /setup/admin and /setup/finalize, the cache loses the password
-		// and finalize will surface a "re-enter your password" prompt
-		// (TODO Wave 3B: not yet wired — for now finalize will fail
-		// loudly with a clear "missing in-memory password" error).
+		// (key = admin username). The finalize handler reads it for the
+		// NPM bootstrap step (rotate NPM's default-admin to the
+		// operator's chosen email + password). If the operator refreshes
+		// between /setup/admin and /setup/finalize, the cache loses the
+		// password and finalize surfaces a clear "re-enter your password"
+		// error pointing back at /setup/admin.
 		setupSecretCache.set(name, pw)
 		http.Redirect(w, r, "/setup/storage", http.StatusSeeOther)
 	default:
@@ -704,11 +685,13 @@ func (s *server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 // in-memory password cache
 
-// The plaintext admin password is needed at finalize time (as the LUKS
-// passphrase, since per the user spec the two are the same). Persisting it
-// would defeat the point — anyone with read access to /srv/store could
-// then unlock storage. Hold it in a process-local map keyed on the admin
-// username instead. Cleared after a successful finalize.
+// The plaintext admin password is needed at finalize time so the NPM
+// bootstrap step can rotate NPM's default-admin credentials to the
+// operator's chosen password. Persisting it would expand the at-rest
+// secret surface unnecessarily (the password ends up in users_database.yml
+// argon2id-hashed; the plaintext only needs to outlive the wizard).
+// Hold it in a process-local map keyed on the admin username instead.
+// Cleared after a successful finalize.
 
 type secretCache struct {
 	mu sync.Mutex
@@ -719,10 +702,8 @@ type secretCache struct {
 // default), so the cache survives enrol container restarts (we rebuild
 // during dev / for security patches) but evaporates on host reboot. The
 // directory is bind-mounted into enrol; bootstrap-phase2.sh creates it
-// with mode 0700 root before the stack comes up. We deliberately do NOT
-// use /srv/store: that's the persistent-disk anchor whose contents the
-// admin password also unlocks (per spec, admin pw == LUKS passphrase),
-// so leaving the password there would defeat the storage encryption.
+// with mode 0700 root before the stack comes up. /srv/store is the
+// persistent-disk anchor we deliberately avoid for transient secrets.
 const secretCacheDir = "/run/raph-setup-secrets"
 
 func secretCacheFile(k string) string {
@@ -775,20 +756,14 @@ func (c *secretCache) delete(k string) {
 var setupSecretCache = &secretCache{}
 
 // ---------------------------------------------------------------------------
-// step 3.5 — LUKS volume sizes (personal + shared)
+// step 3.5 — Nextcloud per-user quota
 //
-// The wizard writes /srv/store/setup/state.json with PersonalLUKSSize +
-// SharedLUKSSize (raw bytes). Finalize then exports those as
-// PERSONAL_LUKS_SIZE_BYTES + SHARED_LUKS_SIZE_BYTES when shelling out to
-// the volume-creation scripts, AND reflects PersonalLUKSSize back into
-// cfg.luksSizeGB (rounded up to GiB) so the day-2 /users handler creates
-// each user's volume at the operator's chosen size.
-//
-// We deliberately do NOT enforce envelope rules — the operator can set
-// values larger than the disk if they explicitly type those (sparse
-// images won't allocate up-front anyway). The template displays a warning
-// next to the field if the value is outside the recommended envelope so
-// the operator knows what they're agreeing to.
+// Single input: cloud_user_quota_gb (default 50, 0 = unlimited). The
+// wizard writes setupState.CloudUserQuotaGB; the dashboard's
+// storageSnapshot reads it back to render the per-user nominal column.
+// Nextcloud quota enforcement is set by the operator (or a Wave 2 helper)
+// via `occ user:setting <u> files quota` after the user provisions on
+// first sign-in.
 
 // diskFreeBytes returns (free, total, err) for the filesystem holding
 // /srv/store. The container has /srv/store bind-mounted from the host,
@@ -805,49 +780,30 @@ func diskFreeBytes(path string) (free int64, total int64, err error) {
 
 const gibBytes int64 = 1 << 30
 
-// suggestedSizes computes default suggestions for the personal + shared
-// volumes given the disk's free bytes. Personal: smaller of (10 GiB,
-// 10 % of free). Shared: 50 % of free. Both rounded down to GiB; both
-// floor at 1 GiB so the suggestion is never zero on a tiny dev disk.
-func suggestedSizes(free int64) (personalGiB int64, sharedGiB int64) {
-	tenPercent := free / 10
-	personal := int64(10) * gibBytes
-	if tenPercent < personal {
-		personal = tenPercent
-	}
-	shared := free / 2
-	personalGiB = personal / gibBytes
-	sharedGiB = shared / gibBytes
-	if personalGiB < 1 {
-		personalGiB = 1
-	}
-	if sharedGiB < 1 {
-		sharedGiB = 1
-	}
-	return
-}
+// defaultCloudQuotaGB is the wizard's pre-filled per-user quota when the
+// operator hasn't typed anything yet. Matches the legacy 50 GB envelope
+// users were already used to in the LUKS-era installer.
+const defaultCloudQuotaGB = 50
 
-// parseGiB parses an operator-typed integer GiB string into bytes.
-// Returns (bytes, ok). Empty / non-numeric / non-positive return (0, false).
-func parseGiB(s string) (int64, bool) {
+// parseQuotaGB parses an operator-typed quota string. Returns (gb, ok).
+// "0" is allowed and means unlimited. Empty / negative / non-numeric
+// returns (0, false).
+func parseQuotaGB(s string) (int, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, false
 	}
-	var n int64
+	var n int
 	for _, c := range s {
 		if c < '0' || c > '9' {
 			return 0, false
 		}
-		n = n*10 + int64(c-'0')
-		if n > 1<<30 { // sanity ceiling, > 1 EiB
+		n = n*10 + int(c-'0')
+		if n > 1<<20 { // sanity ceiling, > 1 PiB worth of GB
 			return 0, false
 		}
 	}
-	if n <= 0 {
-		return 0, false
-	}
-	return n * gibBytes, true
+	return n, true
 }
 
 func (s *server) handleSetupStorage(w http.ResponseWriter, r *http.Request) {
@@ -857,63 +813,42 @@ func (s *server) handleSetupStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	free, total, _ := diskFreeBytes("/srv/store")
-	sugPersonal, sugShared := suggestedSizes(free)
-
-	personalDisplay := ""
-	sharedDisplay := ""
-	if st.PersonalLUKSSize > 0 {
-		personalDisplay = fmt.Sprintf("%d", st.PersonalLUKSSize/gibBytes)
-	} else {
-		personalDisplay = fmt.Sprintf("%d", sugPersonal)
-	}
-	if st.SharedLUKSSize > 0 {
-		sharedDisplay = fmt.Sprintf("%d", st.SharedLUKSSize/gibBytes)
-	} else {
-		sharedDisplay = fmt.Sprintf("%d", sugShared)
+	quotaDisplay := fmt.Sprintf("%d", defaultCloudQuotaGB)
+	if st.CloudUserQuotaGB > 0 {
+		quotaDisplay = fmt.Sprintf("%d", st.CloudUserQuotaGB)
+	} else if st.CloudUserQuotaGB == 0 && st.CompletedSteps.UsersDBWritten {
+		// Operator already chose 0 (unlimited) on a previous walk; honour
+		// it. Otherwise we can't distinguish "fresh" from "explicitly
+		// unlimited" → fall back to the default for the empty-state case.
+		quotaDisplay = "0"
 	}
 
 	switch r.Method {
 	case http.MethodGet:
 		s.renderSetup(w, "setup-storage.html", setupPageData{
 			Title: "setup — storage", Step: stepStorage, State: st, Domain: st.Domain,
-			DiskFreeBytes:        free,
-			DiskTotalBytes:       total,
-			PersonalSizeGiB:      personalDisplay,
-			SharedSizeGiB:        sharedDisplay,
-			SuggestedPersonalGiB: sugPersonal,
-			SuggestedSharedGiB:   sugShared,
+			DiskFreeBytes:    free,
+			DiskTotalBytes:   total,
+			CloudUserQuotaGB: quotaDisplay,
 		})
 	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		personalRaw := r.Form.Get("personal_size_gib")
-		sharedRaw := r.Form.Get("shared_size_gib")
-		personalBytes, okP := parseGiB(personalRaw)
-		sharedBytes, okS := parseGiB(sharedRaw)
-		errMsg := ""
-		switch {
-		case !okP:
-			errMsg = "personal volume size: must be a positive integer (GiB)"
-		case !okS:
-			errMsg = "shared volume size: must be a positive integer (GiB)"
-		}
-		if errMsg != "" {
+		quotaRaw := r.Form.Get("cloud_user_quota_gb")
+		quotaGB, ok := parseQuotaGB(quotaRaw)
+		if !ok {
 			s.renderSetup(w, "setup-storage.html", setupPageData{
 				Title: "setup — storage", Step: stepStorage, State: st, Domain: st.Domain,
-				DiskFreeBytes:        free,
-				DiskTotalBytes:       total,
-				PersonalSizeGiB:      personalRaw,
-				SharedSizeGiB:        sharedRaw,
-				SuggestedPersonalGiB: sugPersonal,
-				SuggestedSharedGiB:   sugShared,
-				Err:                  errMsg,
+				DiskFreeBytes:    free,
+				DiskTotalBytes:   total,
+				CloudUserQuotaGB: quotaRaw,
+				Err:              "per-user quota: must be a non-negative integer (GB; 0 = unlimited)",
 			})
 			return
 		}
-		st.PersonalLUKSSize = personalBytes
-		st.SharedLUKSSize = sharedBytes
+		st.CloudUserQuotaGB = quotaGB
 		st.Step = stepFinalize
 		if err := s.saveSetupState(st); err != nil {
 			http.Error(w, "save state: "+err.Error(), http.StatusInternalServerError)
@@ -934,17 +869,10 @@ func (s *server) handleSetupFinalize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load state: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Belt-and-braces: if the operator started this wizard before the
-	// storage step existed (state.json from an older bootstrap), bounce
-	// them back so we have real sizes to feed the volume scripts. The
-	// step machinery can land here directly via stale state.Step =
-	// "finalize" when the JSON predates the new field.
-	if st.PersonalLUKSSize == 0 || st.SharedLUKSSize == 0 {
-		st.Step = stepStorage
-		_ = s.saveSetupState(st)
-		http.Redirect(w, r, "/setup/storage", http.StatusSeeOther)
-		return
-	}
+	// (Pre-Wave-1: a guard here bounced the operator back to /setup/storage
+	// when PersonalLUKSSize/SharedLUKSSize were missing. With the cloud-
+	// quota model the storage step always lands a value — even 0 = unlimited
+	// is a valid operator choice — so no bounce is needed.)
 	switch r.Method {
 	case http.MethodGet:
 		s.renderSetup(w, "setup-finalize.html", setupPageData{
@@ -1148,78 +1076,33 @@ func (s *server) runFinalize(
 		}
 	}
 
-	// 2. shared LUKS volume — provision at the operator's chosen size
-	// (or re-assert if the bootstrap-phase2 default-size run already laid
-	// it down). Script is idempotent: if /srv/store/data/_shared.img
-	// exists it skips dd+luksFormat and only re-asserts keyfile/group/
-	// mountpoint state. After the script returns, /etc/luks/_shared.key
-	// MUST exist AND the mapper MUST be mounted; verifySharedVolume is
-	// the gate (the legacy finalizeVerifySharedKey was only a keyfile
-	// existence check; the mount check catches the regression where
-	// luksFormat succeeded but the open/mount step silently failed).
-	if !st.CompletedSteps.SharedVolReady {
-		status("shared_volume", "provisioning /srv/store/mnt/_shared")
-		if err := s.finalizeEnsureSharedVolume(ctx, st, logLine); err != nil {
-			// Surface the script's error verbatim — the verification
-			// below is what decides whether to proceed.
-			logLine("warning: shared volume provisioning script failed: " + err.Error())
-		}
-		if err := s.verifySharedVolume(); err != nil {
-			return wrapErr("shared_volume", err)
-		}
-		st.CompletedSteps.SharedVolReady = true
-		if err := s.saveSetupState(st); err != nil {
-			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
-		}
-	}
+	// (Pre-Wave-1 LUKS shared-volume + admin-volume steps removed: cloud
+	// data lives unencrypted under /srv/store/cloud-data/<u>, mounted
+	// directly by the cloud container.)
 
-	// 2b. admin's personal LUKS volume — created at the operator-chosen
-	// PersonalLUKSSize (state.json), unlocked by the operator's plaintext
-	// password (cached in setupSecretCache from the /setup/admin POST).
-	// MUST run after the users_database.yml step (so the host user has
-	// been created via finalizeWriteAdmin → hostUserAdd is implicit at
-	// luksCreate time) but BEFORE the runtime cfg.luksSizeGB reflection
-	// in step 7, so a wizard-chosen 15 GiB lands as a 15 GiB blob (not
-	// the env-var default 50). The previous wizard finalize wrote the
-	// Authelia user but skipped the LUKS blob, leaving the admin with
-	// "raph (no volume) — 50.0 GB nominal" on the dashboard despite
-	// /srv/store/data/raph.img not existing.
-	// No gate on AdminVolReady: finalizeEnsureAdminVolume is fully
-	// idempotent (early-returns when img exists AND is mounted). Running
-	// it every retry catches the "previous finalize created the .img but
-	// crashed before unlocking it" case — without the unconditional re-
-	// check, a retry would skip the volume entirely and the operator
-	// would land on the dashboard with a locked home. The state bit is
-	// still set on success as a record-of-completion.
-	status("admin_volume", "ensuring /srv/store/data/"+st.AdminUsername+".img is created and mounted")
-	if err := s.finalizeEnsureAdminVolume(ctx, st, logLine); err != nil {
-		return wrapErr("admin_volume", err)
-	}
-	if !st.CompletedSteps.AdminVolReady {
-		st.CompletedSteps.AdminVolReady = true
-		if err := s.saveSetupState(st); err != nil {
-			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
-		}
-	}
-
-	// 3. rotate the OIDC console (Portainer) client_secret. MUST run
+	// 2. rotate the OIDC client secrets (console + cloud). MUST run
 	// BEFORE finalizeRenderTemplates because the template substitution
-	// reads AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH from /opt/stacks/.env;
-	// if the placeholder is still there at render time, configuration.yml
+	// reads AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH and
+	// AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH from /opt/stacks/.env; if
+	// either placeholder is still there at render time, configuration.yml
 	// gets `$pbkdf2-sha512$bootstrap-placeholder` baked in and Authelia
 	// restart-loops on the next compose-up. See oidc.go for the full
 	// rationale + idempotency contract.
 	if !st.CompletedSteps.OIDCRotated {
-		status("oidc", "rotating OIDC console client_secret")
+		status("oidc", "rotating OIDC client secrets (console + cloud)")
 		envFile := filepath.Join(s.cfg.stacksDir, ".env")
 		if err := rotateOIDCConsoleSecret(envFile, ""); err != nil {
 			return wrapErr("oidc", err)
 		}
-		// No external observable to verify here beyond what
-		// rotateOIDCConsoleSecret already enforces (it reads back the
-		// env file before returning). The templates step's verification
-		// is what proves the new hash actually landed in configuration.yml.
-		logLine("oidc: client_secret rotated; plaintext at " + oidcPlaintextDefaultPath)
+		logLine("oidc: console client_secret rotated; plaintext at " + oidcConsolePlaintextDefaultPath)
+		if err := rotateOIDCCloudSecret(envFile, ""); err != nil {
+			return wrapErr("oidc", err)
+		}
+		logLine("oidc: cloud client_secret rotated; plaintext at " + oidcCloudPlaintextDefaultPath)
+		// No external observable to verify here beyond what the rotate
+		// helpers already enforce (they read back the env file before
+		// returning). The templates step's verification proves the new
+		// hashes actually landed in configuration.yml.
 		st.CompletedSteps.OIDCRotated = true
 		if err := s.saveSetupState(st); err != nil {
 			logLine(fmt.Sprintf("warning: persist state.json: %v", err))
@@ -1276,24 +1159,14 @@ func (s *server) runFinalize(
 		}
 	}
 
-	// 7. apply the operator's chosen personal LUKS size to the live
-	// process so subsequent /users creates use it. cfg is a value copy
-	// inside setupState's host server, so we mutate it directly. The
-	// rounding-up (rather than down) means a wizard-chosen 9.5 GiB
-	// becomes 10 GiB on subsequent creates — better to over-allocate
-	// than to silently shrink the operator's intent.
-	if st.PersonalLUKSSize > 0 {
-		gib := int(st.PersonalLUKSSize / gibBytes)
-		if st.PersonalLUKSSize%gibBytes != 0 {
-			gib++
-		}
-		if gib < 1 {
-			gib = 1
-		}
-		s.cfg.luksSizeGB = gib
-	}
+	// (Pre-Wave-1: a step here reflected the operator's chosen
+	// PersonalLUKSSize back into cfg.luksSizeGB so subsequent /users
+	// creates used it. With Nextcloud-managed storage there is no
+	// per-user LUKS volume to size at create time; the wizard's
+	// CloudUserQuotaGB flows into the dashboard's storage panel via
+	// state.json directly.)
 
-	// 8. pre-touch-sentinel belt-and-braces: re-run EVERY observable
+	// 7. pre-touch-sentinel belt-and-braces: re-run EVERY observable
 	// verification in dependency order. If any fail, refuse to write
 	// the sentinel and surface the first failing step. This catches
 	// the case where a step's own post-verify accepted a transient
@@ -1307,7 +1180,7 @@ func (s *server) runFinalize(
 		return vErr
 	}
 
-	// 9. flip out of setup mode.
+	// 8. flip out of setup mode.
 	if !st.CompletedSteps.SentinelTouched {
 		status("sentinel", "marking setup complete")
 		if err := s.finalizeTouchSentinel(); err != nil {
@@ -1387,135 +1260,6 @@ func (s *server) finalizeWriteAdmin(st *setupState) error {
 	if err := db.flush(); err != nil {
 		return fmt.Errorf("flush users db: %w", err)
 	}
-	return nil
-}
-
-// ---- finalize step 2: verify the shared LUKS keyfile ---------------------
-
-func (s *server) finalizeVerifySharedKey() error {
-	const path = "/etc/luks/_shared.key"
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("%s: %w (cloud's [/shared] block will fail-closed; "+
-			"re-run scripts/create-shared-volume.sh as root, or revisit "+
-			"/setup/storage if the wizard short-circuited the size step)", path, err)
-	}
-	if info.Size() < 32 {
-		return fmt.Errorf("%s: too small (%d bytes; expected >= 32)", path, info.Size())
-	}
-	return nil
-}
-
-// ---- finalize step 2b: provision the shared volume at operator size ------
-//
-// Calls scripts/create-shared-volume.sh with SHARED_LUKS_SIZE_BYTES set
-// to st.SharedLUKSSize. The script is idempotent — if the .img already
-// exists (e.g. bootstrap-phase2 ran with the default 10 GiB before the
-// wizard collected a real size) it just re-asserts keyfile/group/mount
-// state and exits 0. We deliberately do NOT shrink an existing larger
-// .img to match a smaller wizard-chosen value; the operator can re-run
-// the script manually after `rm /srv/store/data/_shared.img` if they
-// want a strict resize.
-//
-// ADMIN_USERS is also passed through so the operator's chosen admin
-// username lands in the `shared-users` group at create time.
-func (s *server) finalizeEnsureSharedVolume(ctx context.Context, st *setupState, logLine func(string)) error {
-	if testModeEnabled() {
-		logLine("TEST_MODE: skipping create-shared-volume.sh")
-		return nil
-	}
-	script := filepath.Join(s.cfg.repoDir, "scripts/create-shared-volume.sh")
-	if _, err := os.Stat(script); err != nil {
-		return fmt.Errorf("script not found: %w", err)
-	}
-	cmd := exec.CommandContext(ctx, "bash", script)
-	env := append([]string{}, os.Environ()...)
-	if st.SharedLUKSSize > 0 {
-		env = append(env, fmt.Sprintf("SHARED_LUKS_SIZE_BYTES=%d", st.SharedLUKSSize))
-	}
-	if st.AdminUsername != "" {
-		env = append(env, "ADMIN_USERS="+st.AdminUsername)
-	}
-	cmd.Env = env
-	return runStreaming(cmd, logLine)
-}
-
-// ---- finalize step 2b: provision the admin's personal LUKS volume --------
-//
-// finalizeEnsureAdminVolume creates /srv/store/data/<admin>.img at the
-// operator's PersonalLUKSSize (state.json), unlocked by the plaintext
-// password held in setupSecretCache from the /setup/admin POST. Mirrors
-// the day-2 /users/new flow except the size comes from state.json instead
-// of cfg.luksSizeGB (which still reflects the env-var default at this
-// point — step 7 of runFinalize is what reflects PersonalLUKSSize back
-// into the runtime cfg, and that runs LATER in the pipeline).
-//
-// Idempotent: if the .img already exists (a previous finalize created it),
-// re-runs are no-ops. The host user is created via hostUserAdd before
-// luksCreateWithSize, since luksCreate's chown of the mountpoint needs
-// the uid/gid resolved from /etc/passwd via nsenter.
-//
-// Plaintext-password recovery path: if setupSecretCache is empty (e.g.
-// finalize is being re-run after a host reboot wiped /run tmpfs and the
-// operator hasn't re-walked /setup/admin yet), surface a clear error
-// pointing at the wizard step rather than silently skipping. The operator
-// can re-enter the password and re-run finalize; the rest of the pipeline
-// is idempotent so already-completed steps short-circuit cheaply.
-func (s *server) finalizeEnsureAdminVolume(ctx context.Context, st *setupState, logLine func(string)) error {
-	_ = ctx // ctx is accepted for future cancellation support; cryptsetup
-	// blocks the goroutine for ~2 s during argon2id KDF derivation and
-	// isn't context-aware in our wrapper, so we don't thread it in yet.
-	if st.AdminUsername == "" {
-		return errors.New("admin username unset in state.json — restart wizard at /setup/admin")
-	}
-	if st.PersonalLUKSSize <= 0 {
-		return errors.New("personal_luks_size unset in state.json — restart wizard at /setup/storage")
-	}
-	img, mnt, _ := volumePaths(s.cfg, st.AdminUsername)
-	imgExists := false
-	if _, err := os.Stat(img); err == nil {
-		imgExists = true
-	}
-	mounted := isMounted(mnt)
-
-	if imgExists && mounted {
-		logLine("admin_volume: " + img + " already created and mounted at " + mnt)
-		return nil
-	}
-	if testModeEnabled() {
-		logLine("TEST_MODE: skipping luksCreate for admin " + st.AdminUsername)
-		return nil
-	}
-	plaintext := setupSecretCache.get(st.AdminUsername)
-	if plaintext == "" {
-		return fmt.Errorf("admin password missing from in-memory cache "+
-			"(restart wizard at /setup/admin to re-enter, then re-run finalize); "+
-			"required to %s %s",
-			map[bool]string{true: "luksUnlock", false: "luksFormat"}[imgExists], img)
-	}
-	// Ensure the host system user exists before chowning the mountpoint.
-	// Idempotent — hostUserAdd returns nil when the user is already there.
-	if err := hostUserAdd(st.AdminUsername); err != nil {
-		return fmt.Errorf("hostUserAdd %s: %w", st.AdminUsername, err)
-	}
-	if !imgExists {
-		logLine(fmt.Sprintf("admin_volume: creating %s at %d bytes (%.1f GiB)",
-			img, st.PersonalLUKSSize, float64(st.PersonalLUKSSize)/float64(gibBytes)))
-		if err := luksCreateWithSize(s.cfg, st.AdminUsername, plaintext, st.PersonalLUKSSize); err != nil {
-			return fmt.Errorf("luksCreate %s: %w", st.AdminUsername, err)
-		}
-	}
-	// Open + mount so the operator's home is ready the moment the wizard
-	// redirects to the dashboard. Earlier the code relied solely on
-	// loginintercept.go to fire on the next POST /api/firstfactor — but
-	// that doesn't fire if the operator already has a valid Authelia
-	// session cookie (re-walks, browser tabs left over from the original
-	// install attempt, etc.). They'd land on the dashboard with a locked
-	// home and no obvious recovery. luksUnlock is idempotent.
-	if err := luksUnlock(s.cfg, st.AdminUsername, plaintext); err != nil {
-		return fmt.Errorf("luksUnlock %s: %w", st.AdminUsername, err)
-	}
-	logLine("admin_volume: " + img + " ready and mounted at " + mnt)
 	return nil
 }
 
@@ -1716,66 +1460,56 @@ location / {
 }
 `
 
-// npmAdvFwdAuthCloudTmpl — same as npmAdvFwdAuthTmpl but with an extra
-// `location /share/` that proxies to copyparty WITHOUT the
-// authelia-authrequest gate. copyparty's share-link feature mints
-// token-keyed URLs (https://cloud.<domain>/share/<token>); the token
-// is the auth, so forcing recipients through Authelia would defeat
-// the point. The longer prefix `/share/` wins over `/` per nginx
-// location precedence, so authenticated traffic to anything else
-// still goes through the regular forward-auth gate.
+// npmAdvNextcloudTmpl — cloud.<domain> advanced_config. No forward-auth
+// gate (Nextcloud manages its own session via the user_oidc app pointed
+// at Authelia), but a generous body/timeout envelope so 50 GB+ uploads
+// stream through cleanly. The location-block stanza redirects the well-
+// known DAV / WebFinger / NodeInfo paths to Nextcloud's canonical URLs
+// per the upstream nginx-recipes.
 //
-// X-Forward-Auth-Secret is intentionally NOT set on the /share/
-// location — copyparty ignores that header (it's enrol's gate) and
-// omitting it makes the bypass unmistakable in the rendered config.
-const npmAdvFwdAuthCloudTmpl = `include /snippets/authelia-location.conf;
+// nginx variables ($forward_scheme, $server, $port) are literal in the
+// templated config, NOT interpolated by Go. proxy_request_buffering off
+// is the load-bearing knob: with it on, NPM's nginx buffers the entire
+// upload to disk before forwarding, which both doubles the disk write
+// and hits memory caps for >2 GiB requests.
+const npmAdvNextcloudTmpl = `client_max_body_size 50G;
+client_body_timeout 3600s;
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+proxy_connect_timeout 60s;
+proxy_request_buffering off;
 
-proxy_set_header X-Forward-Auth-Secret '%s';
-
-location /share/ {
-    include /snippets/proxy.conf;
-    proxy_pass $forward_scheme://$server:$port;
-}
+location = /.well-known/carddav { return 301 /remote.php/dav/; }
+location = /.well-known/caldav  { return 301 /remote.php/dav/; }
+location = /.well-known/webfinger { return 301 /index.php/.well-known/webfinger; }
+location = /.well-known/nodeinfo  { return 301 /index.php/.well-known/nodeinfo; }
 
 location / {
     include /snippets/proxy.conf;
-    include /snippets/authelia-authrequest.conf;
-    proxy_set_header X-Forward-Auth-Secret '%[1]s';
     proxy_pass $forward_scheme://$server:$port;
 }
 `
 
-// npmAdvAuthPortalTmpl — auth-portal advanced_config. Two `%s` slots:
-// (1) the operator's domain for the bare-GET 302, (2) the
-// X-Forward-Auth-Secret threaded through to the /login-intercept rewrite
-// (enrol's /login-intercept is reached via NPM forwarded as the regular
-// requireAuth path; without the header the new secret gate would 401).
-// All other $-prefixed identifiers are nginx variables and must remain
-// literal.
+// npmAdvAuthPortalTmpl — auth-portal advanced_config. Single `%s` slot:
+// the operator's domain for the bare-GET 302. All other $-prefixed
+// identifiers are nginx variables and must remain literal.
 //
-// Three location blocks, in nginx-precedence order:
-//   1. `location = /`   — exact match: redirect bare GETs to enrol.
-//   2. `location = /api/firstfactor` — exact match: SSO post-rewrite.
-//   3. `location /`     — prefix match (catch-all): every other authelia
+// Two location blocks, in nginx-precedence order:
+//   1. `location = /` — exact match: redirect bare GETs to enrol.
+//   2. `location /`   — prefix match (catch-all): every other authelia
 //      path (static/js, static/css, /api/*, /oidc/*, etc.) goes to the
 //      authelia upstream verbatim. Without this, NPM 404s on the SPA's
 //      static assets and the login page renders as a black blank page.
+//
+// (Pre-Wave-1: a third `location = /api/firstfactor` block rewrote
+// Authelia's first-factor POST to enrol's /login-intercept handler so
+// enrol could auto-unlock the user's LUKS volume. With Nextcloud + OIDC
+// there's nothing to unlock so the rewrite is gone.)
 const npmAdvAuthPortalTmpl = `location = / {
     if ($arg_rd = "") {
         return 302 /?rd=https://enrol.%s/;
     }
     include conf.d/include/proxy.conf;
-}
-
-location = /api/firstfactor {
-    proxy_pass http://172.17.0.1:8080/login-intercept;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-Host $host;
-    proxy_set_header X-Forward-Auth-Secret '%[2]s';
-    proxy_http_version 1.1;
 }
 
 location / {
@@ -1890,8 +1624,10 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 		return errors.New("finalize/wire-npm: ENROL_FORWARD_AUTH_SECRET is empty — refusing to wire forgeable proxy hosts; re-run scripts/generate-enrol-forward-auth-secret.sh and retry finalize")
 	}
 	advFwdAuth := fmt.Sprintf(npmAdvFwdAuthTmpl, fwdSecret)
-	advFwdAuthCloud := fmt.Sprintf(npmAdvFwdAuthCloudTmpl, fwdSecret)
-	advAuthPortal := fmt.Sprintf(npmAdvAuthPortalTmpl, st.Domain, fwdSecret)
+	advAuthPortal := fmt.Sprintf(npmAdvAuthPortalTmpl, st.Domain)
+	// Nextcloud's template has no `%s` slots — it doesn't carry the
+	// forward-auth secret because cloud.<domain> doesn't run forward-auth.
+	advNextcloud := npmAdvNextcloudTmpl
 
 	// The four proxy hosts. Order matches wire-npm-routes.sh; the
 	// advanced_config strings are byte-for-byte identical so cookies and
@@ -1933,20 +1669,21 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			AdvancedConfig:        advFwdAuth,
 		},
 		{
-			DomainNames:           []string{"cloud." + st.Domain},
-			ForwardScheme:         "http",
-			ForwardHost:           "cloud",
-			ForwardPort:           3923,
+			DomainNames:   []string{"cloud." + st.Domain},
+			ForwardScheme: "http",
+			// Nextcloud's web frontend container (the apache-php image).
+			// No forward-auth: the user_oidc app handles its own session
+			// via Authelia's OIDC provider, and X-Forward-Auth-Secret
+			// would be confusingly ignored.
+			ForwardHost:           "cloud-web",
+			ForwardPort:           80,
 			BlockExploits:         true,
 			AllowWebsocketUpgrade: true,
 			CertificateID:         certID,
 			SSLForced:             true,
 			HTTP2Support:          true,
 			HSTSEnabled:           true,
-			// cloud uses the share-aware variant: /share/<token> URLs
-			// bypass authelia-authrequest so share-link recipients can
-			// open them without an Authelia account.
-			AdvancedConfig: advFwdAuthCloud,
+			AdvancedConfig:        advNextcloud,
 		},
 		{
 			DomainNames:           []string{"console." + st.Domain},

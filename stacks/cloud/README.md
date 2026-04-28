@@ -1,193 +1,243 @@
 # cloud
 
-File server for the shared VPS. Internally this is
-[copyparty](https://github.com/9001/copyparty); externally and in all
-paths/names it is `cloud`. See `docs/design.md` step 7.
+File server + collaboration for the shared VPS. Internally this is
+[Nextcloud](https://nextcloud.com/) 30 (fpm flavour); externally and in
+all paths/names it is `cloud`. Reachable only via `ingress` at
+`cloud.${DOMAIN}`. There are no public port bindings on this stack.
 
-Reachable only via `ingress` at `cloud.${DOMAIN}`.
-There are no public port bindings on this service.
+This replaces the previous copyparty-based implementation. The external
+surface (URL, stack name, NPM proxy host) is preserved; only the
+implementation underneath changed.
 
-**As of the SSO migration, identity is delegated to Authelia.** copyparty
-runs in IdP / forward-auth mode and trusts the `Remote-User` and
-`Remote-Groups` headers that NPM injects after a successful auth_request
-against Authelia. Per-user passwords are no longer used.
+## What this is
 
-## Hard rules
+Four containers on the existing `edge` Docker network:
 
-- **No public ports.** This stack never publishes to the host. The only
-  way in is through `ingress` over the `edge` Docker network.
-- **ACLs are strictly per-user.** Each user only has access to their
-  own `/u/<u>` path; no cross-user reach. The `[/u/${u}]` volume block
-  grants permissions only to `${u}` itself.
-- **No anonymous access.** Authelia gates the proxy host with policy
-  `two_factor`; copyparty itself rejects requests where
-  `Remote-User` is absent (defence in depth).
-- **Per-user data lives behind LUKS.** `/srv/store/mnt/<u>` on the
-  host are LUKS unlock points, one per user (see build-sequence
-  step 6). When the blob is unmounted, the path is an empty directory
-  — copyparty then sees an empty volume, which is the desired
-  fail-closed behaviour.
-- **Trust boundary is the docker network.** `xff-src: 172.16.0.0/12`
-  in `conf/copyparty.conf` restricts header trust to docker-internal
-  upstreams. Anyone reaching `cloud:3923` from outside the docker
-  network — which can't happen because there is no public port —
-  would have their forwarded headers ignored.
+| Service       | Image                          | Role                                              |
+| ---           | ---                            | ---                                               |
+| `cloud`       | `nextcloud:30.0.6-fpm-alpine`  | Nextcloud, php-fpm on :9000                       |
+| `cloud-db`    | `postgres:16.6-alpine`         | Postgres 16, the canonical Nextcloud DB           |
+| `cloud-redis` | `redis:7.4-alpine`             | memcache + distributed file lock                  |
+| `cloud-web`   | `nginx:1.27-alpine`            | nginx sidecar on :80 — what NPM proxies to        |
+
+NPM terminates TLS upstream and proxies `cloud.${DOMAIN}` →
+`cloud-web:80`, which fastcgi_passes to `cloud:9000`. Nothing is
+published to the host.
+
+## Auth — Authelia OIDC
+
+Auth is delegated to Authelia using **OIDC** (the `user_oidc` Nextcloud
+app), NOT the old forward-auth header model used by copyparty. NPM does
+not inject `Remote-User` or `X-Forward-Auth-Secret` for this stack.
+
+`user_oidc` auto-provisions a Nextcloud account on the first successful
+login. The Authelia client ID + secret pair is configured in
+`stacks/authelia/configuration.yml` and is rotated by the bootstrap
+finalize pipeline (see `stacks/enrol/oidc.go`).
+
+## Apps installed
+
+The bootstrap pipeline enables the following Nextcloud apps after the
+first `compose up`:
+
+- **user_oidc** — SSO via Authelia.
+- **spreed** — Talk (audio/video calls + chat). Basic mode only;
+  see "Talk basic mode" below.
+- **groupfolders** — admin-managed shared spaces with their own ACLs.
+
+To enable manually after a fresh install:
+
+```sh
+docker exec -u www-data cloud php occ app:install user_oidc
+docker exec -u www-data cloud php occ app:install spreed
+docker exec -u www-data cloud php occ app:install groupfolders
+```
+
+## Where data lives
+
+All persistent state is on **external** bind mounts under
+`/srv/store/cloud-*` on the host (NOT docker named volumes), so backup
+is a single rsync of the parent directory plus a `pg_dump` snapshot.
+
+| Host path                | Container mount                  | Service(s)             | uid:gid |
+| ---                      | ---                              | ---                    | ---     |
+| `/srv/store/cloud-data`  | `/var/www/html/data`             | `cloud` and `cloud-web`| 33:33   |
+| `/srv/store/cloud-config`| `/var/www/html/config`           | `cloud`                | 33:33   |
+| `/srv/store/cloud-apps`  | `/var/www/html/custom_apps`      | `cloud`                | 33:33   |
+| `/srv/store/cloud-db`    | `/var/lib/postgresql/data`       | `cloud-db`             | 70:70   |
+
+`bootstrap-phase2.sh` creates these directories with the correct
+ownership before this stack comes up. Redis state is in-container only
+(cache + ephemeral lock set; safe to lose on restart).
+
+Backup recipe (laptop-side, over SSH):
+
+```sh
+ssh vps "docker exec cloud-db pg_dump -U nextcloud nextcloud" \
+  > snapshots/$(date +%F)-cloud-db.sql
+rsync -aAXH --delete vps:/srv/store/cloud-data/ snapshots/cloud-data/
+rsync -aAXH --delete vps:/srv/store/cloud-config/ snapshots/cloud-config/
+rsync -aAXH --delete vps:/srv/store/cloud-apps/ snapshots/cloud-apps/
+```
+
+Restore is the reverse, plus `psql -U nextcloud < snapshot.sql`.
+
+## How to run `occ`
+
+Nextcloud's `occ` CLI is the canonical admin tool. Run it as `www-data`
+inside the `cloud` container:
+
+```sh
+docker exec -u www-data cloud php occ <command>
+# e.g.
+docker exec -u www-data cloud php occ status
+docker exec -u www-data cloud php occ user:list
+docker exec -u www-data cloud php occ files:scan --all
+```
+
+The `cloud-web` sidecar does NOT have php-cli — `occ` only works in
+the `cloud` container.
+
+## Server-side encryption (SSE)
+
+Not enabled by default. SSE only protects against host-disk theft; it
+does NOT protect against a compromised running server, because the
+server holds the master key and the admin can decrypt anything.
+Performance also drops noticeably on large directory walks.
+
+To opt in:
+
+```sh
+docker exec -u www-data cloud php occ app:enable encryption
+docker exec -u www-data cloud php occ encryption:enable
+docker exec -u www-data cloud php occ encryption:enable-master-key
+```
+
+This is irreversible without a recovery-key migration ceremony — be
+sure before flipping it on. See
+<https://docs.nextcloud.com/server/latest/admin_manual/configuration_files/encryption_configuration.html>.
+
+## Talk basic mode
+
+Spreed is installed in **basic mode** — peer-to-peer browser WebRTC
+only, no High Performance Backend (HPB), no Coturn TURN server.
+Concretely:
+
+- 1:1 calls and small (≤4) group calls work directly browser-to-browser.
+- Signaling rides Nextcloud's built-in long-poll, not WebSockets.
+- Clients behind symmetric NAT / CGNAT (~5% of consumer ISPs in
+  practice) may fail to connect because there is no TURN relay.
+
+Consider deploying the HPB + Coturn pair when **any** of the following
+becomes the steady-state pain:
+
+- More than ~4 concurrent participants per call (P2P mesh complexity
+  goes O(n²); CPU and bandwidth on the originator suffocate).
+- Audio drops or one-way audio in 3-way calls.
+- Connection failures from clients on CGNAT or restrictive corporate
+  NAT, traceable to ICE candidate-pair selection failing.
+
+Reference docs:
+<https://nextcloud-talk.readthedocs.io/en/latest/PRODUCTION/> and the
+HPB project at <https://github.com/strukturag/nextcloud-spreed-signaling>.
+
+## 50 GB upload chain
+
+Large uploads have to be permitted at every layer of the proxy chain.
+Each layer enforces its own ceiling and the **most restrictive one
+wins** — if even one layer is set to (say) 100 MB, all uploads above
+100 MB fail at that hop with no useful error message. All four must
+agree.
+
+| Layer            | Where it's configured                                        | Knob(s)                                                         |
+| ---              | ---                                                          | ---                                                             |
+| php-fpm          | `stacks/cloud/conf/zz-uploadlimits.ini`                      | `upload_max_filesize`, `post_max_size`, `max_execution_time`    |
+| nginx-sidecar    | `stacks/cloud/conf/nginx.conf`                               | `client_max_body_size`, `fastcgi_request_buffering off`         |
+| NPM (TLS edge)   | `stacks/enrol/setup.go` → `npmAdvNextcloudTmpl`              | `client_max_body_size`, `proxy_request_buffering off`           |
+| Nextcloud quota  | `occ config:system:set default_quota --value="50 GB"`        | per-user upload + storage quota                                 |
+
+`fastcgi_request_buffering off` and the matching NPM
+`proxy_request_buffering off` are load-bearing: without them, nginx
+spools the entire request body to its local tmpfs before forwarding,
+which both fills the container fs and stalls the upload long before
+50 GB. With buffering off, body bytes stream straight through.
+
+If you raise these, raise them everywhere in agreement.
+
+## Resource budget
+
+Typical 2-user steady-state RSS on a 2 GB VPS:
+
+| Service     | Typical RSS | Notes                                              |
+| ---         | ---         | ---                                                |
+| cloud       | ~280 MB     | fpm master + 2-3 idle workers + opcache            |
+| cloud-db    | ~80 MB      | small DB, plenty of shared_buffers headroom        |
+| cloud-redis | ~20 MB      | cache + lock set are tiny                          |
+| cloud-web   | ~60 MB      | nginx workers                                      |
+| **Total**   | **~440 MB** |                                                    |
+
+Adding the Talk HPB + Coturn pair pushes total cloud-stack footprint to
+roughly **1.4 GB** (signaling server + Janus media server + Coturn TURN
+relay + slightly fatter nginx config). On a 2 GB VPS that displaces
+budget for Authelia / NPM / enrol; size accordingly before enabling.
+
+## Maintenance
+
+### Upgrading Nextcloud
+
+Bump the image tag in `docker-compose.yml`, pull, recreate, then run
+the schema migrations:
+
+```sh
+cd /opt/stacks/cloud
+# edit docker-compose.yml: nextcloud:30.0.6-fpm-alpine → 30.0.7 or 31.x
+docker compose pull
+docker compose up -d
+docker exec -u www-data cloud php occ upgrade
+docker exec -u www-data cloud php occ db:add-missing-indices
+docker exec -u www-data cloud php occ maintenance:mode --off
+```
+
+Major-version jumps (30 → 31) require checking the
+[upgrade matrix](https://docs.nextcloud.com/server/latest/admin_manual/maintenance/upgrade.html)
+first — Nextcloud only supports skipping at most one major version per
+upgrade run. Always snapshot `/srv/store/cloud-*` and dump the DB
+before a major-version bump.
+
+### Editing config
+
+Edits to `conf/nginx.conf` or `conf/zz-uploadlimits.ini` only take
+effect after recreating the relevant container:
+
+```sh
+docker compose restart cloud-web    # nginx changes
+docker compose restart cloud        # php / fpm changes
+```
+
+The conf files are bind-mounted read-only; the container cannot mutate
+them from inside.
+
+### Required env vars
+
+The stack will refuse to start without these set in
+`/opt/stacks/cloud/.env`:
+
+- `POSTGRES_PASSWORD` — random, generated by bootstrap-phase2.sh.
+- `NEXTCLOUD_ADMIN_PASSWORD` — random, generated by bootstrap-phase2.sh.
+- `NEXTCLOUD_TRUSTED_DOMAINS` — must include `cloud.${DOMAIN}`.
+
+Optional with sensible defaults: `POSTGRES_USER`, `POSTGRES_DB`,
+`NEXTCLOUD_ADMIN_USER`, `REDIS_HOST`. See `.env.example`.
 
 ## Layout
 
 ```
 stacks/cloud/
-├── docker-compose.yml      # service definition (image pinned)
+├── docker-compose.yml         # 4 services, all on `edge`
 ├── conf/
-│   └── copyparty.conf      # IdP-mode config: idp-h-usr, idp-h-grp, ${u} volume
-├── data/                   # persistent state (hash DB, thumbs); gitignored
-├── .env.example            # placeholder; no secrets in IdP mode
-└── README.md               # this file
+│   ├── nginx.conf             # sidecar config; 50 GB streaming upload knobs
+│   └── zz-uploadlimits.ini    # php-fpm 50 GB upload override
+├── data/                      # legacy copyparty state — Wave 2 nukes this
+├── .env.example               # documents POSTGRES_PASSWORD etc.
+└── README.md                  # this file
 ```
-
-The `data/` directory is created on first run and holds copyparty's
-internal state: per-volume upload index, thumbnail cache, the salt file
-under `ah-salt.txt`, and the IdP user cache (idp-store=3 — remembers
-users + groups across restarts so volumes don't have to be re-walked).
-It is gitignored and treated as cache (safe to delete; will be rebuilt;
-thumbnails will regenerate on access).
-
-## SSO flow (end to end)
-
-```
-browser → ingress (NPM, :443) ──auth_request──→ authelia:9091/api/verify
-                                                        │
-                                            ↓ 200 + Remote-* headers
-                                                        │
-                                       → cloud:3923 (with Remote-User: <u>)
-                                                        │
-                                       → copyparty serves /u/<u>
-```
-
-If the user has no Authelia session, the auth_request returns 401, NPM
-issues a 302 to `https://auth.${DOMAIN}/?rd=…`, the
-user logs in (TOTP-required), Authelia redirects them back, the auth
-cookie is now set on the apex `${DOMAIN}` so
-`cloud.${DOMAIN}` shares it.
-
-## Bind-mount semantics (LUKS interaction)
-
-The host's `/srv/store/mnt` directory is bind-mounted into the
-container as `/w` (a **single** mount, not per-user). copyparty's
-IdP rule resolves the `${u}` placeholder at request time:
-
-```
-[/u/${u}]
-  /w/${u}
-```
-
-So an authenticated request from `<u>` is served from `/w/<u>`
-which is `/srv/store/mnt/<u>` on the host. Adding a new user is
-purely a host-side operation — `enrol` creates the LUKS blob, the
-mountpoint, and the Authelia user, and copyparty picks it up on
-the next request without any cloud-side change. (Earlier versions
-used static per-user bind-mounts and required editing this
-compose every time a user was added; we removed that.)
-
-The bind-mount uses `propagation: rslave` so that subsequent host
-mounts under `/srv/store/mnt/<u>` (when enrol or `mount-stores.sh`
-unlocks a LUKS blob) become visible inside the container at
-`/w/<u>`. With the default `rprivate` propagation, the container
-keeps seeing the underlying empty directory even after the host
-unlocks the volume — that was a real bug we hit and fixed. See
-`../enrol/DESIGN.md` § 0.3.
-
-Three states matter:
-
-| Host state                                  | What `cloud` sees                  |
-|---|---|
-| Blob unmounted (default after reboot)       | empty directory; volume looks empty in the UI |
-| Blob mounted but you have no permission     | n/a — same UID maps; permissions handled by LUKS+ext4 owner |
-| Blob mounted and the owning user logs in    | their files |
-
-This is fail-closed by design: if the host reboots, nobody's files
-appear in `cloud` until an admin manually unlocks the relevant blob
-with `mount-stores.sh`. Passphrases are never on disk. Empty volumes
-in the web UI after reboot are *expected*, not a bug.
-
-If a user reports "my files are gone": check `mountpoint -q
-/srv/store/mnt/$user` on the host before assuming any data loss.
-
-## Migration from password-mode (one-time)
-
-If `data/` already exists from a pre-SSO deploy, copyparty's user index
-remembers the old `[accounts]` users — but those accounts are now
-unreachable (no password is ever sent through Authelia). They're
-harmless. New per-user volumes are created via the IdP path on first
-hit. Optional: clean up by deleting `data/up2k.snap` and letting
-copyparty rebuild.
-
-The `.env` file (which used to hold per-user `<USER>_PW_HASH` values)
-is now obsolete on the VPS; delete it post-migration:
-
-```sh
-sudo rm /opt/stacks/cloud/.env
-```
-
-## Adding the proxy host in `ingress` (NPM)
-
-Use the wire-up script in the authelia stack:
-
-```sh
-NPM_URL=http://127.0.0.1:81 \
-NPM_EMAIL=admin@example.com \
-NPM_PASS=changeme \
-/opt/stacks/authelia/scripts/wire-npm-routes.sh
-```
-
-The script idempotently UPDATES the existing `cloud` proxy host (host
-id 1 in the current NPM state) with the forward-auth Advanced config
-that includes the snippets from `/opt/stacks/authelia/snippets/`.
-
-Verify from outside the VPS:
-
-```sh
-# Without a session: redirect to Authelia portal.
-curl -sIL https://cloud.${DOMAIN} | head -20
-# Expect: 302 → https://auth.${DOMAIN}/?rd=...
-```
-
-## Steady state
-
-From `/opt/stacks/cloud/` on the VPS:
-
-```sh
-docker compose up -d
-docker compose ps
-docker compose logs -f cloud
-```
-
-To upgrade the pinned image, edit the tag in `docker-compose.yml`
-(currently `copyparty/ac:1.20.14`), commit on the laptop, deploy, then:
-
-```sh
-docker compose pull && docker compose up -d
-```
-
-Check the [release notes](https://github.com/9001/copyparty/releases)
-before bumping — copyparty's config syntax is occasionally extended,
-and IdP-mode directives in particular have evolved.
-
-## Operational notes
-
-- **Memory limit is 2 GB** (per-app cap from the plan). copyparty is
-  small but the `/ac` image bundles ffmpeg and Pillow for thumbnails;
-  transcoding a large media library can spike. The 2 GB ceiling is a
-  cap, not a guarantee — typical RSS stays well below. If you see
-  OOM-kills in `dmesg`, the limit is the wrong knob to turn first;
-  investigate which workload is eating the budget.
-- **Restart on config change.** Edits to `conf/copyparty.conf` only
-  apply after `docker compose restart cloud`. The config volume is
-  mounted read-only; the container cannot mutate it from inside.
-- **Hashes regenerate on first run.** The first request after a fresh
-  `data/` directory triggers a hash sweep across mounted volumes.
-  Expect elevated CPU for a few minutes per user with a non-empty
-  blob; subsequent restarts are quick.
-- **Don't add `r: *` anywhere.** That would make a volume world-
-  readable and break the no-anonymous-access invariant — even though
-  Authelia would gate it at the front, defence in depth matters.

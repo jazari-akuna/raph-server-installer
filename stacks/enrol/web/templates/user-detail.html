@@ -33,9 +33,9 @@
 <section>
   <h2>change login password</h2>
   <p class="hint">
-    Updates the Authelia argon2id hash only. The LUKS passphrase is
-    independent — rotate it below if you want the auto-unlock-on-login
-    invariant to keep holding.
+    Updates the Authelia argon2id hash only. Nextcloud picks up the new
+    password on the user's next sign-in via OIDC; nothing else needs to
+    change.
   </p>
   <form method="POST" action="/users/{{.Name}}/password">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -61,50 +61,6 @@
   </form>
 </section>
 {{end}}
-
-<section>
-  <h2>storage volume</h2>
-  {{if .Volume.Exists}}
-    <dl>
-      <dt>blob</dt><dd><code>{{.Volume.ImagePath}}</code></dd>
-      <dt>mountpoint</dt><dd><code>{{.Volume.Mountpoint}}</code></dd>
-      <dt>size</dt><dd>{{prettyBytes .Volume.SizeBytes}}</dd>
-      <dt>state</dt>
-        <dd>{{if .Volume.Mounted}}<span class="ok">unlocked</span>{{else}}<span class="muted">locked</span>{{end}}</dd>
-    </dl>
-
-    {{if .Volume.Mounted}}
-    <form method="POST" action="/users/{{.Name}}/luks/lock"
-          onsubmit="return confirm('Lock {{.Name}}'s volume? The cloud UI will show empty until re-unlocked.')">
-      <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <button type="submit">lock (unmount)</button>
-    </form>
-    {{else}}
-    <form method="POST" action="/users/{{.Name}}/luks/unlock">
-      <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <label>passphrase
-        <input type="password" name="passphrase" required autocomplete="off">
-      </label>
-      <button type="submit">unlock (mount)</button>
-    </form>
-    {{end}}
-
-    <h3>change LUKS passphrase</h3>
-    <form method="POST" action="/users/{{.Name}}/luks/passphrase">
-      <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <label>old passphrase
-        <input type="password" name="old" required autocomplete="off">
-      </label>
-      <label>new passphrase
-        <input type="password" name="new" required minlength="12" autocomplete="new-password">
-      </label>
-      <button type="submit">rotate passphrase</button>
-    </form>
-  {{else}}
-    <p class="warn">No LUKS volume exists for this user. (Manual provisioning
-      via <code>scripts/create-store-volume.sh</code> may be required.)</p>
-  {{end}}
-</section>
 
 <section>
   <h2>devices</h2>
@@ -136,18 +92,19 @@
 <section class="danger-zone">
   <h2>danger zone</h2>
   <p class="warn">
-    Deleting a user shreds their LUKS volume (irreversible),
-    removes their devices, and drops the Authelia entry. To confirm,
-    type the username <code>{{.Name}}</code> exactly.
+    Deleting a user removes their Authelia account, their VPN devices,
+    and their Nextcloud user (including all of their files under
+    <code>/srv/store/cloud-data/{{.Name}}</code>). Irreversible. To
+    confirm, type the username <code>{{.Name}}</code> exactly.
   </p>
   <form method="POST" action="/users/{{.Name}}/delete"
-        onsubmit="return confirm('FINAL CONFIRM: delete user {{.Name}} and shred the volume?')">
+        onsubmit="return confirm('FINAL CONFIRM: delete user {{.Name}} (Authelia account + Nextcloud user data)?')">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label>type the username to confirm
       <input type="text" name="confirm_name" required
         pattern="^{{.Name}}$" placeholder="{{.Name}}">
     </label>
-    <button type="submit" class="danger">delete user + shred volume</button>
+    <button type="submit" class="danger">delete user (Authelia + Nextcloud)</button>
   </form>
 </section>
 

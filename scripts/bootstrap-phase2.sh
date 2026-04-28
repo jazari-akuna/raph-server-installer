@@ -173,43 +173,20 @@ if ip link show gw0 >/dev/null 2>&1; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
-# Step 3 — shared volume (Parcel 2B).
+# Step 3 — cloud (Nextcloud) bind-mount targets.
 # ──────────────────────────────────────────────────────────────────────────
 
-# The shared LUKS volume is now provisioned by the wizard's finalize step
-# (stacks/enrol/setup.go § finalizeEnsureSharedVolume) so the operator can
-# choose its size on the new /setup/storage step rather than having phase 2
-# silently lay down a 10 GiB default. Phase 2 only installs the boot-time
-# auto-mount unit so the wizard-created volume comes back after reboot.
-#
-# Cloud (copyparty) launches in step 4 below with [/shared] fail-closed
-# until the wizard's finalize creates the .img + keyfile + mount; after
-# that, copyparty picks the bind-mount up via the rshared propagation set
-# on enrol's /srv/store mount.
-SHARED_SCRIPT="$REPO_DIR/scripts/create-shared-volume.sh"
-SHARED_UNIT_SRC="$REPO_DIR/host/systemd/shared-store.service"
-SHARED_UNIT_DST="/etc/systemd/system/shared-store.service"
-if [[ -f "$SHARED_UNIT_SRC" ]]; then
-  strict_step "install shared-store unit"
-  log "==> installing shared-store.service (auto-mount on boot)"
-  install -d -m 0755 /etc/systemd/system   # why: standard systemd dir, idempotent
-  install -m 0644 "$SHARED_UNIT_SRC" "$SHARED_UNIT_DST"
-  if [[ "${TEST_MODE:-0}" == "1" ]] && ! command -v systemctl >/dev/null 2>&1; then
-    log "    TEST_MODE: skipping systemctl daemon-reload + enable shared-store.service"
-  else
-    systemctl daemon-reload
-    if ! systemctl enable shared-store.service >/dev/null 2>&1; then
-      log "    WARNING: enable shared-store.service failed; volume won't auto-mount on reboot"
-    fi
-  fi
-else
-  log "==> $SHARED_UNIT_SRC not present; skipping unit install"
-fi
-log "==> shared LUKS volume creation deferred to wizard /setup/storage + finalize"
-if [[ ! -x "$SHARED_SCRIPT" ]]; then
-  log "    WARNING: $SHARED_SCRIPT missing or not executable; the wizard's"
-  log "             finalize step will not be able to provision /shared either."
-fi
+# Per ADR-001, Nextcloud's persistent state lives on host bind-mounts under
+# /srv/store/cloud-* so backup is one rsync + a pg_dump (see docs/backups.md).
+# The Postgres image refuses to init if /var/lib/postgresql/data exists with
+# the wrong perms; same goes for Nextcloud's www-data writes. Pre-create the
+# four targets with the right uid/gid before compose-up cloud below.
+strict_step "create cloud bind-mount targets"
+log "==> creating /srv/store/cloud-* bind-mount targets"
+mkdir -p /srv/store/cloud-{data,config,apps,db}
+chown 33:33 /srv/store/cloud-{data,config,apps}
+chown 70:70 /srv/store/cloud-db
+chmod 0750 /srv/store/cloud-{data,config,apps,db}
 
 # ──────────────────────────────────────────────────────────────────────────
 # Step 3.5 — generate Authelia secrets BEFORE compose-up authelia.
@@ -236,8 +213,8 @@ fi
 
 # Order matters:
 #   ingress  — nginx-proxy-manager, owns the edge network and :80/:443.
-#   authelia — SSO; cloud + console need it for forward-auth.
-#   cloud    — copyparty (uses /shared if present).
+#   authelia — SSO; console needs it for forward-auth, cloud for OIDC.
+#   cloud    — Nextcloud + Postgres + Redis + nginx sidecar.
 #   console  — Portainer (OIDC via authelia).
 #   enrol    — wizard + day-2 admin UI, exposes /healthz.
 #   qedge    — only if explicitly opted in (SKIP_QEDGE=0); default off.

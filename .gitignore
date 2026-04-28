@@ -22,7 +22,6 @@ peers/
 # Specific paths are listed in their respective stack sections below.
 
 # Generated artifacts
-*.img
 *.qr.png
 
 # Authelia: rendered configuration.yml (from .template) + users db + state.
@@ -62,8 +61,13 @@ stacks/enrol/data/
 # build path stages it inside the image and leaves no artifact here).
 stacks/enrol/enrol
 
-# cloud / console: copyparty + Portainer runtime state
-stacks/cloud/data/
+# cloud / console / plane: runtime envs (each stack ships .env.example;
+# the live .env at the stack root holds DB password, OIDC client secret,
+# admin bootstrap creds — never committed). Persistent state for cloud
+# lives on host bind-mounts under /srv/store/cloud-* (ADR-001) so there
+# is nothing under stacks/cloud/ to ignore beyond the env file.
+stacks/cloud/.env
+stacks/plane/.env
 stacks/console/data/
 
 # ingress (Nginx Proxy Manager): SQLite DB with hashed admin creds, issued

@@ -1,60 +1,33 @@
 {{template "setup-head" .}}
 
 <section class="setup-step">
-  <h2>storage volumes</h2>
+  <h2>storage</h2>
   <p>
-    Two encrypted volumes are provisioned at finalize time:
+    Nextcloud stores each user's files under
+    <code>/srv/store/cloud-data/&lt;user&gt;/files</code> on the host
+    disk. Pick a default per-user quota; Nextcloud enforces it on writes
+    and the dashboard's storage panel renders it as the per-user nominal
+    column.
   </p>
-  <ul>
-    <li><strong>personal</strong> &mdash; one per user, on a sparse LUKS-on-loopback
-      blob under <code>/srv/store/data/&lt;user&gt;.img</code>. The same size
-      applies to every user created post-setup (you can override per-user
-      later by editing the source).</li>
-    <li><strong>shared</strong> &mdash; one system-wide blob mounted at
-      <code>/srv/store/mnt/_shared</code>, exposed by copyparty as
-      <code>/shared</code>. Unlocked at boot by a host keyfile, not a
-      passphrase &mdash; convenient at the cost of weaker at-rest
-      confidentiality (see <code>create-shared-volume.sh</code>'s trust-
-      model footnote).</li>
-  </ul>
 
   <p class="hint">
-    Both volumes are sparse: they don't allocate disk up-front, only as
-    data is written. Suggested defaults below come from the disk's free
-    space:
+    Disk underlying <code>/srv/store</code>:
     <strong>{{prettyBytes .DiskFreeBytes}}</strong> free of
-    <strong>{{prettyBytes .DiskTotalBytes}}</strong> total under
-    <code>/srv/store</code>.
+    <strong>{{prettyBytes .DiskTotalBytes}}</strong> total. The quota is
+    a soft cap on each user's files; setting it larger than the disk is
+    allowed (and harmless until users actually write that much).
   </p>
 
   <form method="POST" action="/setup/storage" class="setup-form">
-    <label>personal volume size (GiB)
-      <input type="number" name="personal_size_gib" required
-        min="1" step="1"
-        value="{{.PersonalSizeGiB}}"
-        placeholder="{{.SuggestedPersonalGiB}}">
+    <label>per-user Nextcloud quota (GB)
+      <input type="number" name="cloud_user_quota_gb" required
+        min="0" step="1"
+        value="{{.CloudUserQuotaGB}}"
+        placeholder="50">
       <span class="hint">
-        suggested: <code>{{.SuggestedPersonalGiB}} GiB</code>
-        (smaller of 10 GiB or 10% of free)
+        Per-user Nextcloud quota in GB. Set to 0 for unlimited.
       </span>
     </label>
-
-    <label>shared volume size (GiB)
-      <input type="number" name="shared_size_gib" required
-        min="1" step="1"
-        value="{{.SharedSizeGiB}}"
-        placeholder="{{.SuggestedSharedGiB}}">
-      <span class="hint">
-        suggested: <code>{{.SuggestedSharedGiB}} GiB</code> (50% of free)
-      </span>
-    </label>
-
-    <p class="hint">
-      You can set values larger than the free disk &mdash; the volumes are
-      sparse, so the only consequence is the operator promising future
-      capacity that doesn't exist yet. The wizard does not argue with
-      explicit choices.
-    </p>
 
     <div class="setup-actions">
       <a class="setup-back" href="/setup/admin">&larr; back</a>

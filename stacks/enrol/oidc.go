@@ -74,15 +74,34 @@ const (
 	// secret entropy guideline.
 	oidcPlaintextLen = 32
 
-	// oidcEnvVar is the .env key whose value we replace with the real hash.
+	// oidcEnvVar is the .env key whose value we replace with the real
+	// console client_secret hash. (Kept as the legacy const name so
+	// callers like oidc_test.go don't churn; the cloud equivalent is
+	// oidcCloudEnvVar below.)
 	oidcEnvVar = "AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH"
 
-	// oidcPlaintextDefaultPath is where the rotated plaintext is written
-	// for the operator to paste into Portainer. Mode 0600 root:root. Lives
-	// under /etc/raph-installer alongside the NPM bootstrap pass, NOT on
-	// the LUKS-backed /srv/store/ tree (the operator may need it before
-	// any user volume is unlocked, e.g. on a freshly-rebooted host).
-	oidcPlaintextDefaultPath = "/etc/raph-installer/oidc-console-client-secret"
+	// oidcCloudEnvVar is the .env key for Nextcloud's OIDC client_secret
+	// hash. Set by rotateOIDCCloudSecret in step parallel with the
+	// console rotation; consumed by render-templates.sh to substitute
+	// into Authelia's configuration.yml.
+	oidcCloudEnvVar = "AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH"
+
+	// oidcConsolePlaintextDefaultPath is where the rotated console
+	// plaintext is written for the operator to paste into Portainer.
+	// Mode 0600 root:root. Lives under /etc/raph-installer alongside
+	// the NPM bootstrap pass.
+	oidcConsolePlaintextDefaultPath = "/etc/raph-installer/oidc-console-client-secret"
+
+	// oidcCloudPlaintextDefaultPath is where the rotated cloud plaintext
+	// is written for Wave 2's `occ user_oidc:provider` invocation. Same
+	// mode/owner as the console twin (0600 root:root); Wave 2 runs as
+	// root and can read it directly.
+	oidcCloudPlaintextDefaultPath = "/etc/raph-installer/oidc-cloud-client-secret"
+
+	// oidcPlaintextDefaultPath is the legacy alias for the console path.
+	// Kept so existing callers (oidc_test.go, log lines in setup.go that
+	// reference the old name) continue to compile without churn.
+	oidcPlaintextDefaultPath = oidcConsolePlaintextDefaultPath
 )
 
 // oidcBase64Encode produces the adapted base64 used by Authelia's pbkdf2
@@ -133,35 +152,59 @@ func pbkdf2SHA512Hash(plaintext string, salt []byte) string {
 		oidcBase64Encode(derived))
 }
 
-// rotateOIDCConsoleSecret performs the full rotation:
+// rotateOIDCConsoleSecret rotates the Portainer (console) OIDC client
+// secret. See rotateClientSecret for the full contract; this is just a
+// thin wrapper that pins the env var name + plaintext default path.
+func rotateOIDCConsoleSecret(envFilePath, plaintextPath string) error {
+	if plaintextPath == "" {
+		plaintextPath = oidcConsolePlaintextDefaultPath
+	}
+	return rotateClientSecret(envFilePath, plaintextPath, oidcEnvVar)
+}
+
+// rotateOIDCCloudSecret rotates the Nextcloud OIDC client secret. Mirror
+// image of rotateOIDCConsoleSecret pointing at the cloud env-var key +
+// plaintext file. The plaintext lives at /etc/raph-installer/
+// oidc-cloud-client-secret (mode 0600 root) so Wave 2's `occ
+// user_oidc:provider` step can read it.
+func rotateOIDCCloudSecret(envFilePath, plaintextPath string) error {
+	if plaintextPath == "" {
+		plaintextPath = oidcCloudPlaintextDefaultPath
+	}
+	return rotateClientSecret(envFilePath, plaintextPath, oidcCloudEnvVar)
+}
+
+// rotateClientSecret performs the full rotation for one OIDC env var:
 //   1. Generate plaintext + salt.
 //   2. Compute the hash.
 //   3. Write the plaintext to plaintextPath (mode 0600).
-//   4. Replace AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH=... in envFilePath
-//      with the new hash. The line is rewritten in-place; if the key is
-//      absent we append it.
+//   4. Replace `<envVar>=...` in envFilePath with the new hash. The line
+//      is rewritten in-place; if the key is absent we append it.
 //
 // Idempotent guard: if the env file already contains a hash that matches
 // pbkdf2HashRe AND the plaintext file already exists, this is a no-op
 // (returns nil, no-rotation). Re-running finalize MUST NOT churn the
-// secret on every retry — that would require the operator to reconfigure
-// Portainer every time a downstream step (NPM, cert) failed.
+// secret on every retry — that would force the operator to reconfigure
+// the downstream consumer (Portainer / Nextcloud) every time a later
+// step (NPM, cert) failed.
 //
-// envFilePath is typically /opt/stacks/.env. plaintextPath defaults to
-// oidcPlaintextDefaultPath when empty.
-func rotateOIDCConsoleSecret(envFilePath, plaintextPath string) error {
+// envFilePath is typically /opt/stacks/.env.
+func rotateClientSecret(envFilePath, plaintextPath, envVar string) error {
 	if envFilePath == "" {
 		return errors.New("oidc: env file path empty")
 	}
+	if envVar == "" {
+		return errors.New("oidc: env var name empty")
+	}
 	if plaintextPath == "" {
-		plaintextPath = oidcPlaintextDefaultPath
+		return errors.New("oidc: plaintext path empty")
 	}
 
 	envBytes, err := os.ReadFile(envFilePath)
 	if err != nil {
 		return fmt.Errorf("oidc: read %s: %w", envFilePath, err)
 	}
-	currentHash := readEnvVar(string(envBytes), oidcEnvVar)
+	currentHash := readEnvVar(string(envBytes), envVar)
 
 	// Idempotency: a real-looking hash + existing plaintext = no rotation.
 	// We deliberately don't try to *verify* the on-disk plaintext matches
@@ -198,8 +241,8 @@ func rotateOIDCConsoleSecret(envFilePath, plaintextPath string) error {
 	// Replace (or append) the env var. Quoting matches bootstrap.sh's
 	// rendering style — single-quoted so the literal `$pbkdf2-…` survives
 	// being sourced by bash. (Compose's env-file parser strips the quotes.)
-	newLine := fmt.Sprintf("%s='%s'", oidcEnvVar, hash)
-	updated := replaceOrAppendEnvLine(string(envBytes), oidcEnvVar, newLine)
+	newLine := fmt.Sprintf("%s='%s'", envVar, hash)
+	updated := replaceOrAppendEnvLine(string(envBytes), envVar, newLine)
 	if err := atomicWriteFilePreservingMode(envFilePath, []byte(updated)); err != nil {
 		return fmt.Errorf("oidc: rewrite %s: %w", envFilePath, err)
 	}

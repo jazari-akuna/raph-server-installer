@@ -37,31 +37,25 @@ Tick all 7 before flipping the box from "bring-up" to "in service." Append a dat
 
 ---
 
-### Check 2 — Encrypted volume round-trip
+### Check 2 — Cloud (Nextcloud) round-trip
 
-- **Where to run:** VPS (admin via SSH) + laptop browser.
+- **Where to run:** laptop browser + (optional) VPS via SSH.
 - **Steps:**
-  1. Unlock store on the VPS (substitute `<u>` with your username):
-     ```
-     sudo systemctl start store-mount@<u>.service
-     ```
-     Operator types passphrase at the `systemd-ask-password` prompt.
-  2. From laptop browser, upload `test.bin` via `https://cloud.<your-domain>` into `<u>`'s volume.
-  3. On VPS, lock the volume:
-     ```
-     sudo umount /srv/store/mnt/<u>
-     sudo cryptsetup close store_<u>
-     ```
-  4. Reload `cloud` in browser → `<u>`'s volume appears empty / inaccessible (fail-closed).
-  5. Re-run step 1 → `test.bin` reappears.
-- **Expected:** file is visible only when the LUKS volume is unlocked; locked volume = empty directory served by copyparty.
+  1. Open `https://cloud.<your-domain>/` in a private window. The page returns 200 with Nextcloud's login HTML (no Authelia 302 — Nextcloud owns its session, see ADR-003).
+  2. Click "Log in with OpenID Connect" → bounces to Authelia → log in as `<u>` → land in Nextcloud as `<u>`. Admin role is inherited from the `admins` claim if `<u>` is in that group.
+  3. Drag a file row onto a folder row → the file moves.
+  4. Right-click a file → "Share link" → open the URL in incognito → file downloads.
+  5. Talk → New conversation → start a call in two browsers → audio + video work (basic mode is P2P up to ~4 participants).
+  6. Upload a 100 MB+ test file → completes (proves the 50 GB upload chain end-to-end).
+- **Expected:** every step succeeds; the user's data is visible only to that user (and admins) under `/srv/store/cloud-data/<u>/`.
 - **If this fails:**
   ```
-  sudo journalctl -u store-mount@<u> -n 50
-  sudo dmesg | grep -i luks
-  sudo docker logs cloud
+  sudo docker logs cloud 2>&1 | tail -50
+  sudo docker logs cloud-web 2>&1 | tail -50
+  sudo docker exec -u www-data cloud php occ status
   ```
-  Confirm bind-mount path `/srv/store/mnt/<u>` matches the compose volume mapping in `stacks/cloud/docker-compose.yml`.
+  For OIDC issues: `sudo docker logs authelia 2>&1 | grep -i oidc` and verify the `cloud` client + `redirect_uris` in `stacks/authelia/configuration.yml`.
+  For upload-413 issues: confirm `client_max_body_size 50G;` is present in both the nginx-sidecar config and the NPM proxy host advanced_config.
 
 ---
 
@@ -139,14 +133,9 @@ Tick all 7 before flipping the box from "bring-up" to "in service." Append a dat
 ### Check 6 — Backup recoverability
 
 - **Where to run:** laptop.
-- **Commands:**
-  ```
-  restic snapshots -r ~/.local/share/restic-raph/<u>
-  restic restore latest --target /tmp/recover -r ~/.local/share/restic-raph/<u>
-  ```
-  Then mount-and-verify per `docs/backups.md` recovery procedure: attach restored `<u>.img` as loop device, `cryptsetup open` with the passphrase, mount, confirm the `test.bin` from Check 2 is present.
-- **Expected:** recent snapshot exists; restore completes; recovered `.img` unlocks and contains expected files.
-- **If this fails:** see `docs/backups.md` (repo password, SSH key, sftp endpoint, cron / systemd-timer health on laptop).
+- **Steps:** Run the full Cloud (Nextcloud) backup recipe in `docs/backups.md` against a recent snapshot, then restore into a throwaway VM (or fresh-bootstrapped sibling VPS) following the restore section of the same doc.
+- **Expected:** the restored Nextcloud serves at the throwaway box's URL with the snapshot-era file tree visible to the snapshot-era users.
+- **If this fails:** see `docs/backups.md` § Test cadence and § Operational rules — most issues are a `pg_dump` ordering problem (snapshot the DB first, then mirror the files).
 
 ---
 

@@ -21,20 +21,19 @@ any account managed through the `enrol` UI.
 
 | Cadence    | Task                                                 | Where it lives                                     |
 |------------|------------------------------------------------------|----------------------------------------------------|
-| Per reboot | `mount-stores.sh` (manual per-user LUKS unlock; shared volume auto-mounts via keyfile) | `scripts/mount-stores.sh`, `docs/design.md` Build Sequence |
 | Weekly     | fail2ban sanity, cert validity > 30 days, free RAM   | this doc § Quick health check                      |
 | Weekly     | `docker stats` glance for runaway containers         | this doc § Quick health check                      |
 | Monthly    | chnroutes2 refresh (cron) + verify peer .conf drift  | this doc § Monthly chnroutes2 refresh              |
-| Monthly    | restic recovery drill (one admin, alternating)       | `docs/backups.md` § Test cadence                   |
 | Monthly    | full verification pass (all 7 checks)                | `docs/verification.md`                             |
+| Monthly    | backup recovery drill (one admin, alternating) — restore `pg_dump` + rsync into a throwaway box | `docs/backups.md`               |
 | Quarterly  | image bump audit (compose tags vs upstream releases) | this doc § Image bump procedure                    |
+| Quarterly  | Nextcloud image bump (per ADR-006)                   | this doc § Cloud (Nextcloud) maintenance           |
 | Quarterly  | sysctl review against `host/sysctl/99-host.conf`     | `docs/perf-tuning.md` § Network sysctl rationale   |
 | Quarterly  | qedge cert symlink verification                      | this doc § Cert renewal verification               |
 | Yearly     | DNS-01 token rotation (whichever provider was chosen) | `stacks/ingress/README.md` § 2                    |
-| Yearly     | Authelia OIDC key rotation                           | `stacks/authelia/README.md` § Secret rotation      |
+| Yearly     | Authelia OIDC key rotation (per-client secrets rotated automatically by enrol; the master signing key is yearly) | `stacks/authelia/README.md` § Secret rotation      |
 | Yearly     | qedge `QEDGE_PASSWORD` rotation (or post-switchover) | `stacks/qedge/README.md` § Rotating the password   |
 | As-needed  | kernel update + DKMS rebuild                         | this doc § Kernel updates                          |
-| As-needed  | LUKS passphrase rotation                             | this doc § LUKS rotation + recovery                |
 | As-needed  | user add / TOTP regen / password rotate              | this doc § Authelia user / TOTP / password rotation |
 | As-needed  | qedge switchover (only when `gw0` actively blocked)  | `stacks/qedge/README.md` § Switchover procedure    |
 
@@ -81,11 +80,11 @@ Pinned-tag bumps are deliberate, one stack at a time. The repeatable
 recipe is the same for every compose-managed stack:
 
 1. **Read the upstream changelog** for the pinned image. Look for
-   breaking config changes in particular — IdP-mode directives,
-   forward-auth header names, OIDC scope handling.
+   breaking config changes in particular — forward-auth header names,
+   OIDC scope handling, schema migrations.
    - `ingress` (NPM): https://github.com/NginxProxyManager/nginx-proxy-manager/releases
    - `console` (Portainer CE): https://github.com/portainer/portainer/releases
-   - `cloud` (copyparty/ac): https://github.com/9001/copyparty/releases
+   - `cloud` (Nextcloud): https://github.com/nextcloud/server/releases — see § Cloud (Nextcloud) maintenance below for the `occ upgrade` step.
    - `qedge` (Hysteria 2): https://github.com/apernet/hysteria/releases
    - `authelia`: https://github.com/authelia/authelia/releases
 2. **Bump the tag** in the laptop repo's `stacks/<name>/docker-compose.yml`
@@ -98,8 +97,8 @@ recipe is the same for every compose-managed stack:
        'cd /opt/stacks/<name> && sudo docker compose pull && sudo docker compose up -d'
    ```
 4. **Verify** with a curl probe matching the stack:
-   - `cloud`: `curl -sIL https://cloud.<your-domain> | head -20` (expect 302 → Authelia).
-   - `ingress`: same probe — NPM is the proxy on the path.
+   - `cloud`: `curl -sk https://cloud.<your-domain>/ | grep -qi nextcloud` (Nextcloud owns the session via OIDC; rule is `bypass`, so 200 with login HTML — no Authelia 302). Then `docker exec -u www-data cloud php occ upgrade` if the image bump crossed a minor version.
+   - `ingress`: `curl -sIL https://cloud.<your-domain> | head -3` — NPM is the proxy on the path.
    - `authelia`: `curl -sI https://auth.<your-domain>/api/health` → `200`.
    - `console`: SSH-tunnel to `127.0.0.1:9443`, log in.
    - `qedge` (only if started for testing): see `stacks/qedge/README.md` § Switchover.
@@ -208,7 +207,7 @@ Procedure:
    sudo systemctl status awg-quick@gw0               # active (running)
    sudo awg show gw0                                 # peers listed
    sudo dmesg | grep -i amnezia                      # no errors
-   sudo /root/scripts/mount-stores.sh                # re-unlock LUKS volumes
+   sudo docker compose -f /opt/stacks/cloud/docker-compose.yml ps  # cloud back up
    ```
    From a peer client, run a quick handshake check (`awg show` on the
    peer side, or just open `cloud.<your-domain>` over the
@@ -224,8 +223,8 @@ Procedure:
 Stack containers come back automatically (`live-restore: true` in
 `/etc/docker/daemon.json` and `restart: unless-stopped` on most
 services); `qedge` stays stopped (`restart: "no"`) which is intended.
-LUKS volumes do **not** auto-mount — `mount-stores.sh` is a manual,
-intentional step every reboot (passphrases never on disk).
+The cloud bind-mount targets under `/srv/store/cloud-*` are plain
+directories on the host filesystem — no manual unlock step.
 
 ---
 
@@ -264,17 +263,22 @@ place using the canonical marker comment
 
 User lifecycle operations flow through the `enrol` UI at
 `https://enrol.<your-domain>/` — TOTP enrolment, password rotation,
-user add/remove, LUKS volume create/delete. The CLI invocations below
-are the **fallback** path used only when `enrol` is itself unavailable
-(rare: the service is down, or the operator needs to recover from a
-state the UI cannot represent). See `stacks/enrol/DESIGN.md` for the
-canonical UI flow.
+user add/remove. The CLI invocations below are the **fallback** path
+used only when `enrol` is itself unavailable (rare: the service is
+down, or the operator needs to recover from a state the UI cannot
+represent). See `stacks/enrol/DESIGN.md` for the canonical UI flow.
+
+The Nextcloud account is provisioned by the `user_oidc` app on first
+OIDC login — there is no separate `occ user:add` step on user create.
+On user delete, enrol calls `docker exec cloud occ user:delete <u>` and
+removes `/srv/store/cloud-data/<u>` (see § Cloud (Nextcloud)
+maintenance below).
 
 ### Add user (CLI fallback)
 
 Via UI: Users → Add. The wizard collects username, email, initial
-password, optional volume size; on submit the UI provisions everything
-atomically.
+password; on submit the UI provisions everything atomically and the
+Nextcloud user is auto-created on first login.
 
 CLI fallback:
 
@@ -283,14 +287,12 @@ CLI fallback:
 2. Append a user block to `/opt/stacks/authelia/users_database.yml`
    (file watch reloads Authelia within a few seconds — `watch: true` is
    set; if reload misfires, `docker exec authelia kill -HUP 1`).
-3. If the user gets a LUKS volume:
-   `sudo /root/scripts/create-store-volume.sh <user> 50` then ensure
-   the new `<user>.img` is on disk under `/srv/store/data/`. The
-   `mount-stores.sh` script auto-discovers all `*.img` files there
-   (other than `_shared.img`).
-4. The user logs into `https://auth.<your-domain>/` and is prompted for
-   TOTP enrolment on first login (Authelia's built-in flow), if your
-   policy requires `two_factor`.
+3. The user logs into `https://cloud.<your-domain>/` (or any other
+   OIDC-using service); `user_oidc` provisions the Nextcloud account
+   automatically. To pre-set a quota, run
+   `docker exec -u www-data cloud php occ user:setting <u> files quota '50 GB'`.
+4. The user is prompted for TOTP enrolment on first login if the
+   policy requires `two_factor` (Authelia's built-in flow).
 
 ### Rotate password (CLI fallback)
 
@@ -332,8 +334,7 @@ echo '<otpauth-uri-from-above>' | qrencode -t ansiutf8
 
 ### Delete user (CLI fallback)
 
-Via UI: Users → `<user>` → Delete (confirmation + LUKS-blob
-disposition prompt).
+Via UI: Users → `<user>` → Delete (confirmation prompt).
 
 CLI fallback:
 
@@ -341,67 +342,71 @@ CLI fallback:
 # 1. remove from users_database.yml (sed/edit)
 # 2. remove TOTP record:
 sudo docker exec authelia authelia storage user totp delete <user>
-# 3. handle the LUKS blob: backup ${user}.img off-host (restic),
-#    then sudo umount /srv/store/mnt/<user> && sudo cryptsetup close
-#    store_<user> && sudo rm /srv/store/data/<user>.img
+# 3. delete the Nextcloud account (cascades the user's files in NC's
+#    own store too, but the bind-mount path is the source of truth so
+#    we belt-and-braces remove it ourselves):
+sudo docker exec -u www-data cloud php occ user:delete <user>
+sudo rm -rf /srv/store/cloud-data/<user>
 # 4. remove the OS user (optional — only matters for SSH access):
 sudo userdel -r <user>
 ```
 
 ---
 
-## LUKS rotation + recovery
+## Cloud (Nextcloud) maintenance
 
-Both LUKS-blob lifecycle operations route through `cryptsetup` on the
-VPS. The plan keeps passphrases off disk and out of git — they live
-only in the operators' offline password managers.
+The `cloud` stack is Nextcloud-fpm + Postgres + Redis + an nginx
+sidecar (see `stacks/cloud/README.md`). Persistent state is on host
+bind-mounts under `/srv/store/cloud-{data,config,apps,db}` per ADR-001.
 
-### Passphrase rotation
+### Running `occ`
+
+The Nextcloud admin CLI runs inside the `cloud` container as the
+`www-data` user (uid 33). Always use `-u www-data`; the default uid is
+root and Nextcloud refuses to act on its own data dir as root.
 
 ```sh
-# Add a new key slot first, THEN remove the old one. Never the reverse —
-# a typo in the new passphrase between those two steps locks you out.
-sudo cryptsetup luksAddKey /srv/store/data/<user>.img
-# (prompts for an existing passphrase, then the new one, twice)
-sudo cryptsetup luksDump /srv/store/data/<user>.img | grep -A1 'Keyslot:'
-# verify both slots present, then remove the old one:
-sudo cryptsetup luksRemoveKey /srv/store/data/<user>.img
-# (prompts for the OLD passphrase you want to retire)
+docker exec -u www-data cloud php occ <command>
+
+# common one-liners
+docker exec -u www-data cloud php occ status                       # version, mode, install state
+docker exec -u www-data cloud php occ user:list                    # list users
+docker exec -u www-data cloud php occ user:info <u> --output=json  # quota / files / last login
+docker exec -u www-data cloud php occ files:scan --all             # rescan after a manual data drop
+docker exec -u www-data cloud php occ maintenance:repair           # fix stuck redis locks
 ```
 
-Record the rotation date + retire the old passphrase from the offline
-note **only after** verifying the new one unlocks (`store-mount@<user>`
-restarts cleanly). Keep the **old** passphrase archived offline for as
-long as any restic snapshot taken under it is still retained — see
-`docs/backups.md` § Operational rules.
+### Image bump (quarterly per ADR-006)
 
-### Emergency recovery from a backup snapshot
+Nextcloud's image tag is pinned (e.g. `nextcloud:30.0.6-fpm-alpine`).
+Bump procedure on top of the generic § Image bump procedure above:
 
-If the live blob is corrupt / accidentally rm'd / a deploy gone wrong:
-restore from the last good restic snapshot. The full procedure (restic
-restore → loop attach → cryptsetup open → mount → verify) is in
-`docs/backups.md` § Recovery procedure.
+```sh
+# 1. update the tag in stacks/cloud/docker-compose.yml on the laptop, push.
+# 2. on the VPS, pull and bring up the new image:
+cd /opt/stacks/cloud
+sudo docker compose pull
+sudo docker compose up -d
+# 3. run the Nextcloud schema/data migration:
+sudo docker exec -u www-data cloud php occ upgrade
+# 4. verify status reports the new version + maintenance:false:
+sudo docker exec -u www-data cloud php occ status
+```
 
-Operationally, recovery into the live VPS path looks like:
+If `occ upgrade` puts the instance into maintenance mode and fails, fix
+the underlying issue (usually an app incompatibility) and re-run; if
+maintenance mode lingers after a successful upgrade, take it off
+manually: `sudo docker exec -u www-data cloud php occ maintenance:mode --off`.
 
-1. Run the laptop-side recovery procedure from `docs/backups.md` to get
-   a verified `.img` mounted at `/mnt/recover` on the laptop.
-2. Stop the live mount on the VPS:
-   ```sh
-   sudo systemctl stop store-mount@<user>.service
-   sudo mv /srv/store/data/<user>.img /srv/store/data/<user>.img.broken
-   ```
-3. Copy the verified `.img` back over SSH (re-using the dedicated
-   restic SSH key would NOT work here — that key is forced-command
-   read-only; you need an admin key with sudo).
-4. Restart the mount:
-   ```sh
-   sudo systemctl start store-mount@<user>.service
-   ```
+### Common issues
 
-If the mount works, delete the `.broken` file. If not, archive it for
-forensics; the user's passphrase against the live blob is what you'll
-need to triage further.
+| Symptom | First thing to check |
+|---|---|
+| `cloud` container restart-loops, logs say "could not connect to database" | `cloud-db` container healthy? `sudo docker ps --filter name=cloud-db`. Postgres init refuses if `/srv/store/cloud-db` perms drifted off `70:70 0750` — re-apply with `sudo chown -R 70:70 /srv/store/cloud-db && sudo chmod 0750 /srv/store/cloud-db`. |
+| File operations hang, logs say "redis lock timeout" | `sudo docker exec -u www-data cloud php occ maintenance:repair`. If persistent, restart redis: `sudo docker compose -f /opt/stacks/cloud/docker-compose.yml restart cloud-redis`. |
+| HTTP 413 / "request entity too large" on uploads | Both the nginx sidecar (`stacks/cloud/conf/nginx.conf`) and the NPM proxy host advanced_config must carry `client_max_body_size 50G;` — diff against the templates if either was hand-edited. |
+| Talk call connects but no audio/video for a 4th participant | Basic mode is P2P up to ~4 participants; install the High-Performance Backend if needed. See `stacks/cloud/README.md` § Talk HPB threshold. |
+| "Nextcloud can't be reached" after image bump | `occ upgrade` not yet run — see image bump procedure above. |
 
 ---
 
@@ -561,10 +566,10 @@ automatically via the wizard's finalize step.
 | `console` unreachable                | mesh up? (`tailscale status`); `sudo docker logs console`; loopback bind only        |
 | `gw0` peer not handshaking           | `sudo awg show gw0`, `sudo journalctl -u awg-quick@gw0`, `sudo dmesg \| grep -i amnezia` |
 | `gw0` interface down post-reboot     | DKMS rebuild failed — see `docs/perf-tuning.md` § Decision flow                       |
-| `cloud` shows empty user volume      | `mountpoint -q /srv/store/mnt/<user>` — LUKS unlocked? Run `sudo /root/scripts/mount-stores.sh` |
-| copyparty sees stale view post-unlock| bind-mount propagation regression — see `stacks/cloud/README.md` § Bind-mount semantics |
-| restic backup failed                 | client-side journal: `journalctl --user -u restic-backup-<user>.service -e`; verify forced-command auth in `~<user>/.ssh/authorized_keys` on VPS |
-| `enrol` page 502                     | `sudo docker logs enrol`; post-transformation: also check Authelia `Remote-User` headers and host-side LUKS daemon socket |
+| `cloud` shows empty user folder      | First-login OIDC handshake glitched? Check `sudo docker logs cloud 2>&1 \| grep -i oidc`; user dir created lazily at first upload, so empty is fine pre-upload. Re-run `sudo docker exec -u www-data cloud php occ files:scan <user>` to refresh. |
+| Nextcloud upload 413 / hangs at >2 GB | Both nginx-sidecar and NPM advanced_config must carry `client_max_body_size 50G;` and the `proxy_request_buffering off;` pair. See § Cloud (Nextcloud) maintenance > Common issues. |
+| backup failed                        | check `pg_dump` output and rsync exit code on the backup host; `sudo docker exec cloud-db pg_isready -U nextcloud` on the VPS to confirm db is reachable. |
+| `enrol` page 502                     | `sudo docker logs enrol`; post-transformation: also check Authelia `Remote-User` headers + the forward-auth secret env var. |
 | `qedge` won't start                  | `cd /opt/stacks/qedge && sudo docker compose logs`; check TLS symlinks (`§ Cert renewal verification`); `:443/udp` bound? |
 | fail2ban not banning                 | `sudo fail2ban-client status sshd`; `sudo journalctl -u fail2ban -e`                 |
 | sysctl drift (perf regression)       | `sysctl net.core.rmem_max` etc. vs `host/sysctl/99-host.conf`; redeploy if drift     |
@@ -605,21 +610,20 @@ Outline only — full procedures live in `docs/backups.md` and
 6. Run the full `docs/verification.md` pass before declaring the
    replacement box "in service."
 
-### Single user blob corrupted
+### Single user files corrupted
+
+Restore from the most recent backup (see `docs/backups.md` § Cloud
+(Nextcloud)). The path `/srv/store/cloud-data/<user>` is a plain
+directory tree under uid 33; an `rsync` from the snapshot puts it back
+in place. If Nextcloud's view is stale after the restore, kick the file
+scanner:
 
 ```sh
-# laptop side — recover into a temp dir using docs/backups.md §
-# Recovery procedure (steps 1–6). Verify the test file is present.
-# Then per § LUKS rotation + recovery > Emergency recovery, copy the
-# verified .img back over to /srv/store/data/<user>.img on the VPS,
-# stop/start store-mount@<user>.service.
+sudo docker exec -u www-data cloud php occ files:scan <user>
 ```
 
-If the blob is recoverable but the filesystem inside is corrupt rather
-than missing, mount it read-only first
-(`mount -o ro /dev/mapper/store_<user>_recover ...`), copy data into a
-fresh blob created by `create-store-volume.sh`, then rotate the user's
-LUKS passphrase since the recovered blob's slot is the old one.
+If the database itself is corrupt, restore the latest `pg_dump` into a
+fresh `cloud-db` (the recipe is in `docs/backups.md`).
 
 ---
 
@@ -634,10 +638,11 @@ canonical list. Briefly:
 - Don't introduce client-side E2EE (Cryptomator etc.) — the threat
   model is encrypted-at-rest only.
 - Don't put a backup tool on the VPS — backups are pulled from clients.
-- Don't store LUKS or restic passphrases on the VPS or in this repo.
+- Don't store backup repository passphrases on the VPS or in this repo.
 - Don't enable `ufw` without ufw-docker in place — see § ufw + ufw-docker.
-- Don't auto-mount LUKS volumes on boot — manual unlock every reboot is
-  intentional.
+- Don't re-introduce per-user LUKS — see ADR-004 in
+  `docs/architecture-decisions.md` for the rationale and the SSE opt-in
+  path if cold-disk protection is needed.
 
 If a maintenance request seems to require violating any of the above,
 that's a design-level decision — re-open `docs/design.md` first, don't

@@ -1,94 +1,184 @@
-# cloud — file server (internally: copyparty)
+# cloud — file server + collaboration (internally: Nextcloud).
 #
-# Camouflage: service/container/network use the neutral name `cloud`.
-# No public port bindings — reachable only via `ingress`
-# (`cloud.${DOMAIN}`) over the shared `edge` network.
-# copyparty's default port is 3923; we expose nothing to the host.
+# Camouflage: external hostname is `cloud.${DOMAIN}`. Internal service /
+# container / network names are all `cloud*`. This stack replaces the
+# previous copyparty-based implementation; the external surface (URL,
+# stack name) is unchanged.
 #
-# Identity comes from Authelia via NPM forward-auth. See
-# ./conf/copyparty.conf and ../authelia/DESIGN.md.
+# Architecture: Nextcloud-fpm + Postgres + Redis + nginx-sidecar. NPM
+# proxies cloud.${DOMAIN} → cloud-web:80, cloud-web fastcgi_passes to
+# cloud:9000, cloud talks to cloud-db (Postgres) and cloud-redis (cache
+# + distributed file lock). Nothing is published to the host; everything
+# is internal to the `edge` network.
 #
-# Volume semantics: /srv/store/mnt/<u> on the host are LUKS unlock
-# points (one per user). When the per-user blob is NOT unlocked these
-# are empty directories, and copyparty serves an empty volume —
-# fail-closed by accident, intentional. See ./README.md.
+# Auth: Authelia OIDC (NOT the old forward-auth header model). The
+# Nextcloud `user_oidc` app handles auto-provisioning on first login —
+# NPM does not inject Remote-User / X-Forward-Auth-Secret here.
+#
+# Persistent state lives on EXTERNAL bind-mounts under /srv/store/cloud-*
+# on the host (NOT docker named volumes) so backup is a single rsync.
+# bootstrap-phase2.sh creates these dirs with the right uid/gid (33:33
+# for nextcloud data, 70:70 for postgres) before this stack comes up.
+#
+# 50 GB upload chain — this stack handles two of the four required layers:
+#   - php-fpm (cloud)         via ./conf/zz-uploadlimits.ini
+#   - nginx-sidecar (cloud-web) via ./conf/nginx.conf
+# The other two (NPM advanced_config + Nextcloud `default_quota`) live
+# in stacks/enrol and Nextcloud occ respectively. See README.md.
 
 services:
   cloud:
-    # copyparty/ac — "all-codecs" image (bundles ffmpeg etc. for thumbnails
-    # and audio transcoding). Pinned to current stable verified 2026-04-25:
-    # tag v1.20.14 ("autolocalization"). Bump deliberately; do not use
-    # `latest`. Upstream: https://github.com/9001/copyparty
-    image: copyparty/ac:1.20.14
+    # Nextcloud 30.0.6, php-fpm flavour on Alpine. fpm-only image: it
+    # speaks fastcgi on :9000, NOT HTTP. cloud-web (nginx-sidecar) is
+    # the HTTP front end.
+    image: nextcloud:30.0.6-fpm-alpine
     container_name: cloud
     restart: unless-stopped
-    mem_limit: 2g
+    mem_limit: 1g
 
-    # No `ports:` — strictly internal. `ingress` reaches us over `edge`
-    # at cloud:3923. Adding a public port binding is a misconfiguration.
-
-    # The image's entrypoint reads /cfg/*.conf automatically when /cfg
-    # is present (`-c /cfg`-equivalent behavior baked into the upstream
-    # entrypoint). We mount our config there read-only and let the
-    # default startup pick it up. No `command:` override needed.
+    depends_on:
+      cloud-db:
+        condition: service_healthy
+      cloud-redis:
+        condition: service_healthy
 
     volumes:
-      # Per-user data roots, served as a single bind-mount.
-      #
-      # PRIOR LAYOUT (deprecated): one static per-user bind per user
-      #     /srv/store/mnt/<u>:/w/<u>
-      # which required editing this file + recreating the container
-      # for every new user.
-      #
-      # NEW LAYOUT: a single bind-mount of the parent /srv/store/mnt
-      # at /w. copyparty's IdP rule [/u/${u}] /w/${u} resolves at
-      # request time against any /srv/store/mnt/<u>/ subdirectory
-      # that exists on the host — so a fresh user added via enrol
-      # is visible to copyparty without restarting cloud.
-      #
-      # `bind-propagation=rslave` is load-bearing: it makes mounts
-      # done on the host *after* this container started — e.g. when
-      # a LUKS blob is unlocked + mounted onto /srv/store/mnt/<u> —
-      # propagate into /w/<u> inside the container. The default
-      # `rprivate` propagation does NOT do this; we verified
-      # empirically before changing this stack. See
-      # ../enrol/DESIGN.md § 0.3 for the propagation gotcha.
-      #
-      # The shared volume at /srv/store/mnt/_shared (auto-unlocked
-      # by host-side shared-store.service) is visible here as
-      # /w/_shared via the same rslave propagation — copyparty's
-      # [/shared] block in conf/copyparty.conf points at /w/_shared.
-      - type: bind
-        source: /srv/store/mnt
-        target: /w
-        bind:
-          propagation: rslave
-      # Config (read-only). copyparty auto-loads *.conf from /cfg.
-      - ./conf:/cfg:ro
-      # Persistent state: hash DB, thumbs cache, ah-salt.txt, IdP user
-      # cache (idp-store), etc.
-      - ./data:/var/lib/copyparty
+      # Shared webroot. The image's entrypoint seeds /var/www/html from
+      # /usr/src/nextcloud/ on first up if the target is empty. Both
+      # `cloud` (fpm) and `cloud-web` (nginx) mount this same named
+      # volume so nginx can serve static assets (CSS/JS/SVG/etc) directly
+      # off disk while fpm handles dynamic *.php requests — the canonical
+      # Nextcloud fpm+nginx sidecar pattern. Without this, nginx would
+      # 404 every static asset and fall back to fpm for everything,
+      # killing performance and breaking some assets entirely.
+      - cloud-html:/var/www/html
+      # Bind mounts to /srv/store/cloud-* on the host. These overlay
+      # sub-paths inside the shared webroot — Docker mounts them on top
+      # of the shared volume's corresponding subdirs. uid/gid 33:33
+      # (www-data inside the image) is set by bootstrap-phase2.sh.
+      - /srv/store/cloud-data:/var/www/html/data
+      - /srv/store/cloud-config:/var/www/html/config
+      - /srv/store/cloud-apps:/var/www/html/custom_apps
+      # PHP override for 50 GB streaming uploads. Loaded after the
+      # image's own conf.d/*.ini because of the `zz-` prefix.
+      - ./conf/zz-uploadlimits.ini:/usr/local/etc/php/conf.d/zz-uploadlimits.ini:ro
 
     environment:
-      # Make logs flush promptly so `docker logs` is useful during
-      # auth / volume troubleshooting.
-      PYTHONUNBUFFERED: "1"
-      # Per-user password hashes are no longer used: identity is
-      # delegated to Authelia via the IdP headers configured in
-      # ./conf/copyparty.conf. Per-user hash env vars are intentionally
-      # dropped here.
+      # Database — see cloud-db service below for the matching values.
+      POSTGRES_HOST: cloud-db
+      POSTGRES_DB: ${POSTGRES_DB:-nextcloud}
+      POSTGRES_USER: ${POSTGRES_USER:-nextcloud}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in /opt/stacks/cloud/.env}
 
-    # Allow the thumbnailer to drain on shutdown (matches upstream advice).
-    stop_grace_period: 15s
+      # Redis — used for both the memcache.locking distributed file lock
+      # AND the local memcache (see Nextcloud config docs).
+      REDIS_HOST: ${REDIS_HOST:-cloud-redis}
+
+      # Bootstrap admin (only used by the entrypoint on the very first
+      # `up`; subsequent runs ignore these). Both values are generated
+      # by bootstrap-phase2.sh and persisted to /opt/stacks/cloud/.env.
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-nadmin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:?NEXTCLOUD_ADMIN_PASSWORD must be set in /opt/stacks/cloud/.env}
+
+      # Trusted domains: Nextcloud rejects requests whose Host header is
+      # not on this list. Comma-separated (the entrypoint splits it into
+      # the trusted_domains array in config.php).
+      NEXTCLOUD_TRUSTED_DOMAINS: ${NEXTCLOUD_TRUSTED_DOMAINS:-cloud.example.com}
+
+      # PHP knobs. PHP_UPLOAD_LIMIT lifts both upload_max_filesize and
+      # post_max_size to 50 G via the image's php-config templater, on top
+      # of (and in agreement with) zz-uploadlimits.ini.
+      PHP_MEMORY_LIMIT: 512M
+      PHP_UPLOAD_LIMIT: 50G
+      # 5 children at ~80 MB RSS each ≈ 400 MB peak fpm — fits the 1 GB
+      # mem_limit comfortably with headroom for opcache + bootstrap RSS.
+      PHP_FPM_PM_MAX_CHILDREN: 5
 
     healthcheck:
-      # `/?reset=/._` matches the default --lf-url filter so health pings
-      # don't spam the access log.
-      test: ["CMD-SHELL", "wget --spider -q 127.0.0.1:3923/?reset=/._"]
-      interval: 1m
-      timeout: 2s
+      # fpm doesn't speak HTTP, so we can't curl /status.php from in here.
+      # A TCP probe on :9000 is sufficient: if fpm is accepting connections
+      # the master is alive and at least one worker is ready.
+      test: ["CMD-SHELL", "nc -z localhost 9000 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+    networks:
+      - edge
+
+  cloud-db:
+    image: postgres:16.6-alpine
+    container_name: cloud-db
+    restart: unless-stopped
+
+    volumes:
+      # 70:70 = postgres uid/gid inside the alpine image. Set by
+      # bootstrap-phase2.sh before this stack comes up.
+      - /srv/store/cloud-db:/var/lib/postgresql/data
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nextcloud}
+      POSTGRES_USER: ${POSTGRES_USER:-nextcloud}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in /opt/stacks/cloud/.env}
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nextcloud} -d ${POSTGRES_DB:-nextcloud}"]
+      interval: 15s
+      timeout: 5s
       retries: 5
       start_period: 15s
+
+    networks:
+      - edge
+
+  cloud-redis:
+    image: redis:7.4-alpine
+    container_name: cloud-redis
+    restart: unless-stopped
+
+    # No bind mount — redis here is cache + distributed file lock only.
+    # Loss of state on restart is fine (Nextcloud rebuilds the locking
+    # set lazily; the memcache is by definition disposable).
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+    networks:
+      - edge
+
+  cloud-web:
+    # Nginx sidecar — terminates HTTP from NPM, fastcgi_passes to
+    # cloud:9000. NPM is the TLS terminator; this listens on :80 only.
+    image: nginx:1.27-alpine
+    container_name: cloud-web
+    restart: unless-stopped
+
+    depends_on:
+      cloud:
+        condition: service_healthy
+
+    volumes:
+      # Same shared webroot the `cloud` (fpm) service mounts. nginx reads
+      # static assets (CSS/JS/SVG/etc) directly off this volume via
+      # try_files; PHP files get fastcgi_pass'd to cloud:9000. Mount as
+      # :ro because the sidecar should never write into the webroot.
+      - cloud-html:/var/www/html:ro
+      # The data dir is the only place public-share download links land
+      # without going through fpm, so nginx needs read access here too.
+      - /srv/store/cloud-data:/var/www/html/data:ro
+      - ./conf/nginx.conf:/etc/nginx/nginx.conf:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider http://localhost/status.php || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
     networks:
       - edge
@@ -96,3 +186,11 @@ services:
 networks:
   edge:
     external: true
+
+volumes:
+  # The Nextcloud webroot. Seeded from /usr/src/nextcloud/ inside the
+  # image on first up by the entrypoint. NOT a bind mount because we
+  # want Docker's volume init semantics (only seed when empty) — and the
+  # webroot is image-managed code, not user data, so backup is "the
+  # image tag" not "rsync this directory".
+  cloud-html:
