@@ -320,6 +320,25 @@ systemctl restart awg-quick@gw0.service
 strict_step "configure host DNS (systemd-resolved on 10.99.0.1)"
 "${SCRIPT_DIR}/configure-host-dns.sh"
 
+# Tunnel perf tunables: gw0 root qdisc (noqueue -> fq), RPS/RFS on the
+# WAN NIC, UDP GRO forwarding, and the matching sysctl knobs. Background
+# is documented in raph-tunnel-tunables.sh + 99-tunnel-tuning.conf. We
+# install both, restart the sysctl drop-in, and start the systemd unit
+# so the runtime knobs apply without waiting for a reboot.
+strict_step "install tunnel perf tunables (qdisc, RPS, sysctl)"
+install -m 0755 "${REPO_HOST_DIR}/raph-tunnel-tunables.sh" \
+  /usr/local/sbin/raph-tunnel-tunables.sh
+install -m 0644 "${REPO_HOST_DIR}/systemd/raph-tunnel-tunables.service" \
+  /etc/systemd/system/raph-tunnel-tunables.service
+install -m 0644 "${REPO_HOST_DIR}/sysctl/99-tunnel-tuning.conf" \
+  /etc/sysctl.d/99-tunnel-tuning.conf
+# Apply sysctl drop-in immediately (does not require reboot).
+sysctl --system >/dev/null
+systemctl daemon-reload
+systemctl enable raph-tunnel-tunables.service
+# Restart (not just start) so re-runs pick up edits to the script.
+systemctl restart raph-tunnel-tunables.service
+
 echo "==> verification"
 # Each command is a probe with independent failure modes; do not bail out
 # on the first non-zero — surface all of them so the operator can triage.

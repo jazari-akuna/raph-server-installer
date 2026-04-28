@@ -1,0 +1,30 @@
+# /etc/systemd/system/raph-tunnel-tunables.service
+#
+# One-shot that applies runtime tunnel-perf knobs (qdisc on gw0, RPS/RFS
+# on the WAN NIC, UDP GRO forwarding) at boot. Sysctl bits are handled
+# separately by /etc/sysctl.d/99-tunnel-tuning.conf — only kernel knobs
+# that have no sysctl interface live in this unit.
+#
+# Ordering:
+#   - After=network-online.target — so the WAN interface and default
+#     route exist (the script reads "ip route show default" to find the
+#     NIC name).
+#   - After=awg-quick@gw0.service — so gw0 exists when we tc-replace
+#     its qdisc. Wants= (not Requires=) so the service still starts
+#     even if awg-quick failed; the script gracefully skips gw0 in
+#     that case.
+#
+# Idempotent. Safe to systemctl restart at any time.
+
+[Unit]
+Description=AmneziaWG gw0 + WAN runtime perf tunables (qdisc, RPS/RFS, UDP GRO)
+After=network-online.target awg-quick@gw0.service
+Wants=network-online.target awg-quick@gw0.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/raph-tunnel-tunables.sh
+
+[Install]
+WantedBy=multi-user.target
