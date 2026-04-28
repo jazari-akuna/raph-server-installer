@@ -34,14 +34,14 @@ type server struct {
 	tmpl *template.Template
 	mu   sync.Mutex // serialises every mutating op
 
-	// plane is the typed Plane REST client used by the admin /users
-	// page to surface per-user issue counts + attachment bytes. May be
-	// non-nil but unconfigured (empty token) before Wave C deploys
-	// Plane and the operator drops a token at
-	// /etc/raph-installer/plane-admin-token; every PlaneClient method
-	// gracefully short-circuits to zero values + nil error in that
-	// state so the admin page renders "—" rather than breaking.
-	plane *PlaneClient
+	// task is the typed Vikunja-DB client used by the admin /users
+	// page to surface per-user task counts + attachment bytes. Reads
+	// the password from /opt/stacks/task/.env on demand. May be
+	// non-nil but unconfigured (empty container/env file) before the
+	// task stack is deployed; every TaskClient method gracefully
+	// short-circuits to zero values + nil error in that state so the
+	// admin page renders "—" rather than breaking.
+	task *TaskClient
 }
 
 func newServer(cfg config) (*server, error) {
@@ -134,8 +134,8 @@ func newServer(cfg config) (*server, error) {
 	if err := ensureArchiveDir(cfg); err != nil {
 		return nil, fmt.Errorf("ensure peers archive dir: %w", err)
 	}
-	plane := NewPlaneClient(cfg.planeDBContainer, cfg.planeDBName, cfg.planeDBUser, cfg.planeEnvFile)
-	return &server{cfg: cfg, tmpl: tmpl, plane: plane}, nil
+	task := NewTaskClient(cfg.taskDBContainer, cfg.taskDBName, cfg.taskDBUser, cfg.taskEnvFile)
+	return &server{cfg: cfg, tmpl: tmpl, task: task}, nil
 }
 
 func (s *server) routes() http.Handler {
@@ -347,7 +347,7 @@ func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash s
 		CSRF:          csrf,
 		ViewerIsAdmin: true, // requireAdmin gates this route
 		Users:         rows,
-		Storage:       storageSnapshot(s.cfg, specs, s.plane),
+		Storage:       storageSnapshot(s.cfg, specs, s.task),
 		Flash:         flash,
 		TOTPEnabled:   s.totpEnabled(),
 	}

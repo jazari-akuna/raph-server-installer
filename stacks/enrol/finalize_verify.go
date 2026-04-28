@@ -238,7 +238,7 @@ func (s *server) verifyNPMRoutes(ctx context.Context, st *setupState) error {
 		"enrol." + st.Domain,
 		"cloud." + st.Domain,
 		"console." + st.Domain,
-		"plane." + st.Domain,
+		"task." + st.Domain,
 	}
 	have := map[string]bool{}
 	for _, h := range hosts {

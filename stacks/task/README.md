@@ -1,11 +1,10 @@
-# plane — runbook
+# task — runbook
 
 Project tracker for the shared VPS. Externally and in all
-paths/stack-names it is `plane`. Internally this is
-[Vikunja](https://vikunja.io) (`vikunja/vikunja:2.3.0`) — the camouflage
-name (`plane`) is unchanged from the previous deploy. Reachable at
-`https://plane.${DOMAIN}`. Auth is delegated to Authelia via OIDC
-(no local accounts).
+paths/stack-names it is `task`. Internally this is
+[Vikunja](https://vikunja.io) (`vikunja/vikunja:2.3.0`) — `task` is
+the camouflage name (ADR-002). Reachable at `https://task.${DOMAIN}`.
+Auth is delegated to Authelia via OIDC (no local accounts).
 
 ## Why Vikunja (and not Plane)
 
@@ -21,11 +20,11 @@ is exactly what we need: generic, doc'd, callback at
 
 | Service | Image | Listens on | Bind mount |
 |---|---|---|---|
-| `plane-app` | `vikunja/vikunja:2.3.0` | `:3456` | `/srv/store/plane-files` → `/app/vikunja/files` (uid 1000) |
-| `plane-db` | `postgres:16.6-alpine` | `:5432` (internal) | `/srv/store/plane-db` → `/var/lib/postgresql/data` (uid 70) |
+| `task-app` | `vikunja/vikunja:2.3.0` | `:3456` | `/srv/store/task-files` → `/app/vikunja/files` (uid 1000) |
+| `task-db` | `postgres:16.6-alpine` | `:5432` (internal) | `/srv/store/task-db` → `/var/lib/postgresql/data` (uid 70) |
 
-NPM proxies `plane.${DOMAIN}` → `plane-app:3456` over the `edge` network.
-Authelia rule for `plane.${DOMAIN}` is **bypass** — Vikunja owns its
+NPM proxies `task.${DOMAIN}` → `task-app:3456` over the `edge` network.
+Authelia rule for `task.${DOMAIN}` is **bypass** — Vikunja owns its
 session.
 
 ## Deploy runbook
@@ -33,37 +32,37 @@ session.
 ### 1. Generate secrets
 
 ```sh
-sudo install -d -m 0755 -o 1000 -g 1000 /srv/store/plane-files
-sudo install -d -m 0700 /srv/store/plane-db
-sudo chown 70:70 /srv/store/plane-db
+sudo install -d -m 0755 -o 1000 -g 1000 /srv/store/task-files
+sudo install -d -m 0700 /srv/store/task-db
+sudo chown 70:70 /srv/store/task-db
 
 # DB password, JWT signing key (each used once at deploy time).
 PG_PWD="$(openssl rand -base64 32 | tr -d '\n=+/')"
 JWT_SECRET="$(openssl rand -base64 64 | tr -d '\n')"
 
 # OIDC client secret: matched by hash inside Authelia.
-OIDC_SECRET="$(cat /etc/raph-installer/oidc-plane-client-secret)"
+OIDC_SECRET="$(cat /etc/raph-installer/oidc-task-client-secret)"
 
-sudo tee /opt/stacks/plane/.env >/dev/null <<EOF
+sudo tee /opt/stacks/task/.env >/dev/null <<EOF
 DOMAIN=${DOMAIN}
 POSTGRES_PASSWORD=$PG_PWD
 VIKUNJA_JWT_SECRET=$JWT_SECRET
 VIKUNJA_OIDC_CLIENT_SECRET=$OIDC_SECRET
 EOF
-sudo chmod 0600 /opt/stacks/plane/.env
+sudo chmod 0600 /opt/stacks/task/.env
 ```
 
 ### 2. Bring up
 
 ```sh
-cd /opt/stacks/plane
+cd /opt/stacks/task
 docker compose up -d
-docker compose logs -f plane-app   # wait for "ready to handle requests"
+docker compose logs -f task-app   # wait for "ready to handle requests"
 ```
 
 ### 3. First login (creates the operator's Vikunja account from OIDC)
 
-Browse `https://plane.${DOMAIN}/`. Vikunja shows a single button:
+Browse `https://task.${DOMAIN}/`. Vikunja shows a single button:
 **Single Sign-On**. Click → Authelia portal → log in / 2FA → bounced
 back to Vikunja, automatically logged in as your OIDC user.
 
@@ -72,7 +71,7 @@ Vikunja has no built-in admin role beyond creator-of-thing. To grant
 admin powers (delete-anyone-account, change site settings):
 
 ```sh
-docker exec -it plane-db psql -U vikunja -d vikunja \
+docker exec -it task-db psql -U vikunja -d vikunja \
   -c "UPDATE users SET status = 1, is_active = true WHERE username = '<your-username>';"
 ```
 
@@ -86,15 +85,15 @@ Two artefacts:
 
 1. **Postgres dump** — authoritative.
    ```sh
-   docker exec plane-db pg_dump -U vikunja -d vikunja \
-     > /srv/store/plane-db-backup/plane-$(date -u +%Y%m%dT%H%M%SZ).sql
+   docker exec task-db pg_dump -U vikunja -d vikunja \
+     > /srv/store/task-db-backup/task-$(date -u +%Y%m%dT%H%M%SZ).sql
    ```
-2. **Files bind** — `/srv/store/plane-files` (attachments + avatars).
+2. **Files bind** — `/srv/store/task-files` (attachments + avatars).
    Single rsync target.
 
 Restic (or whatever wraps the backups) should run the `pg_dump` first,
-then take the rsync of `/srv/store/plane-{files,db-backup}`. The raw
-`/srv/store/plane-db` directory is also captured but treated as a
+then take the rsync of `/srv/store/task-{files,db-backup}`. The raw
+`/srv/store/task-db` directory is also captured but treated as a
 safety-net only — restoring from a hot data dir is fragile.
 
 See `docs/backups.md` for the full host-level backup pipeline.
@@ -103,12 +102,12 @@ See `docs/backups.md` for the full host-level backup pipeline.
 
 Vikunja follows semver. Upgrade by image-tag bump only:
 
-1. Snapshot Postgres: `docker exec plane-db pg_dump ... > snapshot.sql`.
+1. Snapshot Postgres: `docker exec task-db pg_dump ... > snapshot.sql`.
 2. Edit `image: vikunja/vikunja:2.3.0` → newer pinned tag.
-3. `docker compose pull plane-app && docker compose up -d plane-app`.
+3. `docker compose pull task-app && docker compose up -d task-app`.
 4. Vikunja runs DB migrations on startup; tail `docker compose logs -f
-   plane-app` until "ready to handle requests" appears again.
-5. Roll back: `docker compose down plane-app; <restore image tag>;
+   task-app` until "ready to handle requests" appears again.
+5. Roll back: `docker compose down task-app; <restore image tag>;
    restore Postgres dump if migrations were destructive`.
 
 Stay on a pinned tag — never `latest` or `unstable`. ADR-006.
@@ -116,18 +115,17 @@ Stay on a pinned tag — never `latest` or `unstable`. ADR-006.
 ## Resource budget
 
 Vikunja is a small Go binary. Steady state:
-- `plane-app` ~80 MB
-- `plane-db` ~120 MB
+- `task-app` ~80 MB
+- `task-db` ~120 MB
 
 Total ~200 MB, well within the per-stack envelope. ADR-008.
 
-## What changed vs. the prior Plane deploy
+## History
 
-- Image swap: `makeplane/plane-*` (14 services) → `vikunja/vikunja` + Postgres (2 services).
-- State paths: `/srv/store/plane-{db,minio,mq,logs}` → `/srv/store/plane-{files,db}`. The old paths were wiped during the swap.
-- OIDC callback: `/auth/oidc/callback/` → `/auth/openid/authelia`. Authelia's `redirect_uris` was updated; the OIDC clientid stays `plane` for camouflage.
-- No more RabbitMQ, MinIO, MinIO-mc, Valkey/Redis, plane-proxy, plane-frontends. Vikunja serves the frontend itself; attachments go on the local filesystem; no message queue needed.
-- The previous deploy had a god-mode admin claim step. Vikunja has none — first OIDC user just lands as a normal user; promote via SQL above.
+Originally this slot was named `plane` and ran `makeplane/plane:v0.27.1`
+(then briefly `v1.3.0`). Plane lacked generic OIDC at every version we
+checked, so we swapped to Vikunja and renamed the slot to `task` to
+match the new product's character.
 
 ## Things deliberately NOT enabled
 

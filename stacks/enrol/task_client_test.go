@@ -1,6 +1,6 @@
-// plane_client_test.go — unit tests for the Vikunja-backed PlaneClient.
+// task_client_test.go — unit tests for the Vikunja-backed TaskClient.
 //
-// The live integration shells out `docker exec plane-db psql ...`, which
+// The live integration shells out `docker exec task-db psql ...`, which
 // can't be mocked without a docker-in-docker setup. These tests therefore
 // cover the fast, mockable surface only:
 //
@@ -10,7 +10,7 @@
 //
 // The actual psql shell-out is exercised by the live deploy smoke test
 // in scripts/smoke-test.sh (TODO: add an assertion there for the admin
-// /users page rendering plane columns once Vikunja has at least one user).
+// /users page rendering task columns once Vikunja has at least one user).
 
 package main
 
@@ -24,7 +24,7 @@ import (
 
 // ----- constructor + ready() -----
 
-func TestNewPlaneClient(t *testing.T) {
+func TestNewTaskClient(t *testing.T) {
 	cases := []struct {
 		name      string
 		container string
@@ -35,10 +35,10 @@ func TestNewPlaneClient(t *testing.T) {
 	}{
 		{
 			name:      "fully configured",
-			container: "plane-db",
+			container: "task-db",
 			dbName:    "vikunja",
 			dbUser:    "vikunja",
-			envFile:   "/opt/stacks/plane/.env",
+			envFile:   "/opt/stacks/task/.env",
 			wantReady: true,
 		},
 		{
@@ -46,12 +46,12 @@ func TestNewPlaneClient(t *testing.T) {
 			container: "",
 			dbName:    "vikunja",
 			dbUser:    "vikunja",
-			envFile:   "/opt/stacks/plane/.env",
+			envFile:   "/opt/stacks/task/.env",
 			wantReady: false,
 		},
 		{
 			name:      "missing env file → not ready",
-			container: "plane-db",
+			container: "task-db",
 			dbName:    "vikunja",
 			dbUser:    "vikunja",
 			envFile:   "",
@@ -59,16 +59,16 @@ func TestNewPlaneClient(t *testing.T) {
 		},
 		{
 			name:      "whitespace stripped",
-			container: "  plane-db  ",
+			container: "  task-db  ",
 			dbName:    "vikunja",
 			dbUser:    "vikunja",
-			envFile:   "/opt/stacks/plane/.env",
+			envFile:   "/opt/stacks/task/.env",
 			wantReady: true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewPlaneClient(tc.container, tc.dbName, tc.dbUser, tc.envFile)
+			c := NewTaskClient(tc.container, tc.dbName, tc.dbUser, tc.envFile)
 			if got := c.ready(); got != tc.wantReady {
 				t.Errorf("ready() = %v, want %v", got, tc.wantReady)
 			}
@@ -78,8 +78,8 @@ func TestNewPlaneClient(t *testing.T) {
 
 // Nil receiver must not panic — admin page may call methods on a partial
 // startup config.
-func TestPlaneClientNilReady(t *testing.T) {
-	var c *PlaneClient
+func TestTaskClientNilReady(t *testing.T) {
+	var c *TaskClient
 	if c.ready() {
 		t.Errorf("nil client should not be ready")
 	}
@@ -91,7 +91,7 @@ func TestPlaneClientNilReady(t *testing.T) {
 // (We can't observe the absence of a shell-out directly, but we verify
 // the function returns instantly with no error and zero values.)
 func TestUserStatsUnconfigured(t *testing.T) {
-	c := NewPlaneClient("", "", "", "")
+	c := NewTaskClient("", "", "", "")
 	stats, err := c.UserStats(context.Background(), "alice@example.com")
 	if err != nil {
 		t.Errorf("expected nil error on unconfigured client, got %v", err)
@@ -104,7 +104,7 @@ func TestUserStatsUnconfigured(t *testing.T) {
 // Empty email is a no-op (admin page may pass "" for users with no email
 // claim from Authelia).
 func TestUserStatsEmptyEmail(t *testing.T) {
-	c := NewPlaneClient("plane-db", "vikunja", "vikunja", "/dev/null")
+	c := NewTaskClient("task-db", "vikunja", "vikunja", "/dev/null")
 	stats, err := c.UserStats(context.Background(), "")
 	if err != nil {
 		t.Errorf("expected nil error on empty email, got %v", err)
@@ -160,7 +160,7 @@ func TestPasswordReadsEnvFile(t *testing.T) {
 			if err := os.WriteFile(envPath, []byte(tc.contents), 0o600); err != nil {
 				t.Fatalf("write env: %v", err)
 			}
-			c := NewPlaneClient("plane-db", "vikunja", "vikunja", envPath)
+			c := NewTaskClient("task-db", "vikunja", "vikunja", envPath)
 			// Force a fresh read by zeroing the cache.
 			c.cachedPwd, c.cachedPwdAt = "", time.Time{}
 			got := c.password()
@@ -174,7 +174,7 @@ func TestPasswordReadsEnvFile(t *testing.T) {
 // Missing env file → empty password (silent fallback). Must not panic
 // or surface the os.Open error.
 func TestPasswordMissingFile(t *testing.T) {
-	c := NewPlaneClient("plane-db", "vikunja", "vikunja", "/nonexistent/.env.noway")
+	c := NewTaskClient("task-db", "vikunja", "vikunja", "/nonexistent/.env.noway")
 	if got := c.password(); got != "" {
 		t.Errorf("password() on missing file = %q, want empty", got)
 	}
@@ -184,11 +184,11 @@ func TestPasswordMissingFile(t *testing.T) {
 // when fully configured. Used by potential future tests asserting
 // "deployed mode".
 func TestRequireConfigured(t *testing.T) {
-	cfg := NewPlaneClient("plane-db", "vikunja", "vikunja", "/opt/stacks/plane/.env")
+	cfg := NewTaskClient("task-db", "vikunja", "vikunja", "/opt/stacks/task/.env")
 	if err := cfg.requireConfigured(); err != nil {
 		t.Errorf("fully-configured client should not error, got %v", err)
 	}
-	empty := NewPlaneClient("", "", "", "")
+	empty := NewTaskClient("", "", "", "")
 	if err := empty.requireConfigured(); err == nil {
 		t.Errorf("empty client should error")
 	}
@@ -200,7 +200,7 @@ func TestRequireConfigured(t *testing.T) {
 // FileAssetBytes — make sure they don't panic on a nil/empty client.
 
 func TestShimsSafeOnUnconfigured(t *testing.T) {
-	c := NewPlaneClient("", "", "", "")
+	c := NewTaskClient("", "", "", "")
 	ctx := context.Background()
 	if ws, _ := c.ListWorkspaces(ctx); ws != nil {
 		t.Errorf("ListWorkspaces should return nil on unconfigured client")

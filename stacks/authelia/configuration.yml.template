@@ -9,16 +9,16 @@
 #     of the OIDC client secret for the console (Portainer) integration.
 #   - ${AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH}: the pbkdf2-sha512 hash
 #     of the OIDC client secret for the cloud (Nextcloud) integration.
-#   - ${AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH}: the pbkdf2-sha512 hash
-#     of the OIDC client secret for the plane (Plane) integration.
+#   - ${AUTHELIA_OIDC_TASK_CLIENT_SECRET_HASH}: the pbkdf2-sha512 hash
+#     of the OIDC client secret for the task (Vikunja) integration.
 #
 # Render via:
 #
 #   set -a; . /opt/stacks/.env; set +a   # provides DOMAIN
 #   AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH='$pbkdf2-sha512$...' \
 #   AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH='$pbkdf2-sha512$...' \
-#   AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH='$pbkdf2-sha512$...' \
-#       envsubst '$DOMAIN $AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH $AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH $AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH' \
+#   AUTHELIA_OIDC_TASK_CLIENT_SECRET_HASH='$pbkdf2-sha512$...' \
+#       envsubst '$DOMAIN $AUTHELIA_OIDC_CONSOLE_CLIENT_SECRET_HASH $AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH $AUTHELIA_OIDC_TASK_CLIENT_SECRET_HASH' \
 #       < configuration.yml.template > configuration.yml
 #   sudo chmod 0600 configuration.yml
 #
@@ -115,11 +115,11 @@ access_control:
     - domain: 'cloud.${DOMAIN}'
       policy: 'bypass'
 
-    # Plane: owns its own session via OIDC (Plane talks to Authelia
-    # directly at /auth/oidc/callback/). Bypass forward-auth here so
-    # Authelia does not gate the URL — Plane handles login itself and
-    # redirects unauthenticated requests to Authelia via OIDC.
-    - domain: 'plane.${DOMAIN}'
+    # task: Vikunja owns its own session via OIDC (Vikunja talks to
+    # Authelia directly at /auth/openid/authelia). Bypass forward-auth
+    # here so Authelia does not gate the URL — Vikunja handles login
+    # itself and redirects unauthenticated requests to Authelia via OIDC.
+    - domain: 'task.${DOMAIN}'
       policy: 'bypass'
 
     # enrol — landing page (apps launcher) is reachable by every
@@ -258,20 +258,19 @@ identity_providers:
         userinfo_signed_response_alg: 'none'
         token_endpoint_auth_method: 'client_secret_post'
 
-      - client_id: 'plane'
-        client_name: 'Plane'
-        # NOTE: clientid stays "plane" for camouflage (ADR-002) — the upstream
-        # image is Vikunja, but external naming is "plane.${DOMAIN}". The
-        # callback path comes from Vikunja's frontend: /auth/openid/<provider_key>.
-        # Our Vikunja config uses provider_key "authelia" (lowercase), so the
-        # exact redirect_uri must match below. NO trailing slash for Vikunja
-        # (the previous Plane entry needed one — Vikunja does not).
-        client_secret: '${AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH}'
+      - client_id: 'task'
+        client_name: 'Tasks'
+        # clientid is "task" per camouflage (ADR-002) — the upstream image
+        # is Vikunja but external naming is "task.${DOMAIN}". The callback
+        # path comes from Vikunja's frontend: /auth/openid/<provider_key>.
+        # Our Vikunja config uses provider_key "authelia" (lowercase), so
+        # the exact redirect_uri must match below.
+        client_secret: '${AUTHELIA_OIDC_TASK_CLIENT_SECRET_HASH}'
         public: false
         authorization_policy: 'one_factor'
         require_pkce: false
         redirect_uris:
-          - 'https://plane.${DOMAIN}/auth/openid/authelia'
+          - 'https://task.${DOMAIN}/auth/openid/authelia'
         scopes:
           - 'openid'
           - 'profile'

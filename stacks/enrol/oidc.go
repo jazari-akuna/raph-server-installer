@@ -86,13 +86,13 @@ const (
 	// into Authelia's configuration.yml.
 	oidcCloudEnvVar = "AUTHELIA_OIDC_CLOUD_CLIENT_SECRET_HASH"
 
-	// oidcPlaneEnvVar is the .env key for Plane's OIDC client_secret
-	// hash. Plane configures OIDC via its god-mode admin panel (NOT env
-	// vars) but Authelia still needs the hashed client_secret in its
-	// configuration.yml so the OAuth2 dance authenticates. Set by
-	// rotateOIDCPlaneSecret alongside the console + cloud rotations;
+	// oidcTaskEnvVar is the .env key for the task (Vikunja) OIDC
+	// client_secret hash. Vikunja reads the plaintext via
+	// VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_CLIENTSECRET in its
+	// docker-compose env; Authelia gets the hash here. Set by
+	// rotateOIDCTaskSecret alongside the console + cloud rotations;
 	// consumed by render-templates.sh.
-	oidcPlaneEnvVar = "AUTHELIA_OIDC_PLANE_CLIENT_SECRET_HASH"
+	oidcTaskEnvVar = "AUTHELIA_OIDC_TASK_CLIENT_SECRET_HASH"
 
 	// oidcConsolePlaintextDefaultPath is where the rotated console
 	// plaintext is written for the operator to paste into Portainer.
@@ -106,11 +106,12 @@ const (
 	// root and can read it directly.
 	oidcCloudPlaintextDefaultPath = "/etc/raph-installer/oidc-cloud-client-secret"
 
-	// oidcPlanePlaintextDefaultPath is where the rotated plane plaintext
-	// is written. The operator pastes this into Plane's god-mode OIDC
-	// configuration page on first deploy (Wave C step 5). Same mode +
-	// owner as the cloud twin (0600 root:root).
-	oidcPlanePlaintextDefaultPath = "/etc/raph-installer/oidc-plane-client-secret"
+	// oidcTaskPlaintextDefaultPath is where the rotated task plaintext
+	// is written. Vikunja reads it via the
+	// VIKUNJA_OIDC_CLIENT_SECRET env var threaded through compose;
+	// /opt/stacks/task/.env is regenerated to point at this file. Mode
+	// 0600 root:root (matches the cloud twin).
+	oidcTaskPlaintextDefaultPath = "/etc/raph-installer/oidc-task-client-secret"
 
 	// oidcPlaintextDefaultPath is the legacy alias for the console path.
 	// Kept so existing callers (oidc_test.go, log lines in setup.go that
@@ -188,16 +189,16 @@ func rotateOIDCCloudSecret(envFilePath, plaintextPath string) error {
 	return rotateClientSecret(envFilePath, plaintextPath, oidcCloudEnvVar)
 }
 
-// rotateOIDCPlaneSecret rotates the Plane OIDC client secret. Mirror
-// image of rotateOIDCCloudSecret pointing at the plane env-var key +
-// plaintext file. The plaintext lives at /etc/raph-installer/
-// oidc-plane-client-secret (mode 0600 root) so the operator can paste
-// it into Plane's god-mode admin panel during the Wave C bootstrap.
-func rotateOIDCPlaneSecret(envFilePath, plaintextPath string) error {
+// rotateOIDCTaskSecret rotates the task (Vikunja) OIDC client secret.
+// Mirror image of rotateOIDCCloudSecret pointing at the task env-var
+// key + plaintext file. The plaintext lives at /etc/raph-installer/
+// oidc-task-client-secret (mode 0600 root); /opt/stacks/task/.env
+// reads it via VIKUNJA_OIDC_CLIENT_SECRET on next compose-up.
+func rotateOIDCTaskSecret(envFilePath, plaintextPath string) error {
 	if plaintextPath == "" {
-		plaintextPath = oidcPlanePlaintextDefaultPath
+		plaintextPath = oidcTaskPlaintextDefaultPath
 	}
-	return rotateClientSecret(envFilePath, plaintextPath, oidcPlaneEnvVar)
+	return rotateClientSecret(envFilePath, plaintextPath, oidcTaskEnvVar)
 }
 
 // rotateClientSecret performs the full rotation for one OIDC env var:

@@ -1089,7 +1089,7 @@ func (s *server) runFinalize(
 	// restart-loops on the next compose-up. See oidc.go for the full
 	// rationale + idempotency contract.
 	if !st.CompletedSteps.OIDCRotated {
-		status("oidc", "rotating OIDC client secrets (console + cloud + plane)")
+		status("oidc", "rotating OIDC client secrets (console + cloud + task)")
 		envFile := filepath.Join(s.cfg.stacksDir, ".env")
 		if err := rotateOIDCConsoleSecret(envFile, ""); err != nil {
 			return wrapErr("oidc", err)
@@ -1099,10 +1099,10 @@ func (s *server) runFinalize(
 			return wrapErr("oidc", err)
 		}
 		logLine("oidc: cloud client_secret rotated; plaintext at " + oidcCloudPlaintextDefaultPath)
-		if err := rotateOIDCPlaneSecret(envFile, ""); err != nil {
+		if err := rotateOIDCTaskSecret(envFile, ""); err != nil {
 			return wrapErr("oidc", err)
 		}
-		logLine("oidc: plane client_secret rotated; plaintext at " + oidcPlanePlaintextDefaultPath)
+		logLine("oidc: task client_secret rotated; plaintext at " + oidcTaskPlaintextDefaultPath)
 		// No external observable to verify here beyond what the rotate
 		// helpers already enforce (they read back the env file before
 		// returning). The templates step's verification proves the new
@@ -1150,7 +1150,7 @@ func (s *server) runFinalize(
 
 	// 6. wire NPM proxy hosts.
 	if !st.CompletedSteps.NPMRoutesWired {
-		status("npm", "wiring NPM proxy hosts (auth/enrol/cloud/console/plane)")
+		status("npm", "wiring NPM proxy hosts (auth/enrol/cloud/console/task)")
 		if err := s.finalizeWireNPM(ctx, st, logLine); err != nil {
 			return wrapErr("npm", err)
 		}
@@ -1494,17 +1494,17 @@ location / {
 }
 `
 
-// npmAdvPlaneTmpl — plane.<domain> advanced_config. No forward-auth
-// (Plane owns its own OIDC session via the god-mode-configured Authelia
-// client, like Nextcloud — see ADR-003), with a tighter 5 GB upload cap
-// + 10-minute timeouts sized for issue attachments rather than the
-// Nextcloud-grade 50 GB / 1 hour envelope. WebSocket upgrade is enabled
-// at the ProxyHost level (AllowWebsocketUpgrade: true), not duplicated
-// in this template — plane-live's collaborative websocket rides through.
+// npmAdvTaskTmpl — task.<domain> advanced_config. No forward-auth
+// (Vikunja owns its own OIDC session against Authelia like Nextcloud
+// does — see ADR-003), with a tighter 5 GB upload cap + 10-minute
+// timeouts sized for task attachments rather than the Nextcloud-grade
+// 50 GB / 1 hour envelope. WebSocket upgrade is enabled at the
+// ProxyHost level (AllowWebsocketUpgrade: true), not duplicated in
+// this template.
 //
 // nginx variables ($forward_scheme, $server, $port) are literal in the
 // templated config, NOT interpolated by Go.
-const npmAdvPlaneTmpl = `client_max_body_size 5G;
+const npmAdvTaskTmpl = `client_max_body_size 5G;
 client_body_timeout 600s;
 proxy_read_timeout 600s;
 proxy_send_timeout 600s;
@@ -1726,24 +1726,24 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			AdvancedConfig:        advFwdAuth,
 		},
 		{
-			// plane.<domain> → plane-proxy:80 (the plane stack's own
-			// nginx, which fans out to web/admin/space/live/api). No
-			// forward-auth: Plane manages its own session via OIDC
-			// against Authelia (configured manually in Plane's god-mode
-			// admin panel post-deploy — see ADR-003 + the Wave C runbook
-			// in the plan). 5 GB upload + 10-min timeouts via the Plane
-			// advanced_config template.
-			DomainNames:           []string{"plane." + st.Domain},
+			// task.<domain> → task-app:3456 (Vikunja's unified Go
+			// binary serves API + Vue frontend). No forward-auth:
+			// Vikunja manages its own session via OIDC against Authelia
+			// (config in stacks/task/docker-compose.yml's
+			// VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_* env vars; see
+			// ADR-003 + ADR-009). 5 GB upload + 10-min timeouts via the
+			// task advanced_config template.
+			DomainNames:           []string{"task." + st.Domain},
 			ForwardScheme:         "http",
-			ForwardHost:           "plane-proxy",
-			ForwardPort:           80,
+			ForwardHost:           "task-app",
+			ForwardPort:           3456,
 			BlockExploits:         true,
 			AllowWebsocketUpgrade: true,
 			CertificateID:         certID,
 			SSLForced:             true,
 			HTTP2Support:          true,
 			HSTSEnabled:           true,
-			AdvancedConfig:        npmAdvPlaneTmpl,
+			AdvancedConfig:        npmAdvTaskTmpl,
 		},
 	}
 

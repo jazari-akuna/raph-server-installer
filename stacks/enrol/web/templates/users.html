@@ -55,9 +55,9 @@
   <h1>Admin</h1>
   <h2>users</h2>
   {{/* Per-user table — extended for the unified admin page (ADR-005).
-       The "NC Used" / "Plane Issues" / "Plane Files" columns may render
-       "—" when the upstream is unavailable (occ shell-out failed, Plane
-       not yet deployed, or the user hasn't logged into Plane yet). The
+       The "NC Used" / "Tasks" / "Task Files" columns may render
+       "—" when the upstream is unavailable (occ shell-out failed, task stack
+       not yet deployed, or the user hasn't logged into task stack yet). The
        on-disk + quota columns are joined from .Storage by username. */}}
   {{if .Users}}
   <table>
@@ -69,8 +69,8 @@
         <th>role</th>
         <th>on-disk</th>
         <th>NC Used</th>
-        <th>Plane Issues</th>
-        <th>Plane Files</th>
+        <th>Tasks</th>
+        <th>Task Files</th>
         <th></th>
       </tr>
     </thead>
@@ -98,10 +98,10 @@
           {{else}}—{{end}}
         </td>
         <td>
-          {{if gt $us.PlaneIssues 0}}{{$us.PlaneIssues}}{{else}}—{{end}}
+          {{if gt $us.TaskCount 0}}{{$us.TaskCount}}{{else}}—{{end}}
         </td>
         <td>
-          {{if gt $us.PlaneAttBytes 0}}{{prettyBytes $us.PlaneAttBytes}}{{else}}—{{end}}
+          {{if gt $us.TaskAttBytes 0}}{{prettyBytes $us.TaskAttBytes}}{{else}}—{{end}}
         </td>
         <td><a class="button" href="/users/{{$user.Name}}">manage</a></td>
       </tr>

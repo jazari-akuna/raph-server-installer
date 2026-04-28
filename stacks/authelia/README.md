@@ -140,7 +140,7 @@ docker compose logs -f authelia      # wait for "Server listening on..." line
 
 ### 5. Wire NPM
 
-Proxy hosts (auth, enrol, cloud, console, plane) are upserted by enrol's
+Proxy hosts (auth, enrol, cloud, console, task) are upserted by enrol's
 finalize step — see `finalizeWireNPM` in `stacks/enrol/setup.go`. The
 wizard runs it once during install; re-running enrol's finalize is
 idempotent and updates any host whose `forward_host` / `advanced_config`

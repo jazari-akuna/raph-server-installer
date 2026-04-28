@@ -98,18 +98,18 @@ type config struct {
 	stacksDir             string // /opt/stacks (compose root for finalize shell-outs)
 	repoDir               string // /opt/raph-server-installer (for wire-npm-routes.sh, render-templates.sh)
 
-	// Plane (Vikunja) DB integration for the admin /users page.
-	// The plane stack's docker container name + DB credentials live on
-	// the host filesystem (/opt/stacks/plane/.env). enrol shells out
-	// `docker exec plane-db psql` to read per-user task counts +
+	// task (Vikunja) DB integration for the admin /users page.
+	// The task stack's docker container name + DB credentials live on
+	// the host filesystem (/opt/stacks/task/.env). enrol shells out
+	// `docker exec task-db psql` to read per-user task counts +
 	// attachment bytes — Vikunja has no admin REST endpoint for this,
-	// see the plane_client.go banner for the rationale. Empty values
-	// (e.g. plane stack not yet deployed) silently degrade to zeros in
+	// see the task_client.go banner for the rationale. Empty values
+	// (e.g. task stack not yet deployed) silently degrade to zeros in
 	// the admin page.
-	planeDBContainer string
-	planeDBName      string
-	planeDBUser      string
-	planeEnvFile     string
+	taskDBContainer string
+	taskDBName      string
+	taskDBUser      string
+	taskEnvFile     string
 }
 
 func loadConfig() config {
@@ -159,16 +159,16 @@ func loadConfig() config {
 		stacksDir:             envOr("ENROL_STACKS_DIR", "/opt/stacks"),
 		repoDir:               envOr("ENROL_REPO_DIR", "/opt/raph-server-installer"),
 
-		planeDBContainer: envOr("ENROL_PLANE_DB_CONTAINER", "plane-db"),
-		planeDBName:      envOr("ENROL_PLANE_DB_NAME", "vikunja"),
-		planeDBUser:      envOr("ENROL_PLANE_DB_USER", "vikunja"),
-		planeEnvFile:     envOr("ENROL_PLANE_ENV_FILE", "/opt/stacks/plane/.env"),
+		taskDBContainer: envOr("ENROL_TASK_DB_CONTAINER", "task-db"),
+		taskDBName:      envOr("ENROL_TASK_DB_NAME", "vikunja"),
+		taskDBUser:      envOr("ENROL_TASK_DB_USER", "vikunja"),
+		taskEnvFile:     envOr("ENROL_TASK_ENV_FILE", "/opt/stacks/task/.env"),
 	}
 }
 
-// (resolvePlaneAPIToken removed — Vikunja swap moved the integration
-// from REST-with-bearer-token to docker-exec + psql. The DB password is
-// read on demand from /opt/stacks/plane/.env by plane_client.go.)
+// (resolveTaskAPIToken removed — Vikunja swap moved the integration
+// from REST-with-bearer-token to docker-exec + psql. The DB password
+// is read on demand from /opt/stacks/task/.env by task_client.go.)
 
 // resolveSetupToken prefers the explicit env var (useful for tests + Parcel 3B
 // harness) and falls back to reading /etc/raph-installer/setup-token. An

@@ -1,46 +1,46 @@
-# plane — project management (Vikunja under the hood; "plane" is camouflage).
+# task — project management (Vikunja under the hood; "task" is camouflage).
 #
-# External hostname: plane.${DOMAIN} (camouflage name; see ADR-002).
+# External hostname: task.${DOMAIN} (camouflage name; see ADR-002).
 # Image identity: vikunja/vikunja unified container — single Go binary serves
 # both REST API and the Vue frontend on :3456. Postgres for persistence.
 #
 # Why Vikunja and not Plane: Plane (the project we previously deployed at
 # v0.27.1) does not support generic OIDC — only hardcoded Google/GitHub/GitLab
 # OAuth. Vikunja ships generic OIDC out of the box, which lets us complete
-# the SSO chain through Authelia (ADR-003). External naming stays "plane"
+# the SSO chain through Authelia (ADR-003). External naming stays "task"
 # per camouflage.
 #
-# Backups (ADR-001): all state lives under /srv/store/plane-* on the host.
-# Single rsync covers /srv/store/plane-files; Postgres dumped via pg_dump
-# pre-backup hook to /srv/store/plane-db-backup/<ts>.sql and bundled into
+# Backups (ADR-001): all state lives under /srv/store/task-* on the host.
+# Single rsync covers /srv/store/task-files; Postgres dumped via pg_dump
+# pre-backup hook to /srv/store/task-db-backup/<ts>.sql and bundled into
 # the rsync. See README.md "Backups".
 #
 # Auth (ADR-003): Authelia is the IdP. Vikunja owns its own session
-# (OIDC client `plane`, callback /auth/openid/authelia). NPM proxies
-# plane.${DOMAIN} → plane-app:3456 with a `bypass` Authelia rule —
+# (OIDC client `task`, callback /auth/openid/authelia). NPM proxies
+# task.${DOMAIN} → task-app:3456 with a `bypass` Authelia rule —
 # Vikunja handles login itself, NPM does not gate.
 
 services:
-  plane-app:
+  task-app:
     image: vikunja/vikunja:2.3.0
-    container_name: plane-app
+    container_name: task-app
     restart: unless-stopped
     networks:
       edge:
         aliases:
-          # Camouflage: NPM proxy host targets `plane-app`. The alias `plane`
+          # Camouflage: NPM proxy host targets `task-app`. The alias `task`
           # exists for symmetry with cloud's `cloud-web` naming and so any
           # future internal cross-stack call uses the camouflage name, not
           # vikunja-anything. ADR-002.
-          - plane
+          - task
     depends_on:
-      plane-db:
+      task-db:
         condition: service_healthy
     environment:
       # --- public-facing URL ---
       # Vikunja burns this into JS bundles + email links + OIDC redirect URIs.
       # Must be the exact external https URL, no trailing slash.
-      VIKUNJA_SERVICE_PUBLICURL: "https://plane.${DOMAIN}"
+      VIKUNJA_SERVICE_PUBLICURL: "https://task.${DOMAIN}"
 
       # --- service ---
       VIKUNJA_SERVICE_INTERFACE: "0.0.0.0:3456"
@@ -59,7 +59,7 @@ services:
 
       # --- database ---
       VIKUNJA_DATABASE_TYPE: "postgres"
-      VIKUNJA_DATABASE_HOST: "plane-db:5432"
+      VIKUNJA_DATABASE_HOST: "task-db:5432"
       VIKUNJA_DATABASE_DATABASE: "vikunja"
       VIKUNJA_DATABASE_USER: "vikunja"
       VIKUNJA_DATABASE_PASSWORD: "${POSTGRES_PASSWORD}"
@@ -68,14 +68,14 @@ services:
       # --- OIDC: Authelia ---
       # Provider key in URL is `authelia` (lowercase). Authelia's redirect_uri
       # in stacks/authelia/configuration.yml.template MUST match exactly:
-      # https://plane.${DOMAIN}/auth/openid/authelia
+      # https://task.${DOMAIN}/auth/openid/authelia
       VIKUNJA_AUTH_LOCAL_ENABLED: "false"     # OIDC-only — no email/password.
       VIKUNJA_AUTH_OPENID_ENABLED: "true"
-      VIKUNJA_AUTH_OPENID_REDIRECTURL: "https://plane.${DOMAIN}/auth/openid/"
+      VIKUNJA_AUTH_OPENID_REDIRECTURL: "https://task.${DOMAIN}/auth/openid/"
       VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_NAME: "Single Sign-On"
       VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_AUTHURL: "https://auth.${DOMAIN}"
       VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_LOGOUTURL: "https://auth.${DOMAIN}/logout"
-      VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_CLIENTID: "plane"
+      VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_CLIENTID: "task"
       VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_CLIENTSECRET: "${VIKUNJA_OIDC_CLIENT_SECRET}"
       VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHELIA_SCOPE: "openid profile email"
       # Email-based linking: if a Vikunja-local account exists (operator
@@ -89,7 +89,7 @@ services:
       VIKUNJA_MAILER_ENABLED: "false"
 
       # --- frontend bundle settings ---
-      VIKUNJA_FRONTEND_URL: "https://plane.${DOMAIN}"
+      VIKUNJA_FRONTEND_URL: "https://task.${DOMAIN}"
 
       # --- timezone (server-side timestamps; per-user TZ overrides this) ---
       VIKUNJA_SERVICE_TIMEZONE: "UTC"
@@ -97,8 +97,8 @@ services:
     volumes:
       # The single user-data bind. Vikunja stores attachments + avatars +
       # task imports here. Owned by uid 1000 (Vikunja's in-image user).
-      # ADR-001: under /srv/store/plane-*, single rsync target.
-      - /srv/store/plane-files:/app/vikunja/files:rw
+      # ADR-001: under /srv/store/task-*, single rsync target.
+      - /srv/store/task-files:/app/vikunja/files:rw
 
     healthcheck:
       # Vikunja's image is distroless — no shell, no wget. Use the binary's
@@ -113,11 +113,11 @@ services:
 
     mem_limit: 512m
 
-  plane-db:
+  task-db:
     # Pinned to 16.x to match cloud-db's major version — keeps the host's
     # pg_dump tooling consistent across stacks. See ADR-006 image-pin policy.
     image: postgres:16.6-alpine
-    container_name: plane-db
+    container_name: task-db
     restart: unless-stopped
     networks:
       - edge
@@ -137,7 +137,7 @@ services:
       # ADR-001: separate bind so pg_dump can target a known path; the
       # raw data dir is included in the rsync as a safety net but
       # pg_dump is the authoritative backup.
-      - /srv/store/plane-db:/var/lib/postgresql/data:rw
+      - /srv/store/task-db:/var/lib/postgresql/data:rw
 
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "vikunja", "-d", "vikunja"]

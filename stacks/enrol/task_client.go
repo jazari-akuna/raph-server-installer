@@ -1,28 +1,28 @@
-// plane_client.go — read-only "client" for the plane stack (Vikunja).
+// task_client.go — read-only "client" for the task stack (Vikunja).
 //
 // Vikunja's REST API is per-user authenticated and lacks an admin
 // "list-all-users / show-tasks-of-user-X" endpoint suitable for the admin
 // /users page. Rather than provisioning a privileged service-account JWT
 // inside Vikunja and rewriting the storage page around per-call auth,
 // we read the same data straight from Vikunja's Postgres via
-// `docker exec plane-db psql`. This mirrors the cloud integration which
+// `docker exec task-db psql`. This mirrors the cloud integration which
 // uses `docker exec cloud occ` for the same reason: enrol already has the
-// docker socket and the plane stack already exposes its DB to admin
+// docker socket and the task stack already exposes its DB to admin
 // inspection by virtue of being on the same host.
 //
 // Pattern:
-//   - PlaneClient holds the docker container name + db credentials path.
+//   - TaskClient holds the docker container name + db credentials path.
 //   - UserStats(email) returns (taskCount, attachmentBytes, lastActivity).
 //   - Silent-fallback on every failure mode (no container, no DB, no user,
 //     password missing, query timeout) → zero values + nil error. The admin
 //     /users page renders "—" for any zero value.
 //
-// Why "plane" everywhere despite the upstream being Vikunja: ADR-002
-// camouflage. External + internal naming is unified at "plane".
+// Why "task" everywhere despite the upstream being Vikunja: ADR-002
+// camouflage. External + internal naming is unified at "task".
 //
 // Threat model: enrol already has docker socket access (root-equivalent
 // on host, see stacks/enrol/docker-compose.yml banner). Reading
-// /opt/stacks/plane/.env for the DB password adds zero new attack
+// /opt/stacks/task/.env for the DB password adds zero new attack
 // surface. The psql invocation is parameterised via PG environment
 // variables (no shell-quoted SQL), so user-controlled email values
 // cannot escape into the query string.
@@ -46,13 +46,13 @@ import (
 // ---------------------------------------------------------------------------
 // types
 
-// PlaneClient queries Vikunja's Postgres via docker exec. Zero value is
-// not usable — call NewPlaneClient.
-type PlaneClient struct {
-	dbContainer string // e.g. "plane-db"
+// TaskClient queries Vikunja's Postgres via docker exec. Zero value is
+// not usable — call NewTaskClient.
+type TaskClient struct {
+	dbContainer string // e.g. "task-db"
 	dbName      string // e.g. "vikunja"
 	dbUser      string // e.g. "vikunja"
-	envFile     string // path to /opt/stacks/plane/.env (POSTGRES_PASSWORD lives here)
+	envFile     string // path to /opt/stacks/task/.env (POSTGRES_PASSWORD lives here)
 	timeout     time.Duration
 
 	// password is loaded lazily on first call and cached; the .env file
@@ -64,7 +64,7 @@ type PlaneClient struct {
 	cachedPwdAt time.Time
 }
 
-// NewPlaneClient constructs a client targeting the named container +
+// NewTaskClient constructs a client targeting the named container +
 // DB. envFile must contain `POSTGRES_PASSWORD=...` (the same file
 // docker-compose loads). Pass empty values to disable the client; every
 // method then short-circuits to zero values.
@@ -72,14 +72,14 @@ type PlaneClient struct {
 // Note the call signature has changed from Wave B (which took baseURL +
 // bearer-token) — Vikunja replaced Plane and the integration moved to
 // docker-exec + psql. Callers in main.go need updating accordingly.
-func NewPlaneClient(dbContainer, dbName, dbUser, envFile string) *PlaneClient {
+func NewTaskClient(dbContainer, dbName, dbUser, envFile string) *TaskClient {
 	envFile = strings.TrimSpace(envFile)
 	if envFile != "" {
 		// filepath.Clean("") returns "." — surface empty as empty so
 		// ready() can treat it correctly.
 		envFile = filepath.Clean(envFile)
 	}
-	return &PlaneClient{
+	return &TaskClient{
 		dbContainer: strings.TrimSpace(dbContainer),
 		dbName:      strings.TrimSpace(dbName),
 		dbUser:      strings.TrimSpace(dbUser),
@@ -89,7 +89,7 @@ func NewPlaneClient(dbContainer, dbName, dbUser, envFile string) *PlaneClient {
 }
 
 // ready reports whether enough is configured to issue a query.
-func (c *PlaneClient) ready() bool {
+func (c *TaskClient) ready() bool {
 	if c == nil {
 		return false
 	}
@@ -110,7 +110,7 @@ const passwordTTL = 5 * time.Minute
 // contract — the admin page degrades to zeros rather than 500-ing when
 // the env file is missing or the key isn't present yet (e.g. the plane
 // stack hasn't been deployed on this host).
-func (c *PlaneClient) password() string {
+func (c *TaskClient) password() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cachedPwd != "" && time.Since(c.cachedPwdAt) < passwordTTL {
@@ -147,10 +147,10 @@ func (c *PlaneClient) password() string {
 // ---------------------------------------------------------------------------
 // API
 
-// PlaneUserStats is the per-user roll-up the admin /users page renders
-// for the plane (Vikunja) columns. Zero values are surface-level: caller
+// TaskUserStats is the per-user roll-up the admin /users page renders
+// for the task (Vikunja) columns. Zero values are surface-level: caller
 // already knows the user from Authelia, this just decorates them.
-type PlaneUserStats struct {
+type TaskUserStats struct {
 	Tasks      int       // tasks created by the user
 	AttBytes   int64     // sum of file sizes for attachments owned by user
 	LastSeen   time.Time // max(users.updated, max(tasks.updated)) — best-effort
@@ -167,13 +167,13 @@ type PlaneUserStats struct {
 // directly is the path enrol already takes for cloud (`docker exec cloud
 // occ`); applying it here keeps the integration uniform and avoids
 // minting a service-account JWT in Vikunja that we'd have to rotate.
-func (c *PlaneClient) UserStats(ctx context.Context, email string) (PlaneUserStats, error) {
+func (c *TaskClient) UserStats(ctx context.Context, email string) (TaskUserStats, error) {
 	if !c.ready() || strings.TrimSpace(email) == "" {
-		return PlaneUserStats{}, nil
+		return TaskUserStats{}, nil
 	}
 	pwd := c.password()
 	if pwd == "" {
-		return PlaneUserStats{}, nil
+		return TaskUserStats{}, nil
 	}
 
 	// Local timeout if caller didn't bound the context; psql can hang if
@@ -230,19 +230,19 @@ LIMIT 1;
 	if err != nil {
 		// Common transient: container not running, password rotated,
 		// network blip. Silent fallback per banner.
-		return PlaneUserStats{}, nil
+		return TaskUserStats{}, nil
 	}
 	line := strings.TrimSpace(string(out))
 	if line == "" {
 		// Email isn't in Vikunja's users table — user has never logged
 		// in via OIDC. Distinct from "we got a row of zeros".
-		return PlaneUserStats{UserExists: false}, nil
+		return TaskUserStats{UserExists: false}, nil
 	}
 	fields := strings.Split(line, "|")
 	if len(fields) < 4 {
-		return PlaneUserStats{}, nil
+		return TaskUserStats{}, nil
 	}
-	stats := PlaneUserStats{UserExists: true}
+	stats := TaskUserStats{UserExists: true}
 	if v, err := strconv.Atoi(strings.TrimSpace(fields[0])); err == nil {
 		stats.Tasks = v
 	}
@@ -270,16 +270,16 @@ LIMIT 1;
 // ---------------------------------------------------------------------------
 // shims preserving the old call surface
 //
-// storage.go's `planeUserInfo` helper expects the old method names. To
+// storage.go's `taskUserInfo` helper expects the old method names. To
 // keep this PR's diff small and avoid coupling the rewrite to a storage.go
 // rewrite in the same commit, the old names below now thin-shim onto
 // UserStats. They will be removed in a follow-up once storage.go drops
 // the per-workspace fan-out.
 
-// errPlaneUnconfigured is kept as a sentinel for tests that previously
+// errTaskUnconfigured is kept as a sentinel for tests that previously
 // matched on error type. Plane integration now silently fails, so this is
 // only ever returned from explicitly-invalidated test cases.
-var errPlaneUnconfigured = errors.New("plane: not configured (Vikunja stack down or DB unreachable)")
+var errTaskUnconfigured = errors.New("task: not configured (Vikunja stack down or DB unreachable)")
 
 // stub vestige of the old REST-shaped client — kept so tests that wired
 // "plane is not deployed" survive without touching every call site.
@@ -289,16 +289,16 @@ type Workspace struct {
 	Slug string
 }
 
-// PlaneUser likewise, for the old `UserByEmail` shape. Only Email is
-// load-bearing and the planeUserInfo helper short-circuits when this is
+// TaskUser likewise, for the old `UserByEmail` shape. Only Email is
+// load-bearing and the taskUserInfo helper short-circuits when this is
 // returned with empty ID.
-type PlaneUser struct {
+type TaskUser struct {
 	ID         string
 	Email      string
 	LastActive time.Time
 }
 
-func (c *PlaneClient) ListWorkspaces(_ context.Context) ([]Workspace, error) {
+func (c *TaskClient) ListWorkspaces(_ context.Context) ([]Workspace, error) {
 	// Vikunja has no notion of workspaces. Return a single synthetic
 	// "all" workspace so storage.go's per-workspace loop runs once. The
 	// Slug "_all" is a private sentinel used by IssueCount/FileAssetBytes
@@ -309,7 +309,7 @@ func (c *PlaneClient) ListWorkspaces(_ context.Context) ([]Workspace, error) {
 	return []Workspace{{Slug: "_all", Name: "All", ID: "_all"}}, nil
 }
 
-func (c *PlaneClient) UserByEmail(ctx context.Context, email string) (*PlaneUser, error) {
+func (c *TaskClient) UserByEmail(ctx context.Context, email string) (*TaskUser, error) {
 	if !c.ready() || strings.TrimSpace(email) == "" {
 		return nil, nil
 	}
@@ -320,12 +320,12 @@ func (c *PlaneClient) UserByEmail(ctx context.Context, email string) (*PlaneUser
 	// We return the email itself as the ID so the per-workspace IssueCount
 	// / FileAssetBytes calls below can re-derive the user. The real user-id
 	// (bigint) lives only in the DB and isn't surfaced; that's fine because
-	// the only caller is planeUserInfo which threads ID into IssueCount,
+	// the only caller is taskUserInfo which threads ID into IssueCount,
 	// which we override below to ignore it.
-	return &PlaneUser{ID: email, Email: email, LastActive: stats.LastSeen}, nil
+	return &TaskUser{ID: email, Email: email, LastActive: stats.LastSeen}, nil
 }
 
-func (c *PlaneClient) IssueCount(ctx context.Context, _wsSlug, userID string) (int, error) {
+func (c *TaskClient) IssueCount(ctx context.Context, _wsSlug, userID string) (int, error) {
 	if !c.ready() {
 		return 0, nil
 	}
@@ -336,7 +336,7 @@ func (c *PlaneClient) IssueCount(ctx context.Context, _wsSlug, userID string) (i
 	return stats.Tasks, nil
 }
 
-func (c *PlaneClient) FileAssetBytes(ctx context.Context, _wsSlug, userID string) (int64, error) {
+func (c *TaskClient) FileAssetBytes(ctx context.Context, _wsSlug, userID string) (int64, error) {
 	if !c.ready() {
 		return 0, nil
 	}
@@ -347,7 +347,7 @@ func (c *PlaneClient) FileAssetBytes(ctx context.Context, _wsSlug, userID string
 	return stats.AttBytes, nil
 }
 
-func (c *PlaneClient) LastActivity(ctx context.Context, userID string) (time.Time, error) {
+func (c *TaskClient) LastActivity(ctx context.Context, userID string) (time.Time, error) {
 	if !c.ready() {
 		return time.Time{}, nil
 	}
@@ -363,10 +363,10 @@ func (c *PlaneClient) LastActivity(ctx context.Context, userID string) (time.Tim
 
 // requireConfigured is exposed for test scaffolding that wants to assert
 // the client is in "deployed mode" before issuing live queries.
-func (c *PlaneClient) requireConfigured() error {
+func (c *TaskClient) requireConfigured() error {
 	if c.ready() {
 		return nil
 	}
 	return fmt.Errorf("%w: container=%q db=%q user=%q env=%q",
-		errPlaneUnconfigured, c.dbContainer, c.dbName, c.dbUser, c.envFile)
+		errTaskUnconfigured, c.dbContainer, c.dbName, c.dbUser, c.envFile)
 }

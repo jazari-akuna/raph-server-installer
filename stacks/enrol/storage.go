@@ -62,8 +62,8 @@ type UserStorage struct {
 	// Plane API per-user counts (per ADR-005). Both default to 0 when
 	// Plane is not deployed yet OR the API token is missing OR the user
 	// hasn't logged into Plane yet (graceful fallback).
-	PlaneIssues   int
-	PlaneAttBytes int64
+	TaskCount   int
+	TaskAttBytes int64
 
 	// LastSeen is max(NC last_login, Plane last_active) — best-effort.
 	// Zero when both upstreams are unavailable.
@@ -79,9 +79,9 @@ type NCInfo struct {
 	LastLogin time.Time
 }
 
-// PlaneInfo aggregates the per-user Plane numbers the admin page renders.
-// Sourced from one or more PlaneClient API calls.
-type PlaneInfo struct {
+// TaskInfo aggregates the per-user Plane numbers the admin page renders.
+// Sourced from one or more TaskClient API calls.
+type TaskInfo struct {
 	Issues   int
 	AttBytes int64
 	LastSeen time.Time
@@ -126,10 +126,10 @@ type storageUserSpec struct {
 // GB; 0 = unlimited which renders as "—" in the template). Falls back to
 // 50 GB when state.json is missing/unparseable.
 //
-// planeClient may be nil — in that case the Plane columns silently stay
+// taskClient may be nil — in that case the Plane columns silently stay
 // at their zero values (rendered as "—" by the template). This is the
 // expected state during Wave B (before Plane itself is deployed).
-func storageSnapshot(cfg config, users []storageUserSpec, planeClient *PlaneClient) StorageInfo {
+func storageSnapshot(cfg config, users []storageUserSpec, taskClient *TaskClient) StorageInfo {
 	si := StorageInfo{Root: "/srv/store"}
 	var fs syscall.Statfs_t
 	if err := syscall.Statfs(si.Root, &fs); err == nil {
@@ -156,11 +156,11 @@ func storageSnapshot(cfg config, users []storageUserSpec, planeClient *PlaneClie
 		}
 
 		// Plane API. Silent fallback on every failure mode (no client,
-		// no token, user not in Plane, API down, …) — see PlaneInfo
+		// no token, user not in Plane, API down, …) — see TaskInfo
 		// helper docs.
-		if pi, err := planeUserInfo(planeClient, u.Email); err == nil {
-			us.PlaneIssues = pi.Issues
-			us.PlaneAttBytes = pi.AttBytes
+		if pi, err := taskUserInfo(taskClient, u.Email); err == nil {
+			us.TaskCount = pi.Issues
+			us.TaskAttBytes = pi.AttBytes
 			if !pi.LastSeen.IsZero() && pi.LastSeen.After(us.LastSeen) {
 				us.LastSeen = pi.LastSeen
 			}
@@ -356,13 +356,13 @@ func nextcloudUserInfo(name string) (NCInfo, error) {
 // Plane per-user info
 //
 // Aggregates ListWorkspaces + UserByEmail + per-workspace IssueCount /
-// FileAssetBytes into a single PlaneInfo row. Silent-fallback on every
+// FileAssetBytes into a single TaskInfo row. Silent-fallback on every
 // edge: nil client, empty token, user-not-in-Plane, API down. The admin
 // page's columns degrade to "—" rather than 500-ing.
 
-func planeUserInfo(client *PlaneClient, email string) (PlaneInfo, error) {
+func taskUserInfo(client *TaskClient, email string) (TaskInfo, error) {
 	if client == nil || !client.ready() || email == "" {
-		return PlaneInfo{}, nil
+		return TaskInfo{}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -370,14 +370,14 @@ func planeUserInfo(client *PlaneClient, email string) (PlaneInfo, error) {
 	user, err := client.UserByEmail(ctx, email)
 	if err != nil || user == nil || user.ID == "" {
 		// User isn't in Plane yet, or API is down — render zeros.
-		return PlaneInfo{}, nil
+		return TaskInfo{}, nil
 	}
 	workspaces, err := client.ListWorkspaces(ctx)
 	if err != nil {
-		return PlaneInfo{}, nil
+		return TaskInfo{}, nil
 	}
 
-	var info PlaneInfo
+	var info TaskInfo
 	for _, ws := range workspaces {
 		if n, err := client.IssueCount(ctx, ws.Slug, user.ID); err == nil {
 			info.Issues += n
