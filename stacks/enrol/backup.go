@@ -157,11 +157,16 @@ var backupRecipes = []backupRecipe{
 		Paths:        []string{"/srv/store/task-files"},
 	},
 	{
-		ID:           "authelia",
-		Display:      "Authelia (SSO)",
-		Restorable:   true,
-		StopServices: []string{"authelia"},
-		Paths:        []string{"/opt/stacks/authelia/data", "/opt/stacks/authelia/users_db", "/opt/stacks/authelia/secrets"},
+		// Authelia is NOT stopped during backup. Sessions live in-memory
+		// (no Redis); a restart would force-logout every active user on
+		// every nightly + on-demand snapshot. The users_database.yml file
+		// is rewritten under enrol's mutex via single truncate+write, so a
+		// mid-write capture is unlikely; if it ever happens, the next
+		// nightly captures a clean copy. See ADR-010.
+		ID:         "authelia",
+		Display:    "Authelia (SSO)",
+		Restorable: true,
+		Paths:      []string{"/opt/stacks/authelia/data", "/opt/stacks/authelia/users_db", "/opt/stacks/authelia/secrets"},
 	},
 	{
 		ID:         "ingress",

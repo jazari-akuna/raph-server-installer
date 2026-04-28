@@ -192,6 +192,12 @@ This is **complementary** to the laptop-pull layer in `docs/backups.md`, not a r
 - Pre-restore is tagged `pre_restore` and retention-bound to the last 3 — bounded disk cost, unbounded human safety.
 - Audit-log row for `backup.restore` records the pre-restore snapshot id explicitly so the rollback path is one-step.
 
+**Why no `StopServices` on the `authelia` recipe** (despite live edits to `users_database.yml`).
+
+- Authelia's session storage is in-memory by default and the project does not run Redis on this 2 GB VPS — so `docker compose stop authelia` for the snapshot would force-logout every active SSO user on every nightly + on-demand backup. Unacceptable UX for a 1-second consistency win.
+- `users_database.yml` is rewritten under enrol's mutex via a single truncate+write (`UsersDB.flush` in `stacks/enrol/users.go`); restic captures the file in one read, so the chance of catching a torn write is small. If a snapshot ever does land mid-write the next nightly captures a clean copy, and `pre_restore` snapshots are also taken from the live state — same trade-off.
+- Adding Redis purely to make this stop "free" was considered and rejected: +1 container, +1 image on the quarterly bump audit, +1 hard-fail dependency for SSO. Not worth it for a 2-admin home setup where Authelia restarts are otherwise quarterly.
+
 **Why `enrol` is backup-only, not restore-able from the UI.**
 
 - Restoring enrol-self while enrol is serving the restore request would kill the SSE connection mid-stream and almost certainly leave a half-state on disk.
