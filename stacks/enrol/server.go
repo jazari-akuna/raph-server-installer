@@ -1459,12 +1459,16 @@ func (s *server) findPeerByName(name string) (peer, *parsedConf, error) {
 
 func (s *server) handlePeerDetail(w http.ResponseWriter, r *http.Request, name string) {
 	csrf := ensureCSRF(w, r)
-	p, pc, err := s.findPeerByName(name)
+	p, _, err := s.findPeerByName(name)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	clientConf := renderClientConf(p, pc, s.cfg)
+	clientConf, _, err := s.effectiveClientConf(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	help, helpErr := s.buildSetupHelp(r, p, clientConf)
 	if helpErr != nil {
 		log.Printf("buildSetupHelp %s: %v (rendering without QR)", p.Name, helpErr)
@@ -1549,27 +1553,34 @@ func (s *server) handleDeletePeer(w http.ResponseWriter, r *http.Request, name s
 	http.Redirect(w, r, "/peers", http.StatusSeeOther)
 }
 
-func (s *server) handleDownloadConf(w http.ResponseWriter, r *http.Request, name string) {
+// effectiveClientConf returns the rendered .conf for a peer, preferring
+// the on-disk archive (which has the real PrivateKey written at create
+// time) over re-rendering from gw0.conf (which would emit the
+// "<PRIVATE_KEY_NOT_AVAILABLE_AFTER_CREATION>" placeholder, causing the
+// AmneziaWG mobile parser to fail with "incorrect key length"). Returns
+// the second value true iff the archive was used (caller may want to
+// surface a "re-create or upload .conf" hint when false + no live key).
+func (s *server) effectiveClientConf(name string) (string, bool, error) {
 	if archiveExists(s.cfg, name) {
 		if b, err := archiveRead(s.cfg, name); err == nil {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Header().Set("Content-Disposition",
-				fmt.Sprintf(`attachment; filename="%s.conf"`, name))
-			if _, err := w.Write(b); err != nil {
-				log.Printf("download conf %s: write failed: %v", name, err)
-				return
-			}
-			return
+			return string(b), true, nil
 		} else {
 			log.Printf("archive read %s: %v (falling back to render)", name, err)
 		}
 	}
 	p, pc, err := s.findPeerByName(name)
 	if err != nil {
+		return "", false, err
+	}
+	return renderClientConf(p, pc, s.cfg), false, nil
+}
+
+func (s *server) handleDownloadConf(w http.ResponseWriter, r *http.Request, name string) {
+	conf, _, err := s.effectiveClientConf(name)
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	conf := renderClientConf(p, pc, s.cfg)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="%s.conf"`, name))
@@ -1662,12 +1673,11 @@ func looksLikePeerConf(b []byte) bool {
 }
 
 func (s *server) handleQR(w http.ResponseWriter, r *http.Request, name string) {
-	p, pc, err := s.findPeerByName(name)
+	conf, _, err := s.effectiveClientConf(name)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	conf := renderClientConf(p, pc, s.cfg)
 	out, err := qrencode(conf)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
