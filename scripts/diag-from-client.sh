@@ -154,6 +154,35 @@ if ! modprobe amneziawg 2>&1 | tee -a "$REPORT"; then
 fi
 modinfo amneziawg 2>&1 | head -5 | tee -a "$REPORT"
 out "  amneziawg module loaded OK"
+
+# Step d.5: explicit userspace-binary check. The kernel module
+# (amneziawg-dkms) and the userspace tools (amneziawg-tools) are
+# separate packages — having one without the other is possible if a
+# prior partial install left things half-done. Don't proceed unless
+# BOTH are on PATH.
+MISSING=()
+command -v awg       >/dev/null 2>&1 || MISSING+=(awg)
+command -v awg-quick >/dev/null 2>&1 || MISSING+=(awg-quick)
+if (( ${#MISSING[@]} > 0 )); then
+  out "  userspace binaries missing: ${MISSING[*]} — re-installing amneziawg-tools"
+  apt-get install -y --reinstall amneziawg-tools 2>&1 | tail -8 | tee -a "$REPORT"
+  for b in "${MISSING[@]}"; do
+    if ! command -v "$b" >/dev/null 2>&1; then
+      out "ERROR: ${b} still not on PATH after reinstall."
+      out "       Diagnostics:"
+      out "       - dpkg -l amneziawg-tools:"
+      dpkg -l amneziawg-tools 2>&1 | tail -3 | tee -a "$REPORT"
+      out "       - dpkg -L amneziawg-tools (file list):"
+      dpkg -L amneziawg-tools 2>&1 | head -10 | tee -a "$REPORT"
+      out "       - apt-cache policy amneziawg-tools:"
+      apt-cache policy amneziawg-tools 2>&1 | head -10 | tee -a "$REPORT"
+      out "       Likely cause: ppa:amnezia/ppa has no candidate for your"
+      out "       Ubuntu codename. Confirm with: lsb_release -cs"
+      out "       (PPA supports noble + jammy; older releases do not have packages.)"
+      exit 4
+    fi
+  done
+fi
 run 'awg --version'
 run 'awg-quick --help 2>&1 | head -3 || true'
 
