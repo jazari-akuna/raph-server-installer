@@ -92,103 +92,135 @@ PEER_PUB="$(awk '/^\[Peer\]/{p=1;next} p && /^PublicKey/ {gsub(/PublicKey *= */,
 out "peer public key (server identity): ${PEER_PUB:0:16}…"
 
 # ----- 2. install AmneziaWG ------------------------------------------------
-log "install AmneziaWG kernel module + tools (idempotent — safe on a fresh box)"
+log "install AmneziaWG (kernel module if available, userspace fallback otherwise)"
 RUNNING_KERNEL="$(uname -r)"
+CODENAME="$(lsb_release -cs 2>/dev/null || awk -F= '/UBUNTU_CODENAME/{print $2}' /etc/os-release | tr -d '\"')"
 out "  running kernel: ${RUNNING_KERNEL}"
+out "  ubuntu codename: ${CODENAME:-<unknown>}"
 
-# Step a: ensure add-apt-repository exists. Minimal Ubuntu cloud images
-# don't ship software-properties-common.
+# ppa:amnezia/ppa publishes packages for these series only:
+#   trusty xenial bionic focal jammy noble oracular plucky
+# (verified at https://launchpad.net/~amnezia/+archive/ubuntu/ppa).
+# Anything else (questing 25.10, future releases) — go straight to source build.
+PPA_SUPPORTED="trusty xenial bionic focal jammy noble oracular plucky"
+USE_PPA=0
+case " $PPA_SUPPORTED " in *" ${CODENAME} "*) USE_PPA=1 ;; esac
+
+# Ensure 'universe' is enabled (provides dkms, golang-go, build-essential
+# on minimal images where it's disabled by default).
 if ! command -v add-apt-repository >/dev/null 2>&1; then
   out "  installing software-properties-common (provides add-apt-repository)"
   apt-get update -qq
   apt-get install -y software-properties-common 2>&1 | tail -3 | tee -a "$REPORT"
 fi
+out "  enabling universe (provides dkms, golang-go, build-essential)"
+add-apt-repository -y universe 2>&1 | tail -3 | tee -a "$REPORT" || true
+apt-get update -qq
 
-# Step b: ensure ppa:amnezia/ppa is enabled.
-if ! grep -rq 'amnezia' /etc/apt/sources.list.d/ 2>/dev/null; then
-  out "  adding ppa:amnezia/ppa (kernel module + tools live here)"
-  add-apt-repository -y ppa:amnezia/ppa 2>&1 | tail -3 | tee -a "$REPORT"
-  apt-get update 2>&1 | tail -3 | tee -a "$REPORT"
-fi
+INSTALL_OK=0  # set to 1 once awg + awg-quick are both on PATH
 
-# Step c: install matching headers + DKMS toolchain + AmneziaWG itself.
-# Order matters: if amneziawg-dkms's postinst runs before headers are
-# present, the build fails and the package is "installed" but the module
-# isn't loadable. Headers + dkms first, then the AmneziaWG packages.
-out "  installing linux-headers-${RUNNING_KERNEL} + build-essential + dkms"
-if ! apt-get install -y \
-       "linux-headers-${RUNNING_KERNEL}" build-essential dkms 2>&1 | tail -5 | tee -a "$REPORT"; then
-  out "ERROR: could not install linux-headers-${RUNNING_KERNEL}. Likely cause: kernel was upgraded since last boot — REBOOT and re-run."
-  exit 2
-fi
-out "  installing amneziawg-tools + amneziawg-dkms"
-if ! apt-get install -y amneziawg-tools amneziawg-dkms 2>&1 | tail -8 | tee -a "$REPORT"; then
-  out "ERROR: apt install of amneziawg packages failed. Check the apt output above."
-  exit 2
-fi
-
-# Step d: ensure DKMS actually built the module + can be loaded. The
-# postinst hook sometimes exits 0 even when the build failed — explicit
-# autoinstall + modinfo + modprobe gives us the canonical answer.
-out "  ensuring DKMS module built + loaded"
-dkms autoinstall 2>&1 | tail -5 | tee -a "$REPORT" || true
-if ! modinfo amneziawg >/dev/null 2>&1; then
-  out "ERROR: amneziawg kernel module is not available after install."
-  out "       Most common causes:"
-  out "         1) Kernel was upgraded since last boot — reboot and re-run."
-  out "         2) linux-headers-${RUNNING_KERNEL} couldn't be installed — your kernel"
-  out "            may be from a non-standard source (HWE, mainline PPA)."
-  out "       Last 30 lines of the most recent DKMS build log:"
-  LATEST="$(ls -1t /var/lib/dkms/amneziawg/*/build/make.log 2>/dev/null | head -n1 || true)"
-  if [[ -n "$LATEST" ]]; then
-    tail -n 30 "$LATEST" 2>&1 | tee -a "$REPORT"
-  else
-    out "       (no /var/lib/dkms/amneziawg/*/build/make.log found)"
+# ===== Path A: PPA + DKMS kernel module (preferred — fastest) ==============
+if [[ $USE_PPA -eq 1 ]]; then
+  log "path A: ppa:amnezia/ppa + DKMS kernel module"
+  if ! grep -rq 'amnezia' /etc/apt/sources.list.d/ 2>/dev/null; then
+    out "  adding ppa:amnezia/ppa"
+    add-apt-repository -y ppa:amnezia/ppa 2>&1 | tail -3 | tee -a "$REPORT"
+    apt-get update 2>&1 | tail -3 | tee -a "$REPORT"
   fi
-  exit 3
-fi
-if ! modprobe amneziawg 2>&1 | tee -a "$REPORT"; then
-  out "ERROR: modprobe amneziawg failed. dmesg may have details."
-  dmesg | tail -20 | tee -a "$REPORT" || true
-  exit 3
-fi
-modinfo amneziawg 2>&1 | head -5 | tee -a "$REPORT"
-out "  amneziawg module loaded OK"
 
-# Step d.5: explicit userspace-binary check. The kernel module
-# (amneziawg-dkms) and the userspace tools (amneziawg-tools) are
-# separate packages — having one without the other is possible if a
-# prior partial install left things half-done. Don't proceed unless
-# BOTH are on PATH.
-MISSING=()
-command -v awg       >/dev/null 2>&1 || MISSING+=(awg)
-command -v awg-quick >/dev/null 2>&1 || MISSING+=(awg-quick)
-if (( ${#MISSING[@]} > 0 )); then
-  out "  userspace binaries missing: ${MISSING[*]} — re-installing amneziawg-tools"
-  apt-get install -y --reinstall amneziawg-tools 2>&1 | tail -8 | tee -a "$REPORT"
-  for b in "${MISSING[@]}"; do
-    if ! command -v "$b" >/dev/null 2>&1; then
-      out "ERROR: ${b} still not on PATH after reinstall."
-      out "       Diagnostics:"
-      out "       - dpkg -l amneziawg-tools:"
-      dpkg -l amneziawg-tools 2>&1 | tail -3 | tee -a "$REPORT"
-      out "       - dpkg -L amneziawg-tools (file list):"
-      dpkg -L amneziawg-tools 2>&1 | head -10 | tee -a "$REPORT"
-      out "       - apt-cache policy amneziawg-tools:"
-      apt-cache policy amneziawg-tools 2>&1 | head -10 | tee -a "$REPORT"
-      out "       Likely cause: ppa:amnezia/ppa has no candidate for your"
-      out "       Ubuntu codename. Confirm with: lsb_release -cs"
-      out "       (PPA supports noble + jammy; older releases do not have packages.)"
-      exit 4
+  out "  installing linux-headers-${RUNNING_KERNEL} + build-essential + dkms"
+  if apt-get install -y \
+       "linux-headers-${RUNNING_KERNEL}" build-essential dkms 2>&1 | tail -5 | tee -a "$REPORT"; then
+    out "  installing amneziawg-tools + amneziawg-dkms"
+    if apt-get install -y amneziawg-tools amneziawg-dkms 2>&1 | tail -8 | tee -a "$REPORT"; then
+      dkms autoinstall 2>&1 | tail -5 | tee -a "$REPORT" || true
+      if modinfo amneziawg >/dev/null 2>&1 && modprobe amneziawg 2>&1 | tee -a "$REPORT"; then
+        if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then
+          INSTALL_OK=1
+          out "  path A succeeded — kernel module loaded, userspace tools on PATH"
+        else
+          out "  path A: kernel module loaded but userspace binaries missing — falling back"
+        fi
+      else
+        out "  path A: DKMS build did not yield a loadable module — falling back to userspace"
+      fi
+    else
+      out "  path A: amneziawg-{tools,dkms} apt install failed — falling back to source"
     fi
-  done
+  else
+    out "  path A: linux-headers-${RUNNING_KERNEL} install failed — falling back to source"
+  fi
+fi
+
+# ===== Path B: build from source (works on any distro) =====================
+if [[ $INSTALL_OK -eq 0 ]]; then
+  log "path B: building amneziawg-tools + amneziawg-go from source"
+  out "  this works on any distro/kernel; ~30% slower than the kernel module."
+  out "  good enough for download-throughput diagnosis."
+  out "  installing build deps (build-essential, golang-go, git, libmnl-dev, pkg-config)"
+  # build-essential pulls in libc6-dev (string.h, arpa/inet.h) which a bare
+  # 'gcc' install on minimal Ubuntu images does NOT pull in.
+  apt-get install -y build-essential golang-go git libmnl-dev pkg-config 2>&1 | tail -3 | tee -a "$REPORT"
+
+  if ! command -v go >/dev/null 2>&1; then
+    out "ERROR: golang-go install did not yield 'go' on PATH. Cannot build amneziawg-go."
+    exit 5
+  fi
+
+  SRC_ROOT="/tmp/amnezia-src"
+  rm -rf "$SRC_ROOT"
+  mkdir -p "$SRC_ROOT"
+
+  out "  cloning + building amneziawg-tools (provides awg, awg-quick)"
+  if ! git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools "$SRC_ROOT/tools" 2>&1 | tail -3 | tee -a "$REPORT"; then
+    out "ERROR: git clone of amneziawg-tools failed."
+    exit 5
+  fi
+  if ! ( cd "$SRC_ROOT/tools/src" && make -j"$(nproc)" 2>&1 | tail -10 ) | tee -a "$REPORT"; then
+    out "ERROR: amneziawg-tools build failed."
+    exit 5
+  fi
+  ( cd "$SRC_ROOT/tools/src" && make install 2>&1 | tail -5 ) | tee -a "$REPORT"
+
+  out "  cloning + building amneziawg-go (userspace tunnel implementation)"
+  if ! git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go "$SRC_ROOT/go" 2>&1 | tail -3 | tee -a "$REPORT"; then
+    out "ERROR: git clone of amneziawg-go failed."
+    exit 5
+  fi
+  if ! ( cd "$SRC_ROOT/go" && make -j"$(nproc)" 2>&1 | tail -10 ) | tee -a "$REPORT"; then
+    out "ERROR: amneziawg-go build failed."
+    exit 5
+  fi
+  install -m 0755 "$SRC_ROOT/go/amneziawg-go" /usr/local/bin/amneziawg-go
+
+  # awg-quick auto-detects amneziawg-go from PATH when the kernel module
+  # isn't loaded (verified in awg-quick source: WG_QUICK_USERSPACE_IMPLEMENTATION
+  # defaults to "amneziawg-go"). No env-var setup required.
+
+  if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1 \
+       && command -v amneziawg-go >/dev/null 2>&1; then
+    INSTALL_OK=1
+    out "  path B succeeded — userspace tunnel implementation ready"
+  else
+    out "ERROR: source build finished but binaries are not on PATH:"
+    out "       awg=$(command -v awg || echo MISSING)"
+    out "       awg-quick=$(command -v awg-quick || echo MISSING)"
+    out "       amneziawg-go=$(command -v amneziawg-go || echo MISSING)"
+    exit 5
+  fi
+fi
+
+if [[ $INSTALL_OK -ne 1 ]]; then
+  out "ERROR: neither install path succeeded."
+  exit 5
 fi
 run 'awg --version'
-run 'awg-quick --help 2>&1 | head -3 || true'
+run 'command -v awg-quick && awg-quick --help 2>&1 | head -3 || true'
 
 # Step e: install the diagnostic helpers.
-out "  installing diagnostic helpers (iperf3, mtr-tiny, dnsutils, jq, speedtest-cli)"
-apt-get install -y iperf3 mtr-tiny dnsutils iputils-ping curl jq 2>&1 | tail -3 | tee -a "$REPORT"
+out "  installing diagnostic helpers (iperf3, mtr-tiny, dnsutils, jq, iproute2, speedtest-cli)"
+# iproute2 (ip), iputils-ping (ping), procps (sysctl), iptables (awg-quick fwmark) — minimal Ubuntu images often lack these.
+apt-get install -y iperf3 mtr-tiny dnsutils iputils-ping iproute2 procps iptables curl jq 2>&1 | tail -3 | tee -a "$REPORT"
 # speedtest-cli is in 'universe' on noble; tolerate its absence so the
 # script still produces an in-tunnel iperf3 report on a minimal image.
 if ! command -v speedtest-cli >/dev/null 2>&1; then
