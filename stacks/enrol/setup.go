@@ -1694,8 +1694,8 @@ const (
 	npmDefaultAdminPass  = "changeme"
 )
 
-// npmAdvFwdAuthTmpl — forward-auth advanced_config used by enrol/cloud/
-// console proxy hosts. The single `%s` slot is the X-Forward-Auth-Secret
+// npmAdvFwdAuthTmpl — forward-auth advanced_config used by enrol/console
+// proxy hosts. The single `%s` slot is the X-Forward-Auth-Secret
 // (filled at finalize time from /etc/raph-installer/enrol-forward-auth.secret
 // → ENROL_FORWARD_AUTH_SECRET). Without the header injection, an attacker
 // who lands on the docker bridge can curl 172.17.0.1:8080 directly with
@@ -1707,6 +1707,35 @@ const (
 const npmAdvFwdAuthTmpl = `include /snippets/authelia-location.conf;
 
 proxy_set_header X-Forward-Auth-Secret '%s';
+
+location / {
+    include /snippets/proxy.conf;
+    include /snippets/authelia-authrequest.conf;
+    proxy_set_header X-Forward-Auth-Secret '%[1]s';
+    proxy_pass $forward_scheme://$server:$port;
+}
+`
+
+// npmAdvFwdAuthCloudTmpl — same as npmAdvFwdAuthTmpl but with an extra
+// `location /share/` that proxies to copyparty WITHOUT the
+// authelia-authrequest gate. copyparty's share-link feature mints
+// token-keyed URLs (https://cloud.<domain>/share/<token>); the token
+// is the auth, so forcing recipients through Authelia would defeat
+// the point. The longer prefix `/share/` wins over `/` per nginx
+// location precedence, so authenticated traffic to anything else
+// still goes through the regular forward-auth gate.
+//
+// X-Forward-Auth-Secret is intentionally NOT set on the /share/
+// location — copyparty ignores that header (it's enrol's gate) and
+// omitting it makes the bypass unmistakable in the rendered config.
+const npmAdvFwdAuthCloudTmpl = `include /snippets/authelia-location.conf;
+
+proxy_set_header X-Forward-Auth-Secret '%s';
+
+location /share/ {
+    include /snippets/proxy.conf;
+    proxy_pass $forward_scheme://$server:$port;
+}
 
 location / {
     include /snippets/proxy.conf;
@@ -1861,6 +1890,7 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 		return errors.New("finalize/wire-npm: ENROL_FORWARD_AUTH_SECRET is empty — refusing to wire forgeable proxy hosts; re-run scripts/generate-enrol-forward-auth-secret.sh and retry finalize")
 	}
 	advFwdAuth := fmt.Sprintf(npmAdvFwdAuthTmpl, fwdSecret)
+	advFwdAuthCloud := fmt.Sprintf(npmAdvFwdAuthCloudTmpl, fwdSecret)
 	advAuthPortal := fmt.Sprintf(npmAdvAuthPortalTmpl, st.Domain, fwdSecret)
 
 	// The four proxy hosts. Order matches wire-npm-routes.sh; the
@@ -1913,7 +1943,10 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			SSLForced:             true,
 			HTTP2Support:          true,
 			HSTSEnabled:           true,
-			AdvancedConfig:        advFwdAuth,
+			// cloud uses the share-aware variant: /share/<token> URLs
+			// bypass authelia-authrequest so share-link recipients can
+			// open them without an Authelia account.
+			AdvancedConfig: advFwdAuthCloud,
 		},
 		{
 			DomainNames:           []string{"console." + st.Domain},

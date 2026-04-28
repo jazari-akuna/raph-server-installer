@@ -178,6 +178,15 @@ AUTH_HEADER=(-H "Authorization: Bearer $TOKEN")
 # secret twice).
 ADV_FWD_AUTH="$(printf 'include /snippets/authelia-location.conf;\n\nproxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n\nlocation / {\n    include /snippets/proxy.conf;\n    include /snippets/authelia-authrequest.conf;\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_pass $forward_scheme://$server:$port;\n}\n' "$FWD_SECRET" "$FWD_SECRET")"
 
+# Cloud variant: same as ADV_FWD_AUTH but with an extra `location /share/`
+# that proxies to copyparty WITHOUT authelia-authrequest. copyparty's
+# share-link feature (configured in stacks/cloud/conf/copyparty.conf via
+# `shr: /share`) issues token-keyed URLs at /share/<token>; the token IS
+# the auth, so forcing recipients through Authelia would defeat the point.
+# nginx prefix-match precedence means /share/ wins for share URLs and the
+# default `location /` still runs the auth gate for everything else.
+ADV_FWD_AUTH_CLOUD="$(printf 'include /snippets/authelia-location.conf;\n\nproxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n\nlocation /share/ {\n    include /snippets/proxy.conf;\n    proxy_pass $forward_scheme://$server:$port;\n}\n\nlocation / {\n    include /snippets/proxy.conf;\n    include /snippets/authelia-authrequest.conf;\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_pass $forward_scheme://$server:$port;\n}\n' "$FWD_SECRET" "$FWD_SECRET")"
+
 # Auth-portal template (two slots: domain for the bare-GET 302, then the
 # secret for /api/firstfactor → /login-intercept). Three location blocks:
 # bare-GET redirect, SSO post-rewrite, and a catch-all `location /` that
@@ -249,10 +258,10 @@ retrofit_one() {
 }
 
 rc=0
-retrofit_one "auth.$DOMAIN"    "$ADV_AUTH_PORTAL" || rc=1
-retrofit_one "enrol.$DOMAIN"   "$ADV_FWD_AUTH"    || rc=1
-retrofit_one "cloud.$DOMAIN"   "$ADV_FWD_AUTH"    || rc=1
-retrofit_one "console.$DOMAIN" "$ADV_FWD_AUTH"    || rc=1
+retrofit_one "auth.$DOMAIN"    "$ADV_AUTH_PORTAL"   || rc=1
+retrofit_one "enrol.$DOMAIN"   "$ADV_FWD_AUTH"      || rc=1
+retrofit_one "cloud.$DOMAIN"   "$ADV_FWD_AUTH_CLOUD" || rc=1
+retrofit_one "console.$DOMAIN" "$ADV_FWD_AUTH"      || rc=1
 
 if (( rc == 0 )); then
   log "done — all four production proxy hosts now inject X-Forward-Auth-Secret"
