@@ -145,3 +145,61 @@ Author `mail@raph.io`, standard `Co-Authored-By: Claude Opus 4.7 (1M context)` f
 **Storage tracking.** enrol's `TaskClient` (was `PlaneClient`) was rewritten from REST-with-bearer-token (Plane shape) to `docker exec task-db psql` (Vikunja shape). Vikunja's REST API is per-user-authenticated and lacks an admin "list all users / show tasks for user X" endpoint, so the DB-direct path is the only practical option. Mirrors the cloud integration's `docker exec cloud occ` pattern.
 
 **Backups.** Single `pg_dump` of the task-db container + rsync of `/srv/store/task-files`. The old `/srv/store/plane-{db,minio,mq,logs}` paths from the Plane-era 14-service stack were wiped during the Vikunja swap; the subsequent `plane-*` → `task-*` rename was a clean directory `mv` since Vikunja had no user data yet.
+
+---
+
+## ADR-010 — admin-side `/backup` snapshot UI (restic + nightly timer)
+
+**Decision.** Add an on-VPS rolling backup layer alongside the existing laptop-pull workflow (ADR-001 + `docs/backups.md`). One restic repo at `/srv/store/enrol-backups/restic`, one password file at `/etc/raph-installer/restic-password` (mode 0600 root), one systemd timer (`/etc/systemd/system/raph-backup.timer`) firing nightly at 03:00 UTC with `Persistent=true`, retention `--keep-daily 7`. Snapshots are tagged per stack — `cloud`, `task`, `authelia`, `ingress`, `enrol` — plus a retention-class tag (`daily`, `manual`, `pre_restore`). Operator-facing surface is `https://enrol.${DOMAIN}/backup`: per-stack last-snapshot table, "Backup all now" button, per-stack `[Restore…]` (typed-confirmation gated), and copy-paste off-host pull commands. Audit actions are `backup.create`, `backup.restore`, `backup.restore.rollback`, `backup.forget`, `backup.scheduled`.
+
+This is **complementary** to the laptop-pull layer in `docs/backups.md`, not a replacement. The laptop-pull workflow remains the off-host disaster-recovery story; this is the on-VPS rollback story.
+
+**Why this and not pure laptop-pull.**
+
+- The common ops case is "snapshot before I upgrade Vikunja" / "I just deleted the Authelia user-DB row, give me yesterday back". That's a one-click workflow, not "find your laptop, run rsync".
+- A scheduled local snapshot also gives the operator coverage for the long stretches when nobody's running the manual pull.
+- Off-host DR is still mandatory (VPS hardware loss, root compromise) — see ADR-001 and `docs/backups.md` Layer 2. The two layers solve different problems.
+
+**Why restic** (and not borg, kopia, rsnapshot).
+
+- Already referenced in `docs/backups.md` and `scripts/templates/restic-backup.sh`; operator already knows the CLI.
+- Deduplicates Postgres dumps and binary blobs in the same repo (zstd default); cross-stack dedup only works if everything lives in one repo.
+- Single Go binary, encrypted at rest, no daemon, no extra service to manage.
+
+**Why one repo with `--tag <stackid>`** (and not per-stack repos).
+
+- Cross-stack dedup. Two Postgres dumps share most of their internal pages — only one repo can see that.
+- One retention pass (`restic forget --tag daily --keep-daily 7 --prune`) covers everything.
+- Restic supports `--tag` filtering natively for both `snapshots` and `forget`.
+- One password to manage, not five.
+
+**Why systemd timer + `Persistent=true`** (and not an in-process Go cron inside enrol).
+
+- `Persistent=true` catches up missed runs after VPS downtime; an in-Go cron only fires while enrol is up and silently skips runs across a `docker compose down`.
+- `systemctl list-timers raph-backup.timer` is the canonical observability surface — operator already knows how to read it.
+- Restartable independently of enrol; an enrol crash-loop doesn't take the schedule down with it.
+- The timer's `ExecStart` invokes `enrol backup --scheduled --tag=daily` as a CLI subcommand against the running enrol container, so the same code path serves both the timer and the UI button.
+
+**Why no `/backup/download`** (raw HTTP file streaming).
+
+- Restic snapshots aren't single files — they're chunked content-addressed objects across `data/`, `index/`, `snapshots/`, `keys/`. No meaningful single-URL download.
+- The right off-host pattern is `rsync` of the whole repo dir or `restic copy` to a laptop-local repo. Both preserve the encryption envelope; both are integrity-checked end-to-end.
+- The UI shows the exact copy-paste commands (with the actual VPS hostname pre-filled) instead of pretending HTTP download is meaningful.
+
+**Why pre-restore auto-snapshot** (and not "the operator should remember to snapshot first").
+
+- Restore is destructive and the only "undo" is another restore. Forcing the operator to remember the snapshot-first step makes the dangerous case the default failure mode.
+- Pre-restore is tagged `pre_restore` and retention-bound to the last 3 — bounded disk cost, unbounded human safety.
+- Audit-log row for `backup.restore` records the pre-restore snapshot id explicitly so the rollback path is one-step.
+
+**Why `enrol` is backup-only, not restore-able from the UI.**
+
+- Restoring enrol-self while enrol is serving the restore request would kill the SSE connection mid-stream and almost certainly leave a half-state on disk.
+- The data that actually matters in enrol's snapshot (`/etc/raph-installer/oidc-*-client-secret`, `/opt/stacks/.env`) is shared with other stacks and recoverable manually over SSH from a fresh VPS — that's the documented procedure.
+
+**How to apply.** When adding a new stack:
+
+1. Append one entry to the `backupRecipes` slice in `stacks/enrol/backup.go` — `ID`, `Display`, `StopServices`, optional `PGDump`, `Paths`, `Restorable`. That's the entire integration; the timer, UI table row, retention pass, and off-host command rendering all pick it up automatically.
+2. Confirm the stack's persistent state lives under `/srv/store/<stackid>-*` per ADR-001 — recipes only back up host bind-mounts, not docker named volumes.
+3. If the stack uses Postgres, populate `PGDump`; the dump is streamed straight into restic via `--stdin-from-command`, never touching disk.
+4. Don't introduce a new audit action — reuse `backup.create` / `backup.restore` / `backup.restore.rollback` / `backup.forget` / `backup.scheduled`. The set is frozen.

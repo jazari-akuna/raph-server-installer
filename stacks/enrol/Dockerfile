@@ -79,6 +79,17 @@ FROM debian:trixie-slim
 #                           *.template file. Phase 1's apt install on
 #                           the host is unrelated — finalize runs inside
 #                           THIS container.
+#   restic                — deduplicating encrypted backup engine used by
+#                           the admin /backup page (ADR-010) and by the
+#                           nightly raph-backup.timer systemd unit. The
+#                           timer execs `enrol backup --scheduled
+#                           --tag=daily` inside this container so the
+#                           binary needs to be on PATH here. trixie ships
+#                           restic 0.16.x which is fine for our usage
+#                           (snapshot, restore, forget, dump, copy);
+#                           we don't pin a specific apt version so a
+#                           security update to the package picks up
+#                           automatically on the next image rebuild.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -95,6 +106,7 @@ RUN apt-get update \
         passwd \
         login \
         gettext-base \
+        restic \
  && rm -rf /var/lib/apt/lists/*
 
 # docker-compose-plugin isn't in the Debian apt repo (it's only published in

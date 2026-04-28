@@ -1005,24 +1005,13 @@ func (s *server) handleSetupEvents(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Run the finalize pipeline synchronously, emitting SSE events as we
-	// go. emit captures the writer + flusher in a closure so step funcs
-	// don't need to know about HTTP plumbing.
-	emit := func(event, payload string) {
-		writeFrame([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", event, payload)))
-	}
-	emitStatus := func(step, msg string) {
-		emit("status", fmt.Sprintf(`{"step":%q,"msg":%q}`, step, msg))
-	}
-	emitLog := func(line string) {
-		// Strip control chars + trim — caller should not need to escape.
-		emit("log", fmt.Sprintf(`{"line":%q}`, line))
-	}
-	emitError := func(step, msg string) {
-		emit("error", fmt.Sprintf(`{"step":%q,"msg":%q}`, step, msg))
-	}
+	// go. The emitter captures the writer + flusher in a closure so step
+	// funcs don't need to know about HTTP plumbing. Frame format /
+	// envelope shapes are defined once in sse.go and reused by /backup.
+	em := newSSEEmitter(writeFrame)
 
-	if err := s.runFinalize(ctx, emitStatus, emitLog); err != nil {
-		emitError(err.Step, err.Message)
+	if err := s.runFinalize(ctx, em.Status, em.Log); err != nil {
+		em.Error(err.Step, err.Message)
 		return
 	}
 	// Land on the enrol UI: it's gated by Authelia forward-auth, so the
@@ -1030,7 +1019,7 @@ func (s *server) handleSetupEvents(w http.ResponseWriter, r *http.Request) {
 	// creds the operator just set on /setup/admin) and then back to enrol.
 	// The bare apex (https://${DOMAIN}/) has no NPM proxy host wired, so
 	// redirecting there would 404.
-	emit("done", fmt.Sprintf(`{"redirect":"https://enrol.%s/"}`, s.cfg.domain))
+	em.Done(fmt.Sprintf(`{"redirect":"https://enrol.%s/"}`, s.cfg.domain))
 }
 
 // ---------------------------------------------------------------------------

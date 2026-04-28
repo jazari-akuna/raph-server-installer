@@ -30,11 +30,9 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -110,38 +108,22 @@ const passwordTTL = 5 * time.Minute
 // contract — the admin page degrades to zeros rather than 500-ing when
 // the env file is missing or the key isn't present yet (e.g. the plane
 // stack hasn't been deployed on this host).
+//
+// Parsing logic (quoting, first-match-wins, etc.) lives in envfile.go
+// so backup.go's pg_dump pipeline shares the EXACT same rules.
 func (c *TaskClient) password() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cachedPwd != "" && time.Since(c.cachedPwdAt) < passwordTTL {
 		return c.cachedPwd
 	}
-	f, err := os.Open(c.envFile)
+	val, err := readPostgresPassword(c.envFile)
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "POSTGRES_PASSWORD=") {
-			continue
-		}
-		val := strings.TrimPrefix(line, "POSTGRES_PASSWORD=")
-		// .env files in this repo sometimes single- or double-quote
-		// values; strip a single matched pair if present.
-		val = strings.TrimSpace(val)
-		if len(val) >= 2 {
-			if (val[0] == '\'' && val[len(val)-1] == '\'') ||
-				(val[0] == '"' && val[len(val)-1] == '"') {
-				val = val[1 : len(val)-1]
-			}
-		}
-		c.cachedPwd = val
-		c.cachedPwdAt = time.Now()
-		return val
-	}
-	return ""
+	c.cachedPwd = val
+	c.cachedPwdAt = time.Now()
+	return val
 }
 
 // ---------------------------------------------------------------------------

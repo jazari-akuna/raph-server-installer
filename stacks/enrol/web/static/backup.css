@@ -1,0 +1,79 @@
+/* enrol /backup — only what style.css doesn't already cover. */
+
+.backup-progress {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: #fffaf0;
+  border: 1px solid var(--warn);
+  border-left: 3px solid var(--warn);
+  padding: 0.6em 1em;
+  margin-bottom: 1em;
+}
+.backup-progress .step { color: var(--warn); font-weight: 600; }
+.backup-progress .step.err { color: var(--danger); }
+.backup-progress .log {
+  background: #fff;
+  border: 1px solid var(--border);
+  padding: 0.5em;
+  margin-top: 0.4em;
+  max-height: 12em;
+  overflow: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.82em;
+}
+
+table.backup-summary { width: auto; margin-bottom: 0.6em; }
+table.backup-summary th { padding-right: 1.2em; }
+form.backup-all { display: inline-block; margin-bottom: 1em; }
+
+td.row-actions { white-space: nowrap; }
+td.row-actions form { display: inline; margin-left: 0.3em; }
+td.row-actions button,
+td.row-actions .button { font-size: 0.85em; padding: 0.2em 0.6em; }
+
+.snapshots-row td { background: #fafaf7; }
+table.snapshots { font-size: 0.9em; margin-top: 0.4em; }
+table.snapshots .tag {
+  display: inline-block;
+  font-size: 0.78em;
+  background: #eef;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 0.4em;
+  margin-right: 0.2em;
+}
+
+dialog.restore-modal {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1.2em 1.5em;
+  max-width: 28em;
+  background: var(--bg);
+}
+dialog.restore-modal::backdrop { background: rgba(0, 0, 0, 0.4); }
+dialog.restore-modal h3 { margin-top: 0; }
+dialog.restore-modal .actions {
+  display: flex; gap: 0.6em; justify-content: flex-end; margin-top: 0.8em;
+}
+
+.cmd-wrap { position: relative; margin: 0.4em 0 0.8em; }
+.cmd-wrap pre.cmd {
+  background: #fff;
+  border: 1px solid var(--border);
+  padding: 0.55em 0.75em;
+  padding-right: 5em;
+  overflow-x: auto;
+  font-size: 0.85em;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.cmd-wrap .copy-btn {
+  position: absolute; top: 0.35em; right: 0.35em;
+  font-size: 0.78em; padding: 0.15em 0.6em;
+  background: #eee; color: var(--fg);
+}
+.cmd-wrap .copy-btn:hover { background: var(--accent); color: #fff; }

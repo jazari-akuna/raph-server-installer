@@ -221,6 +221,21 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/peers", requireAuth(s.cfg, false, s.withCSRF(s.handlePeers)))
 	mux.HandleFunc("/peers/", requireAuth(s.cfg, false, s.withCSRF(s.handlePeerSub)))
 
+	// Backup — admin-only. Mirrors /users registration. The five routes
+	// implement the on-VPS rolling-snapshot UI (ADR-010): GET /backup
+	// renders the recipe table + per-stack snapshot lists; the four
+	// POST/SSE routes drive create / restore / forget / progress-stream.
+	// Restore is gated by a typed-confirmation form field (see
+	// handleBackupRestore in backup.go); CSRF is enforced via withCSRF
+	// on every mutating verb. The SSE stream is GET-only by HTML5
+	// EventSource semantics; no CSRF needed since it's read-only and
+	// the auth gate already requires a valid Authelia session.
+	mux.HandleFunc("/backup", requireAdmin(s.cfg, s.handleBackupIndex))
+	mux.HandleFunc("/backup/create", requireAdmin(s.cfg, s.withCSRF(s.handleBackupCreate)))
+	mux.HandleFunc("/backup/restore", requireAdmin(s.cfg, s.withCSRF(s.handleBackupRestore)))
+	mux.HandleFunc("/backup/forget", requireAdmin(s.cfg, s.withCSRF(s.handleBackupForget)))
+	mux.HandleFunc("/backup/events", requireAdmin(s.cfg, s.handleBackupEvents))
+
 	return s.setupRouteGate(mux)
 }
 

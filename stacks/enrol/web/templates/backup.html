@@ -1,0 +1,229 @@
+{{template "head" .}}
+
+{{/* /backup — admin-only restic snapshot dashboard. The page-data wrapper
+     (viewerData) carries a *BackupPageView under .Backup; we guard with
+     {{with}} so the template degrades gracefully if Agent A's wiring isn't
+     in place yet (renders an em-dash placeholder block instead of crashing). */}}
+
+{{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+
+{{with .Backup}}
+
+{{if .InProgress}}
+<div id="backup-progress" data-op="{{.InProgress}}" class="backup-progress">
+  <strong>Backup in progress:</strong>
+  <span class="step">starting…</span>
+  <pre class="log" aria-live="polite"></pre>
+</div>
+{{else}}
+<div id="backup-progress" data-op="" hidden></div>
+{{end}}
+
+<section>
+  <h1>Backups</h1>
+  <p class="hint">
+    restic repo at <code>/srv/store/enrol-backups/restic</code>,
+    password at <code>/etc/raph-installer/restic-password</code>.
+    Nightly schedule + on-demand snapshots; retention is one week of daily
+    plus the last few manual / pre-restore points.
+  </p>
+
+  <table class="backup-summary">
+    <tbody>
+      <tr>
+        <th>Repo size</th>
+        <td>{{if .RepoSize}}{{.RepoSize}}{{else}}—{{end}}</td>
+        <th>Snapshots</th>
+        <td>{{if .RepoSnapCount}}{{.RepoSnapCount}}{{else}}0{{end}}</td>
+      </tr>
+      <tr>
+        <th>Next scheduled run</th>
+        <td colspan="3">{{if .NextScheduled}}{{.NextScheduled}}{{else}}—{{end}}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <form method="POST" action="/backup/create" class="backup-all">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="stack" value="all">
+    <button type="submit"{{if .InProgress}} disabled{{end}}>Backup all now</button>
+  </form>
+</section>
+
+<section>
+  <h2>per-stack snapshots</h2>
+  {{if .Recipes}}
+  <table>
+    <thead>
+      <tr>
+        <th>stack</th>
+        <th>last snapshot</th>
+        <th>size</th>
+        <th>action</th>
+      </tr>
+    </thead>
+    <tbody>
+    {{$csrf := .CSRF}}
+    {{$busy := .InProgress}}
+    {{range $r := .Recipes}}
+      <tr>
+        <td><strong>{{$r.Display}}</strong></td>
+        <td>{{if $r.LastSnapshotAt}}{{$r.LastSnapshotAt}}{{else}}—{{end}}</td>
+        <td>{{if $r.LastSnapshotSize}}{{$r.LastSnapshotSize}}{{else}}—{{end}}</td>
+        <td class="row-actions">
+          <form method="POST" action="/backup/create">
+            <input type="hidden" name="csrf" value="{{$csrf}}">
+            <input type="hidden" name="stack" value="{{$r.ID}}">
+            <button type="submit"{{if $busy}} disabled{{end}}>Backup</button>
+          </form>
+          {{if $r.Restorable}}
+          <button type="button" class="restore-open"
+            data-modal="restore-modal-{{$r.ID}}"{{if $busy}} disabled{{end}}>
+            Restore…
+          </button>
+          {{else}}
+          <span class="muted" title="enrol cannot restore itself; use SSH">
+            (restore: SSH only)
+          </span>
+          {{end}}
+          <a class="button snapshots-toggle"
+            href="/backup?expand={{$r.ID}}#snap-{{$r.ID}}">
+            Snapshots▾
+          </a>
+        </td>
+      </tr>
+      {{if $r.Snapshots}}
+      <tr id="snap-{{$r.ID}}" class="snapshots-row">
+        <td colspan="4">
+          <details open>
+            <summary>{{len $r.Snapshots}} snapshot(s) for <code>{{$r.ID}}</code></summary>
+            <table class="snapshots">
+              <thead>
+                <tr>
+                  <th>id</th>
+                  <th>created</th>
+                  <th>size</th>
+                  <th>tags</th>
+                  <th>action</th>
+                </tr>
+              </thead>
+              <tbody>
+              {{range $snap := $r.Snapshots}}
+                <tr>
+                  <td><code>{{$snap.ID}}</code></td>
+                  <td>{{$snap.CreatedAt}}</td>
+                  <td>{{$snap.Size}}</td>
+                  <td>
+                    {{range $t := $snap.Tags}}<span class="tag">{{$t}}</span> {{end}}
+                  </td>
+                  <td class="row-actions">
+                    {{if $r.Restorable}}
+                    <button type="button" class="restore-open"
+                      data-modal="restore-modal-{{$r.ID}}"
+                      data-snapshot="{{$snap.ID}}"{{if $busy}} disabled{{end}}>
+                      Restore
+                    </button>
+                    {{end}}
+                    <form method="POST" action="/backup/forget">
+                      <input type="hidden" name="csrf" value="{{$csrf}}">
+                      <input type="hidden" name="stack" value="{{$r.ID}}">
+                      <input type="hidden" name="snapshot" value="{{$snap.ID}}">
+                      <button type="submit" class="danger"
+                        {{if $busy}}disabled{{end}}
+                        onclick="return confirm('Forget snapshot {{$snap.ID}}? This cannot be undone.');">
+                        Forget
+                      </button>
+                    </form>
+                  </td>
+                </tr>
+              {{end}}
+              </tbody>
+            </table>
+          </details>
+        </td>
+      </tr>
+      {{end}}
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>no recipes registered.</p>
+  {{end}}
+</section>
+
+{{/* Restore confirmation modals — one per restorable recipe. The snapshot
+     hidden input is filled by JS from the clicked button's data-snapshot
+     attribute; if the button has none (the per-row [Restore…]) the server
+     restores the latest snapshot for that stack. */}}
+{{$csrf := .CSRF}}
+{{range $r := .Recipes}}
+  {{if $r.Restorable}}
+  <dialog id="restore-modal-{{$r.ID}}" class="restore-modal">
+    <form method="POST" action="/backup/restore">
+      <input type="hidden" name="csrf" value="{{$csrf}}">
+      <input type="hidden" name="stack" value="{{$r.ID}}">
+      <input type="hidden" name="snapshot" value="">
+      <h3>Restore <code>{{$r.ID}}</code></h3>
+      <p class="hint">
+        A pre-restore snapshot is taken automatically (rollback-safe).
+        The stack is briefly stopped during restore.
+      </p>
+      <p>Type <strong>{{$r.ID}}</strong> below to confirm:</p>
+      <label>
+        <input name="confirm" required pattern="^{{$r.ID}}$"
+          autocomplete="off" placeholder="{{$r.ID}}">
+      </label>
+      <div class="actions">
+        <button type="submit" class="danger">Restore</button>
+        <button type="button" onclick="this.closest('dialog').close()">
+          Cancel
+        </button>
+      </div>
+    </form>
+  </dialog>
+  {{end}}
+{{end}}
+
+<section>
+  <h2>off-host pull / restore commands</h2>
+  <details>
+    <summary>show copy-paste commands for laptop-side mirror + restore</summary>
+    <p class="hint">
+      The on-VPS repo is the rollback layer. For cold off-host disaster
+      recovery, mirror the repo to your laptop (rsync or restic copy) and
+      restore from there.
+    </p>
+
+    <h3># 1. Pull a copy from your laptop (rsync, fastest)</h3>
+    <div class="cmd-wrap">
+      <pre class="cmd">{{.OffHostHelp.RsyncCmd}}</pre>
+      <button type="button" class="copy-btn" data-copy="rsync">Copy</button>
+    </div>
+
+    <h3># 2. OR integrity-checked mirror via restic copy</h3>
+    <div class="cmd-wrap">
+      <pre class="cmd">{{.OffHostHelp.ResticCopyCmd}}</pre>
+      <button type="button" class="copy-btn" data-copy="copy">Copy</button>
+    </div>
+
+    <h3># 3. Restore a single stack from the local mirror</h3>
+    <div class="cmd-wrap">
+      <pre class="cmd">{{.OffHostHelp.ResticRestoreCmd}}</pre>
+      <button type="button" class="copy-btn" data-copy="restore">Copy</button>
+    </div>
+  </details>
+</section>
+
+{{else}}
+{{/* Backup field absent — render a stub so the page is still navigable
+     while Agent A's handler wiring lands. */}}
+<section>
+  <h1>Backups</h1>
+  <p class="warn">Backup view data not available — handler not yet wired.</p>
+</section>
+{{end}}
+
+<link rel="stylesheet" href="/static/backup.css">
+<script src="/static/backup.js" defer></script>
+
+{{template "tail" .}}

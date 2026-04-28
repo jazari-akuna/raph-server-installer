@@ -1,4 +1,157 @@
-# Backups — operator runbook
+# Backups — two complementary layers
+
+This box runs **two** backup layers. They solve different problems and
+both must be exercised. See ADR-010 (`docs/architecture-decisions.md`)
+for the design rationale.
+
+- **Layer 1 — On-VPS rolling snapshots** via the admin `/backup` page.
+  Quick rollback after a botched upgrade or a "I just deleted that"
+  moment. Lives on the VPS itself; gone if the VPS is gone.
+- **Layer 2 — Off-VPS disaster recovery** via the laptop-pull
+  workflow. Slower, manual, but the only thing that survives VPS
+  hardware loss or a root compromise.
+
+Skip to the section you need. The "When to use which" table at the
+boundary spells out the decision.
+
+---
+
+## Layer 1 — On-VPS rolling snapshots (admin `/backup` page)
+
+### What it is
+
+- A **restic** repo at `/srv/store/enrol-backups/restic` (mode 0700,
+  root-owned). Bind-mounted into enrol per ADR-001; survives
+  `docker compose down && up`.
+- A **nightly snapshot** of every stack via the host-side systemd
+  timer `/etc/systemd/system/raph-backup.timer`, fired at 03:00 UTC
+  with `Persistent=true` (catches up missed runs after VPS downtime).
+- **Retention**: `--keep-daily 7` (one week rolling) for scheduled
+  snapshots; `--keep-last 5` for `manual` (UI button) snapshots;
+  `--keep-last 3` for `pre_restore` (auto-taken before a restore).
+- **One-click "Backup all now"** and per-stack `[Restore…]` from
+  `https://enrol.${DOMAIN}/backup`. Restore is typed-confirmation
+  gated (operator types the stack id verbatim).
+- **Auto pre-restore snapshot** on every restore — destructive clicks
+  are recoverable. The pre-restore snapshot id is recorded in the
+  audit log row for `backup.restore`.
+
+### Repo layout
+
+The five v1 recipes (see `stacks/enrol/backup.go`):
+
+| Stack       | Tag        | Contains                                                 |
+|-------------|------------|----------------------------------------------------------|
+| `cloud`     | `cloud`    | `cloud-{data,config,apps}` + `pg_dump nextcloud`         |
+| `task`      | `task`     | `task-files` + `pg_dump vikunja`                         |
+| `authelia`  | `authelia` | `authelia/{data,users_db,secrets}` (briefly stopped)     |
+| `ingress`   | `ingress`  | `ingress/{data,letsencrypt}`                             |
+| `enrol`     | `enrol`    | `enrol-{launcher,peers-archive}` + `/etc/raph-installer` |
+
+Plus a retention-class tag on every snapshot:
+
+- `daily` — written by the systemd timer.
+- `manual` — written by the UI "Backup" buttons.
+- `pre_restore` — auto-written immediately before any restore.
+
+### When to use it
+
+- "I'm about to upgrade Vikunja, snapshot first" → click **Backup task**.
+- "I just deleted the project I wanted to keep" within the last 7 days
+  → click **Restore…** on yesterday's snapshot.
+- "Authelia user-DB is corrupt, give me yesterday back" → click
+  **Restore…** on the `authelia` row.
+
+### When NOT to use it
+
+- VPS hardware loss / Layerstack drops the box → repo lives **on** the
+  VPS. Use Layer 2.
+- Suspected root compromise → an attacker with VPS root has the restic
+  password too (`/etc/raph-installer/restic-password`). Use Layer 2.
+- "I want a copy on cold media for legal hold" → use Layer 2.
+
+### Schedule + observability
+
+```sh
+# When does the next nightly run fire?
+ssh <vps> "systemctl list-timers raph-backup.timer"
+
+# Did the last run succeed?
+ssh <vps> "systemctl status raph-backup.service"
+ssh <vps> "journalctl -u raph-backup.service -n 50"
+
+# What snapshots exist right now?
+ssh <vps> "RESTIC_PASSWORD_FILE=/etc/raph-installer/restic-password \
+           restic -r /srv/store/enrol-backups/restic snapshots"
+```
+
+The audit log (visible at `https://enrol.${DOMAIN}/audit`) records
+every `backup.create`, `backup.restore`, `backup.restore.rollback`,
+`backup.forget`, and `backup.scheduled` action.
+
+### Pull Layer 1 to your laptop (off-host sync)
+
+The `/backup` page expands a "Off-host pull / restore commands"
+section with these commands pre-filled with the actual VPS hostname.
+Substitute `<vps>` below with your SSH alias.
+
+```sh
+# Option A — rsync the entire restic repo dir
+rsync -aAXH --delete \
+    root@<vps>:/srv/store/enrol-backups/restic/ \
+    ./local-backup-mirror/
+
+# Option B — restic copy (integrity-checked, can copy into a different
+# repo with a different password). Run from the laptop:
+restic -r sftp:root@<vps>:/srv/store/enrol-backups/restic \
+       --password-file ~/.config/restic-raph/<vps>.passwd \
+       copy --to-repo /tmp/local-mirror \
+       --to-password-file ~/.config/restic-raph/local.passwd
+```
+
+Once mirrored locally, restore a single stack from the laptop:
+
+```sh
+restic -r ./local-backup-mirror snapshots --tag cloud
+restic -r ./local-backup-mirror restore <snapshot-id> \
+       --target /tmp/restored-cloud --tag cloud
+```
+
+The restic password file `/etc/raph-installer/restic-password` is
+required to decrypt the mirror — keep a copy in your password manager.
+
+### First-time restore drill
+
+Once a month, from the `/backup` UI:
+
+1. Take a manual snapshot of `task`.
+2. In Vikunja, create a throwaway project + a task.
+3. Click **Restore…** on the snapshot from step 1, type `task` in the
+   confirmation field.
+4. Reload `task.${DOMAIN}` — the throwaway project is gone, confirming
+   the restore worked.
+5. Confirm the audit log shows `backup.restore` with a `pre_restore`
+   snapshot id; click **Restore…** on that pre-restore snapshot to
+   verify the rollback path also works (the throwaway project is back).
+
+---
+
+## When to use which
+
+| Scenario                                     | Use                                                |
+|----------------------------------------------|----------------------------------------------------|
+| "I want yesterday's data back"               | Layer 1 — `/backup` page                           |
+| "I want last week's data back"               | Layer 1 — `/backup` page                           |
+| "I'm about to upgrade Nextcloud"             | Layer 1 — manual snapshot from `/backup`           |
+| "I want to restore on a fresh VPS"           | Layer 2 — laptop-pull                              |
+| "VPS hardware is gone"                       | Layer 2 — laptop-pull                              |
+| "I think the VPS was compromised"            | Layer 2 — laptop-pull (Layer 1 password is on-VPS) |
+| "I want both copies"                         | Pull Layer 1 to your laptop (commands above)       |
+| "Quarterly DR drill"                         | Layer 2 — full restore into a throwaway VM         |
+
+---
+
+## Layer 2 — Off-VPS disaster recovery (laptop-pull workflow)
 
 Operational runbook for the bind-mount + `pg_dump` backup workflow.
 Implements ADR-001 (`docs/architecture-decisions.md`): every stack's

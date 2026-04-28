@@ -1,0 +1,19 @@
+[Unit]
+Description=Nightly restic backup of all raph-server stacks
+Documentation=file:///opt/raph-server-installer/docs/backups.md
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+# Triggers the same Go code path as the UI "Backup all now" button.
+# Output goes to journald + enrol's audit log.
+ExecStart=/usr/bin/docker exec enrol /usr/local/bin/enrol backup --scheduled --tag=daily
+# Don't fail the unit if a single stack errors — the binary returns
+# non-zero on partial failure, but we still want subsequent runs to fire.
+SuccessExitStatus=0 1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

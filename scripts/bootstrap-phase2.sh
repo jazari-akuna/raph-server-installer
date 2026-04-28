@@ -347,6 +347,18 @@ else
   fi
 fi
 
+# ----------------------------------------------------------------
+# Backup timer: install systemd unit + initialise restic repo.
+# Idempotent — safe to re-run.
+# ----------------------------------------------------------------
+if [[ "${TEST_MODE:-0}" == "1" ]]; then
+  log "==> TEST_MODE: skipping install-backup-timer.sh"
+else
+  strict_step "install nightly backup timer"
+  log "[bootstrap-phase2] installing nightly backup timer..."
+  bash "$(dirname "$0")/install-backup-timer.sh"
+fi
+
 # ──────────────────────────────────────────────────────────────────────────
 # Step 6 — open port 80 for the setup wizard.
 # ──────────────────────────────────────────────────────────────────────────

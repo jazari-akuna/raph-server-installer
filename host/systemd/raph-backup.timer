@@ -1,0 +1,13 @@
+[Unit]
+Description=Trigger raph-backup.service nightly at 03:00 UTC
+Documentation=file:///opt/raph-server-installer/docs/backups.md
+
+[Timer]
+# 03:00 UTC every day. Persistent=true catches up missed runs after VPS downtime.
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+Unit=raph-backup.service
+
+[Install]
+WantedBy=timers.target

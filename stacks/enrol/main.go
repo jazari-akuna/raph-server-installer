@@ -110,6 +110,32 @@ type config struct {
 	taskDBName      string
 	taskDBUser      string
 	taskEnvFile     string
+
+	// Backup (admin /backup page + nightly systemd timer). All four
+	// resolve from env at startup so the same struct value drives the
+	// HTTP server AND the `enrol backup` CLI subcommand. Defaults match
+	// the bind-mount layout managed by scripts/bootstrap-phase2.sh:
+	//
+	//   backupRepoDir          — restic repository on /srv/store (rsync
+	//                            backup-friendly per ADR-008's bind-mount
+	//                            policy). Initialised by bootstrap.
+	//   backupPasswordFile     — root-owned 0600 file outside /srv/store
+	//                            so the password is NOT itself swept up
+	//                            into a snapshot.
+	//   backupResticBin        — restic binary path. Defaults to bare
+	//                            `restic` (resolved via PATH inside the
+	//                            container; the Dockerfile's apt-get
+	//                            install puts it at /usr/bin/restic).
+	//   backupRetentionDaily   — `--keep-daily` value passed to
+	//                            `restic forget` after every scheduled
+	//                            backup. Per-tag retention is computed
+	//                            in Go (snapshotsToForget); restic's
+	//                            own forget rules are not used so the
+	//                            math is unit-testable.
+	backupRepoDir        string
+	backupPasswordFile   string
+	backupResticBin      string
+	backupRetentionDaily int
 }
 
 func loadConfig() config {
@@ -163,7 +189,26 @@ func loadConfig() config {
 		taskDBName:      envOr("ENROL_TASK_DB_NAME", "vikunja"),
 		taskDBUser:      envOr("ENROL_TASK_DB_USER", "vikunja"),
 		taskEnvFile:     envOr("ENROL_TASK_ENV_FILE", "/opt/stacks/task/.env"),
+
+		backupRepoDir:        envOr("ENROL_BACKUP_REPO_DIR", "/srv/store/enrol-backups/restic"),
+		backupPasswordFile:   envOr("ENROL_BACKUP_PASSWORD_FILE", "/etc/raph-installer/restic-password"),
+		backupResticBin:      envOr("ENROL_BACKUP_RESTIC_BIN", "restic"),
+		backupRetentionDaily: atoiOr(envOr("ENROL_BACKUP_KEEP_DAILY", "7"), 7),
 	}
+}
+
+// atoiOr returns the integer parse of s, or def on any error / blank.
+// Used for env-driven config knobs where a malformed value should fall
+// back to the safe default rather than killing startup.
+func atoiOr(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // (resolveTaskAPIToken removed — Vikunja swap moved the integration
@@ -194,6 +239,15 @@ func resolveSetupToken() string {
 // main
 
 func main() {
+	// Subcommand routing. The systemd timer at host/systemd/raph-backup.*
+	// invokes `enrol backup --scheduled --tag=daily` inside this same
+	// container so the CLI shares one binary + one config struct with the
+	// HTTP server. Anything not recognised falls through to runServer().
+	if len(os.Args) > 1 && os.Args[1] == "backup" {
+		runBackupCLI(os.Args[2:])
+		return
+	}
+
 	cfg := loadConfig()
 	srv, err := newServer(cfg)
 	if err != nil {
