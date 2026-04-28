@@ -179,8 +179,12 @@ AUTH_HEADER=(-H "Authorization: Bearer $TOKEN")
 ADV_FWD_AUTH="$(printf 'include /snippets/authelia-location.conf;\n\nproxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n\nlocation / {\n    include /snippets/proxy.conf;\n    include /snippets/authelia-authrequest.conf;\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_pass $forward_scheme://$server:$port;\n}\n' "$FWD_SECRET" "$FWD_SECRET")"
 
 # Auth-portal template (two slots: domain for the bare-GET 302, then the
-# secret for /api/firstfactor → /login-intercept).
-ADV_AUTH_PORTAL="$(printf 'location = / {\n    if ($arg_rd = "") {\n        return 302 /?rd=https://enrol.%s/;\n    }\n    include conf.d/include/proxy.conf;\n}\n\nlocation = /api/firstfactor {\n    proxy_pass http://172.17.0.1:8080/login-intercept;\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    proxy_set_header X-Forwarded-Proto $scheme;\n    proxy_set_header X-Forwarded-Host $host;\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_http_version 1.1;\n}\n' "$DOMAIN" "$FWD_SECRET")"
+# secret for /api/firstfactor → /login-intercept). Three location blocks:
+# bare-GET redirect, SSO post-rewrite, and a catch-all `location /` that
+# proxies static assets (/static/js/*, /static/css/*, etc.) verbatim to
+# authelia. Without that catch-all NPM 404s on the SPA's static assets
+# and the login page renders as a blank black screen.
+ADV_AUTH_PORTAL="$(printf 'location = / {\n    if ($arg_rd = "") {\n        return 302 /?rd=https://enrol.%s/;\n    }\n    include conf.d/include/proxy.conf;\n}\n\nlocation = /api/firstfactor {\n    proxy_pass http://172.17.0.1:8080/login-intercept;\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    proxy_set_header X-Forwarded-Proto $scheme;\n    proxy_set_header X-Forwarded-Host $host;\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_http_version 1.1;\n}\n\nlocation / {\n    include conf.d/include/proxy.conf;\n}\n' "$DOMAIN" "$FWD_SECRET")"
 
 # ──────────────────────────────────────────────────────────────────────────
 # Walk the proxy-host list and PUT each match

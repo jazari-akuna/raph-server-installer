@@ -1723,6 +1723,14 @@ location / {
 // requireAuth path; without the header the new secret gate would 401).
 // All other $-prefixed identifiers are nginx variables and must remain
 // literal.
+//
+// Three location blocks, in nginx-precedence order:
+//   1. `location = /`   — exact match: redirect bare GETs to enrol.
+//   2. `location = /api/firstfactor` — exact match: SSO post-rewrite.
+//   3. `location /`     — prefix match (catch-all): every other authelia
+//      path (static/js, static/css, /api/*, /oidc/*, etc.) goes to the
+//      authelia upstream verbatim. Without this, NPM 404s on the SPA's
+//      static assets and the login page renders as a black blank page.
 const npmAdvAuthPortalTmpl = `location = / {
     if ($arg_rd = "") {
         return 302 /?rd=https://enrol.%s/;
@@ -1737,8 +1745,12 @@ location = /api/firstfactor {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-Host $host;
-    proxy_set_header X-Forward-Auth-Secret '%s';
+    proxy_set_header X-Forward-Auth-Secret '%[2]s';
     proxy_http_version 1.1;
+}
+
+location / {
+    include conf.d/include/proxy.conf;
 }
 `
 
