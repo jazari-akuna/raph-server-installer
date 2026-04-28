@@ -27,12 +27,18 @@ ListenPort = 51820
 # Tune downward only if PMTUD black-holes are observed.
 MTU = 1380
 
-# NAT MASQUERADE for 10.99.0.0/24 lives in /etc/ufw/before.rules (see
-# host/ufw/before.rules.fragment), spliced once at install time. That keeps
-# the NAT rule under ufw's reload model instead of fighting it from PostUp.
-# PostUp/PostDown are intentionally empty — nothing per-up needs to toggle.
-# PostUp =
-# PostDown =
+# NAT MASQUERADE for 10.99.0.0/24. We program this from PostUp/PostDown
+# rather than relying solely on /etc/ufw/before.rules — the ufw fragment
+# is also installed (defence in depth + survives an operator-driven `ufw
+# enable`), but ufw is INACTIVE on a default install (bootstrap stages
+# rules but doesn't enable, to avoid locking docker out before ufw-docker
+# is wired). Without this PostUp, peers connect successfully but get no
+# DNS / outbound — the kernel routes their packets to ens3 (or whatever
+# the default-route iface is) with the source still 10.99.0.X, the ISP
+# drops them, and the user sees "DNS_PROBE" errors. The egress iface is
+# detected at up-time via `ip route` so this works on any VPS shape.
+PostUp = iface=$(ip -o route show default | awk '{print $5; exit}'); iptables -t nat -C POSTROUTING -s 10.99.0.0/24 -o "$iface" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.99.0.0/24 -o "$iface" -j MASQUERADE
+PostDown = iface=$(ip -o route show default | awk '{print $5; exit}'); iptables -t nat -D POSTROUTING -s 10.99.0.0/24 -o "$iface" -j MASQUERADE 2>/dev/null || true
 
 # --- AmneziaWG anti-DPI parameters --------------------------------------
 # Junk-packet count: how many bogus packets to send at handshake start.
