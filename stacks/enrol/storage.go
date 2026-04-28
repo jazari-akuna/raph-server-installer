@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -39,13 +40,51 @@ type StorageInfo struct {
 	Users        []UserStorage
 }
 
-// UserStorage is the per-user row in the storage panel. Only Name,
-// OnDiskBytes, NominalBytes are meaningful in the cloud era.
+// UserStorage is the per-user row in the storage panel. Name + OnDiskBytes
+// + NominalBytes are the original cloud-era fields; the NC* + Plane*
+// fields are added by the unified admin page (see ADR-005). Any of the
+// new fields may be zero/sentinel when the upstream data source is
+// unavailable — the template renders "—" rather than "0" so an empty
+// Plane state isn't conflated with a real zero.
 type UserStorage struct {
 	Name         string
 	Exists       bool  // true iff the user has any files on disk yet
 	OnDiskBytes  int64 // `du -sb /srv/store/cloud-data/<u>/files`, 0 when missing
 	NominalBytes int64 // configured per-user quota; 0 = unlimited
+
+	// Nextcloud `occ user:info` cross-checks (per ADR-005). NCQuotaUsed
+	// is what Nextcloud thinks the user is using (may differ from the du
+	// number if external storage / shares are mounted in); -1 signals
+	// "occ failed" so the template can render "—".
+	NCQuotaUsed int64
+	NCFileCount int
+
+	// Plane API per-user counts (per ADR-005). Both default to 0 when
+	// Plane is not deployed yet OR the API token is missing OR the user
+	// hasn't logged into Plane yet (graceful fallback).
+	PlaneIssues   int
+	PlaneAttBytes int64
+
+	// LastSeen is max(NC last_login, Plane last_active) — best-effort.
+	// Zero when both upstreams are unavailable.
+	LastSeen time.Time
+}
+
+// NCInfo is the parsed result of `occ user:info <name> --output=json`.
+// Fields beyond the three the admin page uses are intentionally dropped
+// — adding them later is non-breaking, removing them is a UI churn.
+type NCInfo struct {
+	QuotaUsed int64
+	FileCount int
+	LastLogin time.Time
+}
+
+// PlaneInfo aggregates the per-user Plane numbers the admin page renders.
+// Sourced from one or more PlaneClient API calls.
+type PlaneInfo struct {
+	Issues   int
+	AttBytes int64
+	LastSeen time.Time
 }
 
 // cloudDataRoot is the on-disk root Nextcloud bind-mounts as its datadir.
@@ -69,13 +108,28 @@ var (
 	duCache   = map[string]duCacheEntry{}
 )
 
-// storageSnapshot collects the data the /users storage panel renders.
-// Read-only; tolerates Statfs / du failures per-user (zeroes that field).
+// storageUserSpec is the per-user input to storageSnapshot. Name is the
+// Authelia username (used for du + occ); Email is the Authelia email
+// claim (used to look the user up in Plane via UserByEmail). Email may
+// be empty — callers can pass nil/zero specs and the Plane columns
+// will simply remain zero.
+type storageUserSpec struct {
+	Name  string
+	Email string
+}
+
+// storageSnapshot collects the data the /users admin page renders.
+// Read-only; tolerates Statfs / du / occ / Plane failures per-user
+// (zeroes that field, sometimes signalling unknown via -1 or zero time).
 //
 // The default per-user quota comes from setupState.CloudUserQuotaGB (raw
 // GB; 0 = unlimited which renders as "—" in the template). Falls back to
 // 50 GB when state.json is missing/unparseable.
-func storageSnapshot(cfg config, users []string) StorageInfo {
+//
+// planeClient may be nil — in that case the Plane columns silently stay
+// at their zero values (rendered as "—" by the template). This is the
+// expected state during Wave B (before Plane itself is deployed).
+func storageSnapshot(cfg config, users []storageUserSpec, planeClient *PlaneClient) StorageInfo {
 	si := StorageInfo{Root: "/srv/store"}
 	var fs syscall.Statfs_t
 	if err := syscall.Statfs(si.Root, &fs); err == nil {
@@ -83,11 +137,35 @@ func storageSnapshot(cfg config, users []string) StorageInfo {
 		si.FreeBytes = int64(fs.Bavail) * int64(fs.Bsize)
 	}
 	defaultNominal := defaultCloudQuotaBytes(cfg)
-	for _, name := range users {
-		us := UserStorage{Name: name, NominalBytes: defaultNominal}
+	for _, u := range users {
+		name := u.Name
+		us := UserStorage{Name: name, NominalBytes: defaultNominal, NCQuotaUsed: -1}
 		bytes, exists := userOnDiskBytes(name)
 		us.Exists = exists
 		us.OnDiskBytes = bytes
+
+		// Nextcloud occ user:info (cached). Best-effort — on shell-out
+		// failure we leave NCQuotaUsed at the -1 sentinel so the
+		// template renders "—" rather than "0 B" (which would be a lie).
+		if nc, err := nextcloudUserInfo(name); err == nil {
+			us.NCQuotaUsed = nc.QuotaUsed
+			us.NCFileCount = nc.FileCount
+			if !nc.LastLogin.IsZero() && nc.LastLogin.After(us.LastSeen) {
+				us.LastSeen = nc.LastLogin
+			}
+		}
+
+		// Plane API. Silent fallback on every failure mode (no client,
+		// no token, user not in Plane, API down, …) — see PlaneInfo
+		// helper docs.
+		if pi, err := planeUserInfo(planeClient, u.Email); err == nil {
+			us.PlaneIssues = pi.Issues
+			us.PlaneAttBytes = pi.AttBytes
+			if !pi.LastSeen.IsZero() && pi.LastSeen.After(us.LastSeen) {
+				us.LastSeen = pi.LastSeen
+			}
+		}
+
 		si.UserOnDisk += us.OnDiskBytes
 		si.NominalBytes += us.NominalBytes
 		si.Users = append(si.Users, us)
@@ -176,4 +254,140 @@ func runCommand(name string, args ...string) error {
 		return fmt.Errorf("%s: %w (%s)", name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Nextcloud per-user info (occ user:info)
+//
+// occ shell-out is ~50 ms per user; the dashboard's 60 s in-memory
+// cache (mirror of duCache) keeps the click-around responsive without
+// hammering Nextcloud on every reload.
+
+type ncCacheEntry struct {
+	info NCInfo
+	err  error
+	at   time.Time
+}
+
+var (
+	ncCacheMu sync.Mutex
+	ncCache   = map[string]ncCacheEntry{}
+)
+
+// nextcloudUserInfo runs `docker exec -u www-data cloud php occ
+// user:info <name> --output=json` and parses the result. The cache TTL
+// matches duCacheTTL so an admin refreshing the page doesn't re-shell
+// every reload. On any error, returns a zero-valued NCInfo + the
+// underlying error — caller decides whether to surface zeros or skip
+// the row.
+//
+// Output shape (Nextcloud 28+):
+//
+//	{
+//	  "user_id": "raph",
+//	  "display_name": "Raphael",
+//	  "email": "raph@example.com",
+//	  "last_seen": "2026-04-25T12:34:56+00:00",
+//	  "quota": {
+//	    "free": 12345, "used": 67890, "total": 100000, "relative": 67.89,
+//	    "quota": -3
+//	  }
+//	}
+//
+// We extract only the three fields the admin page renders. Fields
+// Nextcloud renames in future versions degrade gracefully to zero.
+func nextcloudUserInfo(name string) (NCInfo, error) {
+	ncCacheMu.Lock()
+	defer ncCacheMu.Unlock()
+	if e, ok := ncCache[name]; ok && time.Since(e.at) < duCacheTTL {
+		return e.info, e.err
+	}
+	cacheAndReturn := func(info NCInfo, err error) (NCInfo, error) {
+		ncCache[name] = ncCacheEntry{info: info, err: err, at: time.Now()}
+		return info, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "exec", "-u", "www-data",
+		"cloud", "php", "occ", "user:info", name, "--output=json").Output()
+	if err != nil {
+		return cacheAndReturn(NCInfo{}, fmt.Errorf("occ user:info %s: %w", name, err))
+	}
+
+	// Tolerant decode: occ wraps the payload differently across versions
+	// (sometimes top-level, sometimes under "user_id"). We use a
+	// permissive struct shape that catches both common layouts.
+	var raw struct {
+		Quota struct {
+			Used  json.Number `json:"used"`
+			Files json.Number `json:"files"`
+		} `json:"quota"`
+		Files    json.Number `json:"files"`
+		LastSeen string      `json:"last_seen"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return cacheAndReturn(NCInfo{}, fmt.Errorf("occ user:info %s: parse json: %w", name, err))
+	}
+
+	info := NCInfo{}
+	if v, err := raw.Quota.Used.Int64(); err == nil {
+		info.QuotaUsed = v
+	}
+	// File count: prefer top-level "files", fall back to nested.
+	if v, err := raw.Files.Int64(); err == nil {
+		info.FileCount = int(v)
+	} else if v, err := raw.Quota.Files.Int64(); err == nil {
+		info.FileCount = int(v)
+	}
+	if raw.LastSeen != "" {
+		// occ emits ISO-8601 with tz offset; tolerate both RFC3339 and
+		// the bare YYYY-MM-DD form.
+		if t, err := time.Parse(time.RFC3339, raw.LastSeen); err == nil {
+			info.LastLogin = t
+		} else if t, err := time.Parse("2006-01-02 15:04:05", raw.LastSeen); err == nil {
+			info.LastLogin = t
+		}
+	}
+	return cacheAndReturn(info, nil)
+}
+
+// ---------------------------------------------------------------------------
+// Plane per-user info
+//
+// Aggregates ListWorkspaces + UserByEmail + per-workspace IssueCount /
+// FileAssetBytes into a single PlaneInfo row. Silent-fallback on every
+// edge: nil client, empty token, user-not-in-Plane, API down. The admin
+// page's columns degrade to "—" rather than 500-ing.
+
+func planeUserInfo(client *PlaneClient, email string) (PlaneInfo, error) {
+	if client == nil || !client.ready() || email == "" {
+		return PlaneInfo{}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	user, err := client.UserByEmail(ctx, email)
+	if err != nil || user == nil || user.ID == "" {
+		// User isn't in Plane yet, or API is down — render zeros.
+		return PlaneInfo{}, nil
+	}
+	workspaces, err := client.ListWorkspaces(ctx)
+	if err != nil {
+		return PlaneInfo{}, nil
+	}
+
+	var info PlaneInfo
+	for _, ws := range workspaces {
+		if n, err := client.IssueCount(ctx, ws.Slug, user.ID); err == nil {
+			info.Issues += n
+		}
+		if b, err := client.FileAssetBytes(ctx, ws.Slug, user.ID); err == nil {
+			info.AttBytes += b
+		}
+	}
+	if t, err := client.LastActivity(ctx, user.ID); err == nil {
+		info.LastSeen = t
+	}
+	return info, nil
 }

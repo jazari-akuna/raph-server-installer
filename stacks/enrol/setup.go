@@ -1089,7 +1089,7 @@ func (s *server) runFinalize(
 	// restart-loops on the next compose-up. See oidc.go for the full
 	// rationale + idempotency contract.
 	if !st.CompletedSteps.OIDCRotated {
-		status("oidc", "rotating OIDC client secrets (console + cloud)")
+		status("oidc", "rotating OIDC client secrets (console + cloud + plane)")
 		envFile := filepath.Join(s.cfg.stacksDir, ".env")
 		if err := rotateOIDCConsoleSecret(envFile, ""); err != nil {
 			return wrapErr("oidc", err)
@@ -1099,6 +1099,10 @@ func (s *server) runFinalize(
 			return wrapErr("oidc", err)
 		}
 		logLine("oidc: cloud client_secret rotated; plaintext at " + oidcCloudPlaintextDefaultPath)
+		if err := rotateOIDCPlaneSecret(envFile, ""); err != nil {
+			return wrapErr("oidc", err)
+		}
+		logLine("oidc: plane client_secret rotated; plaintext at " + oidcPlanePlaintextDefaultPath)
 		// No external observable to verify here beyond what the rotate
 		// helpers already enforce (they read back the env file before
 		// returning). The templates step's verification proves the new
@@ -1146,7 +1150,7 @@ func (s *server) runFinalize(
 
 	// 6. wire NPM proxy hosts.
 	if !st.CompletedSteps.NPMRoutesWired {
-		status("npm", "wiring NPM proxy hosts (auth/enrol/cloud/console)")
+		status("npm", "wiring NPM proxy hosts (auth/enrol/cloud/console/plane)")
 		if err := s.finalizeWireNPM(ctx, st, logLine); err != nil {
 			return wrapErr("npm", err)
 		}
@@ -1490,6 +1494,29 @@ location / {
 }
 `
 
+// npmAdvPlaneTmpl — plane.<domain> advanced_config. No forward-auth
+// (Plane owns its own OIDC session via the god-mode-configured Authelia
+// client, like Nextcloud — see ADR-003), with a tighter 5 GB upload cap
+// + 10-minute timeouts sized for issue attachments rather than the
+// Nextcloud-grade 50 GB / 1 hour envelope. WebSocket upgrade is enabled
+// at the ProxyHost level (AllowWebsocketUpgrade: true), not duplicated
+// in this template — plane-live's collaborative websocket rides through.
+//
+// nginx variables ($forward_scheme, $server, $port) are literal in the
+// templated config, NOT interpolated by Go.
+const npmAdvPlaneTmpl = `client_max_body_size 5G;
+client_body_timeout 600s;
+proxy_read_timeout 600s;
+proxy_send_timeout 600s;
+proxy_connect_timeout 60s;
+proxy_request_buffering off;
+
+location / {
+    include /snippets/proxy.conf;
+    proxy_pass $forward_scheme://$server:$port;
+}
+`
+
 // npmAdvAuthPortalTmpl — auth-portal advanced_config. Single `%s` slot:
 // the operator's domain for the bare-GET 302. All other $-prefixed
 // identifiers are nginx variables and must remain literal.
@@ -1697,6 +1724,26 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			HTTP2Support:          true,
 			HSTSEnabled:           true,
 			AdvancedConfig:        advFwdAuth,
+		},
+		{
+			// plane.<domain> → plane-proxy:80 (the plane stack's own
+			// nginx, which fans out to web/admin/space/live/api). No
+			// forward-auth: Plane manages its own session via OIDC
+			// against Authelia (configured manually in Plane's god-mode
+			// admin panel post-deploy — see ADR-003 + the Wave C runbook
+			// in the plan). 5 GB upload + 10-min timeouts via the Plane
+			// advanced_config template.
+			DomainNames:           []string{"plane." + st.Domain},
+			ForwardScheme:         "http",
+			ForwardHost:           "plane-proxy",
+			ForwardPort:           80,
+			BlockExploits:         true,
+			AllowWebsocketUpgrade: true,
+			CertificateID:         certID,
+			SSLForced:             true,
+			HTTP2Support:          true,
+			HSTSEnabled:           true,
+			AdvancedConfig:        npmAdvPlaneTmpl,
 		},
 	}
 

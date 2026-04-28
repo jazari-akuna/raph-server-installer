@@ -52,20 +52,58 @@
 </section>
 
 <section>
+  <h1>Admin</h1>
   <h2>users</h2>
+  {{/* Per-user table — extended for the unified admin page (ADR-005).
+       The "NC Used" / "Plane Issues" / "Plane Files" columns may render
+       "—" when the upstream is unavailable (occ shell-out failed, Plane
+       not yet deployed, or the user hasn't logged into Plane yet). The
+       on-disk + quota columns are joined from .Storage by username. */}}
   {{if .Users}}
   <table>
     <thead>
-      <tr><th>name</th><th>display</th><th>email</th><th>role</th><th></th></tr>
+      <tr>
+        <th>name</th>
+        <th>display</th>
+        <th>email</th>
+        <th>role</th>
+        <th>on-disk</th>
+        <th>NC Used</th>
+        <th>Plane Issues</th>
+        <th>Plane Files</th>
+        <th></th>
+      </tr>
     </thead>
     <tbody>
-    {{range .Users}}
+    {{$byName := storageByName .Storage.Users}}
+    {{range $user := .Users}}
+      {{$us := index $byName $user.Name}}
       <tr>
-        <td><a href="/users/{{.Name}}">{{.Name}}</a></td>
-        <td>{{.DisplayName}}</td>
-        <td><code>{{.Email}}</code></td>
-        <td>{{if .IsAdmin}}<strong>admin</strong>{{else}}user{{end}}</td>
-        <td><a class="button" href="/users/{{.Name}}">manage</a></td>
+        <td><a href="/users/{{$user.Name}}">{{$user.Name}}</a></td>
+        <td>{{$user.DisplayName}}</td>
+        <td><code>{{$user.Email}}</code></td>
+        <td>{{if $user.IsAdmin}}<strong>admin</strong>{{else}}user{{end}}</td>
+        <td>
+          {{if gt $us.OnDiskBytes 0}}{{prettyBytes $us.OnDiskBytes}}{{else}}—{{end}}
+        </td>
+        <td>
+          {{/* NC Used: -1 sentinel = occ unavailable; 0 = legitimately
+               zero (new user); both render as "—" so the table doesn't
+               lie about an empty Nextcloud state. We could split if the
+               distinction proves load-bearing later. */}}
+          {{if gt $us.NCQuotaUsed 0}}
+            {{prettyBytes $us.NCQuotaUsed}}{{if gt $us.NominalBytes 0}}
+              ({{pct $us.NCQuotaUsed $us.NominalBytes}}%)
+            {{end}}
+          {{else}}—{{end}}
+        </td>
+        <td>
+          {{if gt $us.PlaneIssues 0}}{{$us.PlaneIssues}}{{else}}—{{end}}
+        </td>
+        <td>
+          {{if gt $us.PlaneAttBytes 0}}{{prettyBytes $us.PlaneAttBytes}}{{else}}—{{end}}
+        </td>
+        <td><a class="button" href="/users/{{$user.Name}}">manage</a></td>
       </tr>
     {{end}}
     </tbody>

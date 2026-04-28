@@ -33,6 +33,15 @@ type server struct {
 	cfg  config
 	tmpl *template.Template
 	mu   sync.Mutex // serialises every mutating op
+
+	// plane is the typed Plane REST client used by the admin /users
+	// page to surface per-user issue counts + attachment bytes. May be
+	// non-nil but unconfigured (empty token) before Wave C deploys
+	// Plane and the operator drops a token at
+	// /etc/raph-installer/plane-admin-token; every PlaneClient method
+	// gracefully short-circuits to zero values + nil error in that
+	// state so the admin page renders "—" rather than breaking.
+	plane *PlaneClient
 }
 
 func newServer(cfg config) (*server, error) {
@@ -83,6 +92,19 @@ func newServer(cfg config) (*server, error) {
 			}
 			return ti < ci
 		},
+		// storageByName indexes a []UserStorage by Name so the per-user
+		// table in users.html can look up the storage row inline. Returns
+		// a map[string]UserStorage; missing keys yield the zero value when
+		// dereferenced via `index`. Defined as a template func so the
+		// template doesn't have to thread the index in via the page-data
+		// struct. See ADR-005 for the rationale.
+		"storageByName": func(rows []UserStorage) map[string]UserStorage {
+			m := make(map[string]UserStorage, len(rows))
+			for _, r := range rows {
+				m[r.Name] = r
+			}
+			return m
+		},
 		"prettyBytes": func(n int64) string {
 			const (
 				kib = 1024
@@ -112,7 +134,8 @@ func newServer(cfg config) (*server, error) {
 	if err := ensureArchiveDir(cfg); err != nil {
 		return nil, fmt.Errorf("ensure peers archive dir: %w", err)
 	}
-	return &server{cfg: cfg, tmpl: tmpl}, nil
+	plane := NewPlaneClient(cfg.planeAPIBaseURL, cfg.planeAPIToken)
+	return &server{cfg: cfg, tmpl: tmpl, plane: plane}, nil
 }
 
 func (s *server) routes() http.Handler {
@@ -305,20 +328,26 @@ func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash s
 	}
 	names := db.listSorted()
 	rows := make([]userRow, 0, len(names))
+	specs := make([]storageUserSpec, 0, len(names))
 	for _, name := range names {
 		u := db.Users[name]
 		rows = append(rows, userRow{
 			Name: name, DisplayName: u.DisplayName, Email: u.Email,
 			Groups: u.Groups, IsAdmin: isAdminUser(u),
 		})
+		specs = append(specs, storageUserSpec{Name: name, Email: u.Email})
 	}
 	data := usersListData{
-		Title:         "users",
+		// Title flows into _layout.html's <title> tag — see ADR-005:
+		// the page is the unified Admin view (users + cloud usage +
+		// Plane usage), the URL stays at /users so existing bookmarks
+		// don't break.
+		Title:         "Admin",
 		User:          r.Header.Get("X-Enrol-User"),
 		CSRF:          csrf,
 		ViewerIsAdmin: true, // requireAdmin gates this route
 		Users:         rows,
-		Storage:       storageSnapshot(s.cfg, names),
+		Storage:       storageSnapshot(s.cfg, specs, s.plane),
 		Flash:         flash,
 		TOTPEnabled:   s.totpEnabled(),
 	}

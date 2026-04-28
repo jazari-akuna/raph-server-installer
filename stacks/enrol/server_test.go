@@ -103,6 +103,7 @@ func TestPeerCreatedRendersSetupHelp(t *testing.T) {
 		"pct":           func(int64, int64) string { return "0" },
 		"setupStepDone": func(any, string) bool { return false },
 		"prettyBytes":   func(int64) string { return "0" },
+		"storageByName": func([]UserStorage) map[string]UserStorage { return nil },
 	})
 	pattern := filepath.Join("web", "templates", "*.html")
 	tmpl, err := tmpl.ParseGlob(pattern)

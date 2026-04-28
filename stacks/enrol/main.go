@@ -97,6 +97,18 @@ type config struct {
 	setupToken            string // resolved at startup; preferred over file reads per-request
 	stacksDir             string // /opt/stacks (compose root for finalize shell-outs)
 	repoDir               string // /opt/raph-server-installer (for wire-npm-routes.sh, render-templates.sh)
+
+	// Plane API integration (admin page columns). The token file is
+	// created post-deploy by the operator after they claim god-mode
+	// (Wave C step 5); until then planeAPIToken is empty and every
+	// PlaneClient method short-circuits to zero values + nil error so
+	// the admin page renders "—" instead of breaking.
+	//
+	// planeAPIBaseURL defaults to the internal docker network address
+	// (plane-proxy:80/api/v1). Override via ENROL_PLANE_API_URL for
+	// debug rigs that talk to plane.<domain> from outside.
+	planeAPIBaseURL string
+	planeAPIToken   string
 }
 
 func loadConfig() config {
@@ -145,7 +157,35 @@ func loadConfig() config {
 		setupToken:            resolveSetupToken(),
 		stacksDir:             envOr("ENROL_STACKS_DIR", "/opt/stacks"),
 		repoDir:               envOr("ENROL_REPO_DIR", "/opt/raph-server-installer"),
+
+		planeAPIBaseURL: envOr("ENROL_PLANE_API_URL", "http://plane-proxy/api/v1"),
+		planeAPIToken:   resolvePlaneAPIToken(),
 	}
+}
+
+// resolvePlaneAPIToken reads the personal-access token the operator
+// generated in Plane's god-mode admin panel. Path defaults to
+// /etc/raph-installer/plane-admin-token (mode 0600 root); override via
+// ENROL_PLANE_API_TOKEN for tests + debug. The file MAY be absent
+// (Wave C creates it after god-mode is claimed), in which case we
+// return empty silently — every PlaneClient method gracefully degrades
+// to zero values when the token is missing, and the admin page renders
+// "—" rather than breaking.
+func resolvePlaneAPIToken() string {
+	if v := strings.TrimSpace(os.Getenv("ENROL_PLANE_API_TOKEN")); v != "" {
+		return v
+	}
+	path := os.Getenv("ENROL_PLANE_API_TOKEN_FILE")
+	if path == "" {
+		path = "/etc/raph-installer/plane-admin-token"
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		// Treat ENOENT (and any other read failure) as "no token";
+		// no log line — this is the expected state until Wave C lands.
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // resolveSetupToken prefers the explicit env var (useful for tests + Parcel 3B

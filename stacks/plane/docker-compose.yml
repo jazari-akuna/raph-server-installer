@@ -96,10 +96,15 @@ x-mq-env: &mq-env
   RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?RABBITMQ_DEFAULT_PASS must be set in /opt/stacks/plane/.env}
   RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_DEFAULT_VHOST:-plane}
   RABBITMQ_VHOST: ${RABBITMQ_DEFAULT_VHOST:-plane}
-  # ADR-008: cap RabbitMQ to 40% of its container's mem_limit (192 MB *
-  # 0.4 ≈ 77 MB). Default is 0.4 of host RAM, which on a 2 GB box is
-  # ~800 MB — would blow the budget instantly.
-  RABBITMQ_VM_MEMORY_HIGH_WATERMARK: "0.4"
+  # NOTE: RABBITMQ_VM_MEMORY_HIGH_WATERMARK was deprecated in RabbitMQ
+  # 3.13 — setting it as an env var causes the container to refuse to
+  # start (`error: deprecated environment variables detected`). To cap
+  # memory usage in 3.13+, mount a rabbitmq.conf with
+  #   vm_memory_high_watermark.relative = 0.4
+  # We don't currently do that because the host has 8 GB RAM (not the
+  # 2 GB the original plan assumed), and the per-container `mem_limit`
+  # already provides the cgroup ceiling. Re-add a config-file mount
+  # here if RAM ever gets tight again.
 
 x-live-env: &live-env
   API_BASE_URL: http://plane-api:8000
@@ -131,17 +136,32 @@ services:
 
   plane-web:
     # End-user UI (workspace dashboard, projects, issues).
+    # The image's CMD is bare `node` — the docker-entrypoint.sh just
+    # re-execs whatever you pass. Each frontend's Next.js standalone
+    # server lives at /app/<name>/server.js; without an explicit
+    # `command:` here the container starts node with no script and
+    # exits 0 immediately (looks like a healthy startup → infinite
+    # restart loop with no logs).
     image: makeplane/plane-frontend:v0.27.1
     container_name: plane-web
     restart: unless-stopped
     mem_limit: 192m
+    command: ["node", "web/server.js"]
+    # The plane-proxy nginx config hardcodes upstream as `web`/`api`/
+    # `admin`/`live`/`space` (no `plane-` prefix; see the proxy image's
+    # /etc/nginx/nginx.conf.template). We keep our camouflage container
+    # names AND let the proxy resolve the legacy names by registering
+    # network aliases. `web` etc are scoped to the `edge` network only;
+    # no host-level /etc/hosts pollution.
     depends_on:
       plane-api:
         condition: service_healthy
       plane-worker:
         condition: service_started
     networks:
-      - edge
+      edge:
+        aliases:
+          - web
 
   plane-space:
     # Public-share UI (read-only project / issue links).
@@ -149,13 +169,16 @@ services:
     container_name: plane-space
     restart: unless-stopped
     mem_limit: 192m
+    command: ["node", "space/server.js"]
     depends_on:
       plane-api:
         condition: service_healthy
       plane-web:
         condition: service_started
     networks:
-      - edge
+      edge:
+        aliases:
+          - space
 
   plane-admin:
     # God-mode panel — the URL the operator visits FIRST after deploy
@@ -166,13 +189,16 @@ services:
     container_name: plane-admin
     restart: unless-stopped
     mem_limit: 192m
+    command: ["node", "admin/server.js"]
     depends_on:
       plane-api:
         condition: service_healthy
       plane-web:
         condition: service_started
     networks:
-      - edge
+      edge:
+        aliases:
+          - admin
 
   plane-live:
     # WebSocket / live-collaboration server. Fans through plane-proxy
@@ -182,6 +208,7 @@ services:
     container_name: plane-live
     restart: unless-stopped
     mem_limit: 192m
+    command: ["node", "live/dist/server.js"]
     environment:
       <<: [*live-env, *redis-env]
     depends_on:
@@ -190,7 +217,9 @@ services:
       plane-web:
         condition: service_started
     networks:
-      - edge
+      edge:
+        aliases:
+          - live
 
   # ────────────────────────────────────────────────────────────────────
   # Backend — Django/gunicorn + 3 Celery roles, all on the same image
@@ -229,13 +258,20 @@ services:
       # migrations are healthy. Used both for downstream depends_on
       # gating (web/admin/space/live wait for api to be healthy) and
       # for the proxy's health gate.
-      test: ["CMD-SHELL", "curl --fail -sS http://localhost:8000/api/health/ || exit 1"]
+      # plane-backend (alpine 3.20) doesn't ship curl — use wget. Two
+      # gotchas: (1) gunicorn binds 0.0.0.0 only, no IPv6 socket, so
+      # `localhost` (which resolves to ::1 first) gets connection
+      # refused — use 127.0.0.1 explicitly. (2) Plane v0.27 doesn't
+      # serve `/api/health/`; the cheapest 200 is the root `/`.
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8000/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 60s
     networks:
-      - edge
+      edge:
+        aliases:
+          - api
 
   plane-worker:
     # Celery default queue. Background work: webhooks, email send,
@@ -446,7 +482,12 @@ services:
   # to come up until the bucket exists.
 
   plane-mc:
-    image: minio/mc:RELEASE.2024-12-18T13-15-44Z
+    # Note: minio/mc has its own release cadence — NOT the same tag as
+    # the minio server image. RELEASE.2025-08-13T08-35-41Z is the latest
+    # stable mc as of 2026-04 (verify at hub.docker.com/r/minio/mc/tags
+    # before bumping). The mc client just talks to whatever minio server
+    # is running, so version skew with the server image is fine.
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
     container_name: plane-mc
     restart: "no"
     mem_limit: 128m
@@ -499,7 +540,9 @@ services:
       # We don't probe a deeper path because the actual application
       # paths (e.g. /god-mode/) are SPA routes that depend on the
       # frontends being warm; the front door is enough for orchestration.
-      test: ["CMD-SHELL", "wget --quiet --spider http://localhost/ || exit 1"]
+      # Same IPv4-only gotcha as plane-api: nginx in this image listens
+      # on 0.0.0.0:80 only; localhost resolves to ::1 first → refused.
+      test: ["CMD-SHELL", "wget --quiet --spider http://127.0.0.1/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5

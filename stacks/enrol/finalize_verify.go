@@ -208,7 +208,7 @@ func (s *server) verifyCertIssued(domain string) error {
 	return nil
 }
 
-// verifyNPMRoutes asserts the four required proxy hosts exist in NPM. Logs
+// verifyNPMRoutes asserts the five required proxy hosts exist in NPM. Logs
 // in with the wizard-rotated admin (operator's email + plaintext from the
 // in-memory cache); if the cache is empty (post-finalize wipe, or operator
 // didn't re-walk /setup/admin) returns a clear "re-enter password" error.
@@ -238,6 +238,7 @@ func (s *server) verifyNPMRoutes(ctx context.Context, st *setupState) error {
 		"enrol." + st.Domain,
 		"cloud." + st.Domain,
 		"console." + st.Domain,
+		"plane." + st.Domain,
 	}
 	have := map[string]bool{}
 	for _, h := range hosts {

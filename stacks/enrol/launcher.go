@@ -1,10 +1,10 @@
 // launcher.go — app launcher (post-login landing).
 //
 // Tile grid of apps backed by <launcherDir>/apps.json + per-app icons under
-// <launcherDir>/icons/<id>.<ext>. The dir is bootstrapped with three default
-// tiles (cloud, enrol-users, console) whose PNGs are seeded from the image
-// repo at /app/web/static/launcher-defaults/<id>.png on first run; if a copy
-// fails the tile falls back to CSS-initials.
+// <launcherDir>/icons/<id>.<ext>. The dir is bootstrapped with four default
+// tiles (cloud, enrol-users, console, plane) whose PNGs are seeded from the
+// image repo at /app/web/static/launcher-defaults/<id>.png on first run; if
+// a copy fails the tile falls back to CSS-initials.
 //
 // Custom icons are fetched server-side from a user-supplied URL via an
 // SSRF-hardened HTTP client: pre-resolution and post-resolution IP filtering
@@ -127,13 +127,14 @@ func bootstrapLauncher(dir, domain string) error {
 		{ID: "cloud", Name: "Cloud", URL: "https://cloud." + domain + "/", Icon: icons["cloud"]},
 		{ID: "enrol-users", Name: "Enrol", URL: "https://enrol." + domain + "/users", Icon: icons["enrol-users"]},
 		{ID: "console", Name: "Console", URL: "https://console." + domain + "/", Icon: icons["console"]},
+		{ID: "plane", Name: "Plane", URL: "https://plane." + domain + "/", Icon: icons["plane"]},
 	}
 	return saveLauncher(dir, defaults)
 }
 
 func seedDefaultIcons(launcherDir, sourceDir string) map[string]string {
 	out := map[string]string{}
-	for _, id := range []string{"cloud", "enrol-users", "console"} {
+	for _, id := range []string{"cloud", "enrol-users", "console", "plane"} {
 		src := filepath.Join(sourceDir, id+".png")
 		dst := filepath.Join(launcherDir, "icons", id+".png")
 		if err := copyFileMode(src, dst, 0o640); err != nil {
