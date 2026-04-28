@@ -1068,10 +1068,44 @@ func (s *server) handleBackupIndex(w http.ResponseWriter, r *http.Request) {
 // buildBackupPageView assembles the page-data DTO for /backup. Every
 // restic call is best-effort — a missing repo (pre-bootstrap) renders
 // the page with empty rows rather than 500-ing.
+//
+// The N+1 restic calls (one per recipe + one repoStats) are fanned out
+// concurrently — sequentially they take ~5×600ms which is enough for an
+// impatient browser to abort the request.
 func (s *server) buildBackupPageView(ctx context.Context, expandID, csrf string) BackupPageView {
 	pv := BackupPageView{CSRF: csrf}
 
-	// Per-recipe rows.
+	type recipeResult struct {
+		snaps []resticSnapshot
+		err   error
+	}
+	results := make([]recipeResult, len(backupRecipes))
+	var (
+		wg           sync.WaitGroup
+		repoSize     string
+		repoCount    int
+		nextSchedRun string
+	)
+	for i := range backupRecipes {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			snaps, err := listSnapshotsForTag(ctx, s.cfg, backupRecipes[i].ID)
+			results[i] = recipeResult{snaps: snaps, err: err}
+		}()
+	}
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		repoSize, repoCount = repoStats(ctx, s.cfg)
+	}()
+	go func() {
+		defer wg.Done()
+		nextSchedRun = nextScheduledRun(ctx)
+	}()
+	wg.Wait()
+
 	rows := make([]BackupRecipeView, 0, len(backupRecipes))
 	for i := range backupRecipes {
 		recipe := &backupRecipes[i]
@@ -1082,9 +1116,8 @@ func (s *server) buildBackupPageView(ctx context.Context, expandID, csrf string)
 			LastSnapshotAt:   "—",
 			LastSnapshotSize: "—",
 		}
-		snaps, err := listSnapshotsForTag(ctx, s.cfg, recipe.ID)
-		if err == nil && len(snaps) > 0 {
-			// Newest first.
+		snaps := results[i].snaps
+		if results[i].err == nil && len(snaps) > 0 {
 			sort.Slice(snaps, func(i, j int) bool {
 				return snaps[i].Time.After(snaps[j].Time)
 			})
@@ -1114,9 +1147,9 @@ func (s *server) buildBackupPageView(ctx context.Context, expandID, csrf string)
 		rows = append(rows, row)
 	}
 	pv.Recipes = rows
-
-	pv.RepoSize, pv.RepoSnapCount = repoStats(ctx, s.cfg)
-	pv.NextScheduled = nextScheduledRun(ctx)
+	pv.RepoSize = repoSize
+	pv.RepoSnapCount = repoCount
+	pv.NextScheduled = nextSchedRun
 	pv.OffHostHelp = renderOffHostHelp(s.cfg)
 	if op := globalOpTracker.current(); op != nil {
 		pv.InProgress = op.ID
