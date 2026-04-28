@@ -92,30 +92,83 @@ PEER_PUB="$(awk '/^\[Peer\]/{p=1;next} p && /^PublicKey/ {gsub(/PublicKey *= */,
 out "peer public key (server identity): ${PEER_PUB:0:16}…"
 
 # ----- 2. install AmneziaWG ------------------------------------------------
-log "install AmneziaWG kernel module + tools"
-if ! modinfo amneziawg >/dev/null 2>&1; then
-  out "  module not loaded — installing from ppa:amnezia/ppa"
+log "install AmneziaWG kernel module + tools (idempotent — safe on a fresh box)"
+RUNNING_KERNEL="$(uname -r)"
+out "  running kernel: ${RUNNING_KERNEL}"
+
+# Step a: ensure add-apt-repository exists. Minimal Ubuntu cloud images
+# don't ship software-properties-common.
+if ! command -v add-apt-repository >/dev/null 2>&1; then
+  out "  installing software-properties-common (provides add-apt-repository)"
+  apt-get update -qq
   apt-get install -y software-properties-common 2>&1 | tail -3 | tee -a "$REPORT"
+fi
+
+# Step b: ensure ppa:amnezia/ppa is enabled.
+if ! grep -rq 'amnezia' /etc/apt/sources.list.d/ 2>/dev/null; then
+  out "  adding ppa:amnezia/ppa (kernel module + tools live here)"
   add-apt-repository -y ppa:amnezia/ppa 2>&1 | tail -3 | tee -a "$REPORT"
   apt-get update 2>&1 | tail -3 | tee -a "$REPORT"
-  RUNNING_KERNEL="$(uname -r)"
-  out "  installing linux-headers-${RUNNING_KERNEL} + dkms + amneziawg-{tools,dkms}"
-  apt-get install -y \
-    "linux-headers-${RUNNING_KERNEL}" build-essential dkms \
-    amneziawg-tools amneziawg-dkms 2>&1 | tail -5 | tee -a "$REPORT"
-  modprobe amneziawg 2>&1 | tee -a "$REPORT" || true
 fi
-modinfo amneziawg 2>&1 | head -3 | tee -a "$REPORT"
+
+# Step c: install matching headers + DKMS toolchain + AmneziaWG itself.
+# Order matters: if amneziawg-dkms's postinst runs before headers are
+# present, the build fails and the package is "installed" but the module
+# isn't loadable. Headers + dkms first, then the AmneziaWG packages.
+out "  installing linux-headers-${RUNNING_KERNEL} + build-essential + dkms"
+if ! apt-get install -y \
+       "linux-headers-${RUNNING_KERNEL}" build-essential dkms 2>&1 | tail -5 | tee -a "$REPORT"; then
+  out "ERROR: could not install linux-headers-${RUNNING_KERNEL}. Likely cause: kernel was upgraded since last boot — REBOOT and re-run."
+  exit 2
+fi
+out "  installing amneziawg-tools + amneziawg-dkms"
+if ! apt-get install -y amneziawg-tools amneziawg-dkms 2>&1 | tail -8 | tee -a "$REPORT"; then
+  out "ERROR: apt install of amneziawg packages failed. Check the apt output above."
+  exit 2
+fi
+
+# Step d: ensure DKMS actually built the module + can be loaded. The
+# postinst hook sometimes exits 0 even when the build failed — explicit
+# autoinstall + modinfo + modprobe gives us the canonical answer.
+out "  ensuring DKMS module built + loaded"
+dkms autoinstall 2>&1 | tail -5 | tee -a "$REPORT" || true
+if ! modinfo amneziawg >/dev/null 2>&1; then
+  out "ERROR: amneziawg kernel module is not available after install."
+  out "       Most common causes:"
+  out "         1) Kernel was upgraded since last boot — reboot and re-run."
+  out "         2) linux-headers-${RUNNING_KERNEL} couldn't be installed — your kernel"
+  out "            may be from a non-standard source (HWE, mainline PPA)."
+  out "       Last 30 lines of the most recent DKMS build log:"
+  LATEST="$(ls -1t /var/lib/dkms/amneziawg/*/build/make.log 2>/dev/null | head -n1 || true)"
+  if [[ -n "$LATEST" ]]; then
+    tail -n 30 "$LATEST" 2>&1 | tee -a "$REPORT"
+  else
+    out "       (no /var/lib/dkms/amneziawg/*/build/make.log found)"
+  fi
+  exit 3
+fi
+if ! modprobe amneziawg 2>&1 | tee -a "$REPORT"; then
+  out "ERROR: modprobe amneziawg failed. dmesg may have details."
+  dmesg | tail -20 | tee -a "$REPORT" || true
+  exit 3
+fi
+modinfo amneziawg 2>&1 | head -5 | tee -a "$REPORT"
+out "  amneziawg module loaded OK"
 run 'awg --version'
+run 'awg-quick --help 2>&1 | head -3 || true'
 
-# Diagnostic tools
-out "  installing diagnostic helpers"
-apt-get install -y -qq iperf3 mtr-tiny dnsutils iputils-ping curl jq speedtest-cli >/dev/null 2>&1 \
-  || apt-get install -y -qq iperf3 mtr-tiny dnsutils iputils-ping curl jq >/dev/null 2>&1 \
-  || true
-
+# Step e: install the diagnostic helpers.
+out "  installing diagnostic helpers (iperf3, mtr-tiny, dnsutils, jq, speedtest-cli)"
+apt-get install -y iperf3 mtr-tiny dnsutils iputils-ping curl jq 2>&1 | tail -3 | tee -a "$REPORT"
+# speedtest-cli is in 'universe' on noble; tolerate its absence so the
+# script still produces an in-tunnel iperf3 report on a minimal image.
+if ! command -v speedtest-cli >/dev/null 2>&1; then
+  apt-get install -y speedtest-cli 2>&1 | tail -3 | tee -a "$REPORT" || true
+fi
 HAS_SPEEDTEST=0
-if command -v speedtest-cli >/dev/null 2>&1; then HAS_SPEEDTEST=1; fi
+if command -v speedtest-cli >/dev/null 2>&1; then HAS_SPEEDTEST=1; out "  speedtest-cli available"
+else                                                              out "  WARNING: speedtest-cli unavailable — will skip non-tunnel speedtest comparison (in-tunnel iperf3 still runs)"
+fi
 
 # ----- 3. baseline (no tunnel) ---------------------------------------------
 log "BASELINE — no tunnel (your raw WAN to the public internet)"
