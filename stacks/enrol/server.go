@@ -173,8 +173,16 @@ func (s *server) routes() http.Handler {
 		fmt.Fprintln(w, "present")
 	})
 
-	mux.Handle("/static/", http.StripPrefix("/static/",
-		http.FileServer(http.Dir(s.cfg.staticDir))))
+	// Serve /static with `Cache-Control: no-cache` so the browser
+	// always revalidates (ETag / If-Modified-Since means the bytes
+	// only re-download when the file actually changes — but a stale
+	// JS/CSS won't silently linger across deploys, which previously
+	// caused new form handlers to look broken in already-open tabs).
+	staticHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		http.StripPrefix("/static/", http.FileServer(http.Dir(s.cfg.staticDir))).ServeHTTP(w, r)
+	})
+	mux.Handle("/static/", staticHandler)
 
 	// Setup wizard routes (Parcel 3A). They're registered unconditionally;
 	// the setupRouteGate middleware below is what hides them once setup
