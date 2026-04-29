@@ -10,12 +10,15 @@
 
   <p>
     The configuration below contains the device's <strong>private
-    key</strong> — this is the only time you will see it. Hand it to the
-    device owner via a secure channel and clear your browser history.
+    key</strong>. Hand it to the device owner via a secure channel.
+    You can re-download it at any time from the
+    <a href="/peers">devices page</a> using the
+    <strong>.conf</strong> button next to the device.
   </p>
 
   <h3>config</h3>
   <pre class="conf">{{.ClientConf}}</pre>
+  <p><a class="button" href="/peers/{{.Peer.Name}}/conf">download .conf</a></p>
 
   <h3>QR (scan with the AmneziaWG client)</h3>
   <p><img class="qr" src="/peers/{{.Peer.Name}}/qr.png" alt="device QR"></p>
