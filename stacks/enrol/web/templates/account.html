@@ -1,0 +1,42 @@
+{{template "head" .}}
+
+{{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+{{if .Error}}<div class="warn">{{.Error}}</div>{{end}}
+
+<section>
+  <h2>account: {{.User}}</h2>
+  <dl>
+    <dt>display</dt><dd>{{.DisplayName}}</dd>
+    <dt>email</dt><dd><code>{{.Email}}</code></dd>
+    <dt>groups</dt><dd>{{join .Groups ", "}}</dd>
+    <dt>role</dt><dd>{{if .IsAdmin}}<strong>admin</strong>{{else}}user{{end}}</dd>
+  </dl>
+  <p class="hint">
+    Display name, email, and group membership are managed by an admin
+    on the <code>/users</code> page. To change yours, ask an admin.
+  </p>
+</section>
+
+<section>
+  <h2>change password</h2>
+  <p class="hint">
+    Updates your Authelia argon2id hash. Nextcloud picks up the new
+    password on your next sign-in via OIDC; nothing else needs to
+    change. You must enter your current password to confirm.
+  </p>
+  <form method="POST" action="/account/password" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label>current password
+      <input type="password" name="current" required
+        autocomplete="current-password">
+    </label>
+    <label>new password
+      <input type="password" name="new" required minlength="12"
+        autocomplete="new-password"
+        placeholder="at least 12 chars">
+    </label>
+    <button type="submit">change password</button>
+  </form>
+</section>
+
+{{template "tail" .}}

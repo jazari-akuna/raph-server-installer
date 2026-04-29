@@ -227,6 +227,16 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/users", requireAdmin(s.cfg, s.withCSRF(s.handleUsers)))
 	mux.HandleFunc("/users/", requireAdmin(s.cfg, s.withCSRF(s.handleUserSub)))
 
+	// Account — self-service surface for the signed-in user. Open to any
+	// authenticated principal (admin OR regular). The acting user is the
+	// X-Enrol-User header set by requireAuth; the page never trusts a URL
+	// parameter for the target user, so a non-admin cannot rotate someone
+	// else's password from here. Admin-driven password resets (without
+	// knowing the current password) stay on /users/<u>/password and remain
+	// requireAdmin.
+	mux.HandleFunc("/account", requireAuth(s.cfg, false, s.handleAccount))
+	mux.HandleFunc("/account/password", requireAuth(s.cfg, false, s.withCSRF(s.handleAccountPassword)))
+
 	// Peers (devices) — admin-only. Mirrors /users.
 	// /peers is open to every authenticated user — each user manages
 	// their own devices. Admins see all peers (current behaviour) via the
@@ -772,6 +782,174 @@ func (s *server) handleUserPassword(w http.ResponseWriter, r *http.Request, name
 	writeAudit(auditPath, auditEntry{Action: "user.password", Actor: actor,
 		Target: name, Result: "ok"})
 	http.Redirect(w, r, "/users/"+name, http.StatusSeeOther)
+}
+
+// ---------------------------------------------------------------------------
+// /account — self-service profile + password change
+//
+// /account is reachable by every authenticated user (requireAuth without
+// the admin gate). The viewer's identity is taken from X-Enrol-User as
+// set by requireAuth — we never accept a target name from the URL or
+// form, so a non-admin cannot pivot to someone else's account. Admins use
+// the page too (it's the same self-service surface; admin-on-other-user
+// resets remain on /users/<u>/password).
+
+type accountData struct {
+	Title       string
+	User        string // viewer's Authelia username (for _layout.html .User)
+	CSRF        string
+	DisplayName string
+	Email       string
+	Groups      []string
+	IsAdmin     bool
+	// ViewerIsAdmin drives the layout nav (admin links). It mirrors
+	// IsAdmin here — the viewer IS the target on /account.
+	ViewerIsAdmin bool
+	Flash         string // success message (e.g. "Password changed.")
+	Error         string // inline form error
+}
+
+func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	flash := ""
+	if r.URL.Query().Get("changed") == "1" {
+		flash = "Password changed."
+	}
+	s.renderAccount(w, r, flash, "")
+}
+
+func (s *server) renderAccount(w http.ResponseWriter, r *http.Request, flash, formErr string) {
+	csrf := ensureCSRF(w, r)
+	name := r.Header.Get("X-Enrol-User")
+	if name == "" {
+		// Belt-and-braces: requireAuth always sets this, but guard anyway.
+		http.Error(w, "missing X-Enrol-User", http.StatusUnauthorized)
+		return
+	}
+	db, err := loadUsersDB(s.cfg.usersDBPath)
+	if err != nil {
+		http.Error(w, "load users: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u, ok := db.Users[name]
+	if !ok {
+		// User exists in Authelia's session but not in our YAML — that
+		// would mean Authelia is using a different backend (LDAP, etc.),
+		// which we don't support. 404 with a hint rather than 500.
+		http.Error(w, "your Authelia account is not in the file backend; "+
+			"self-service password change is unavailable", http.StatusNotFound)
+		return
+	}
+	isAdmin := viewerIsAdmin(r, s.cfg)
+	data := accountData{
+		Title:         "account",
+		User:          name,
+		CSRF:          csrf,
+		DisplayName:   u.DisplayName,
+		Email:         u.Email,
+		Groups:        u.Groups,
+		IsAdmin:       isAdmin,
+		ViewerIsAdmin: isAdmin,
+		Flash:         flash,
+		Error:         formErr,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.tmpl.ExecuteTemplate(w, "account.html", data); err != nil {
+		log.Printf("template account.html: %v", err)
+	}
+}
+
+// handleAccountPassword is the self-service counterpart of
+// handleUserPassword. It requires the caller to demonstrate knowledge of
+// the CURRENT password before we accept a new one — that's the whole
+// point of the self-service path (admin-driven resets via
+// /users/<u>/password don't need it because the admin already authorised
+// the change). Audit action is `user.password.self` so the audit log
+// distinguishes self-service rotations from admin resets.
+func (s *server) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	actor := r.Header.Get("X-Enrol-User")
+	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
+
+	if actor == "" {
+		http.Error(w, "missing X-Enrol-User", http.StatusUnauthorized)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	current := r.Form.Get("current")
+	next := r.Form.Get("new")
+	if current == "" {
+		s.renderAccount(w, r, "", "Enter your current password.")
+		return
+	}
+	if len(next) < 12 {
+		// Same minimum the admin path enforces (server.go:740).
+		s.renderAccount(w, r, "", "New password must be at least 12 characters.")
+		return
+	}
+
+	db, err := loadUsersDB(s.cfg.usersDBPath)
+	if err != nil {
+		http.Error(w, "load users: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u, ok := db.Users[actor]
+	if !ok {
+		http.Error(w, "your Authelia account is not in the file backend",
+			http.StatusNotFound)
+		return
+	}
+	ok, verr := argon2idVerify(current, u.Password)
+	if verr != nil {
+		// Corrupt stored hash — that's an operational issue, not a user
+		// error. Surface as 500 + audit so the operator notices.
+		writeAudit(auditPath, auditEntry{Action: "user.password.self", Actor: actor,
+			Target: actor, Result: "fail", Note: "verify: " + verr.Error()})
+		http.Error(w, "verify current password: "+verr.Error(),
+			http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		writeAudit(auditPath, auditEntry{Action: "user.password.self", Actor: actor,
+			Target: actor, Result: "fail", Note: "wrong current password"})
+		s.renderAccount(w, r, "", "Current password is incorrect.")
+		return
+	}
+
+	hash, err := argon2idHash(next)
+	if err != nil {
+		writeAudit(auditPath, auditEntry{Action: "user.password.self", Actor: actor,
+			Target: actor, Result: "fail", Note: "hash: " + err.Error()})
+		http.Error(w, "argon2 hash: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u.Password = hash
+	if err := db.upsert(actor, u); err != nil {
+		writeAudit(auditPath, auditEntry{Action: "user.password.self", Actor: actor,
+			Target: actor, Result: "fail", Note: "upsert: " + err.Error()})
+		http.Error(w, "upsert: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := db.flush(); err != nil {
+		writeAudit(auditPath, auditEntry{Action: "user.password.self", Actor: actor,
+			Target: actor, Result: "fail", Note: "flush: " + err.Error()})
+		http.Error(w, "write users db: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeAudit(auditPath, auditEntry{Action: "user.password.self", Actor: actor,
+		Target: actor, Result: "ok"})
+	http.Redirect(w, r, "/account?changed=1", http.StatusSeeOther)
 }
 
 func (s *server) handleUserTOTP(w http.ResponseWriter, r *http.Request, name string) {

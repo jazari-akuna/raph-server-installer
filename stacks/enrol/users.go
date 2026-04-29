@@ -19,10 +19,13 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 
 	"golang.org/x/crypto/argon2"
@@ -214,6 +217,67 @@ func argon2idHash(password string) (string, error) {
 		base64.RawStdEncoding.EncodeToString(salt),
 		base64.RawStdEncoding.EncodeToString(hash),
 	), nil
+}
+
+// argon2idVerify reports whether `password` re-derives the same digest
+// stored in `encoded` (the PHC string written by argon2idHash, or by
+// Authelia itself — both produce the same RFC 9106 / RFC 4648 layout).
+//
+// Used by the self-service password change flow (handleAccountPassword)
+// to confirm the caller knows their current password before we overwrite
+// the stored hash. We deliberately re-parse the params from the encoded
+// string rather than assuming our own constants — Authelia could have
+// rehashed the user with different memory/time/parallelism after a config
+// bump, and we want to keep verifying old hashes correctly until the next
+// successful login rolls the digest forward. The constant-time compare
+// at the end mirrors the rest of the codebase (csrf.go, auth.go).
+//
+// Returns (false, nil) on a well-formed hash with a wrong password, so
+// the caller can render an inline form error without 500ing. Returns
+// (false, err) only on parse errors of the stored hash itself — that's
+// a corrupted users_database.yml and an operational alarm.
+func argon2idVerify(password, encoded string) (bool, error) {
+	if password == "" {
+		return false, nil
+	}
+	parts := strings.Split(encoded, "$")
+	// Format: ["", "argon2id", "v=<v>", "m=<m>,t=<t>,p=<p>", "<salt>", "<hash>"]
+	if len(parts) != 6 {
+		return false, fmt.Errorf("argon2id: malformed PHC string (got %d fields)", len(parts))
+	}
+	if parts[1] != "argon2id" {
+		return false, fmt.Errorf("argon2id: variant %q not supported", parts[1])
+	}
+	if !strings.HasPrefix(parts[2], "v=") {
+		return false, errors.New("argon2id: missing version field")
+	}
+	version, err := strconv.Atoi(strings.TrimPrefix(parts[2], "v="))
+	if err != nil {
+		return false, fmt.Errorf("argon2id: parse version: %w", err)
+	}
+	if version != argon2.Version {
+		return false, fmt.Errorf("argon2id: version %d not supported (need %d)",
+			version, argon2.Version)
+	}
+	var memory, iterations uint32
+	var parallelism uint8
+	// Params field is `m=<m>,t=<t>,p=<p>`; Sscanf with the matching
+	// literals does the parsing in one shot and rejects malformed input.
+	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d",
+		&memory, &iterations, &parallelism); err != nil {
+		return false, fmt.Errorf("argon2id: parse params %q: %w", parts[3], err)
+	}
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return false, fmt.Errorf("argon2id: decode salt: %w", err)
+	}
+	want, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil {
+		return false, fmt.Errorf("argon2id: decode hash: %w", err)
+	}
+	got := argon2.IDKey([]byte(password), salt,
+		iterations, memory, parallelism, uint32(len(want)))
+	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
 // --- yaml.Node helpers -----------------------------------------------------
