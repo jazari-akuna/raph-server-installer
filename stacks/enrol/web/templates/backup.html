@@ -48,6 +48,25 @@
     <input type="hidden" name="stack" value="all">
     <button type="submit"{{if .InProgress}} disabled{{end}}>Backup all now</button>
   </form>
+
+  {{/* Bulk-forget: drop every snapshot older than N days across all
+       stacks and tags. The hidden `confirm` field is filled by JS in
+       backup.js after a typed confirmation prompt; the server also
+       constant-time-compares it against "delete older than N days"
+       so a hand-crafted POST without the prompt step is rejected. */}}
+  <form method="POST" action="/backup/forget-older" class="forget-older">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="confirm" value="">
+    <label>
+      Delete all snapshots older than
+      <input type="number" name="days" min="1" value="30" required
+        style="width: 5em;"{{if .InProgress}} disabled{{end}}>
+      days
+    </label>
+    <button type="submit" class="danger"{{if .InProgress}} disabled{{end}}>
+      Forget older
+    </button>
+  </form>
 </section>
 
 <section>

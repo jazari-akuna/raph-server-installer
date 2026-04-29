@@ -22,6 +22,35 @@
     });
   });
 
+  // Bulk-forget guard: ask the operator to type the exact phrase
+  // ("delete older than N days") in a prompt() before submitting. The
+  // server independently constant-time-compares the same string, so a
+  // hand-crafted POST without this prompt step is also rejected.
+  document.querySelectorAll('form.forget-older').forEach(function (form) {
+    form.addEventListener('submit', function (ev) {
+      var daysInput = form.querySelector('input[name="days"]');
+      var confirmField = form.querySelector('input[name="confirm"]');
+      var days = parseInt(daysInput && daysInput.value, 10);
+      if (!days || days < 1) {
+        ev.preventDefault();
+        alert('Days must be a positive integer.');
+        return;
+      }
+      var expected = 'delete older than ' + days + ' days';
+      var got = window.prompt(
+        'This will permanently delete every snapshot older than ' + days +
+        ' days, across all stacks (daily, manual, pre_restore). ' +
+        'It cannot be undone.\n\n' +
+        'Type EXACTLY:\n  ' + expected + '\nto confirm.');
+      if (got !== expected) {
+        ev.preventDefault();
+        alert('Confirmation mismatch — operation cancelled.');
+        return;
+      }
+      if (confirmField) confirmField.value = expected;
+    });
+  });
+
   // Copy-to-clipboard for off-host command blocks. Flashes "Copied!"
   // for ~1.2s then restores the original label.
   document.querySelectorAll('button.copy-btn').forEach(function (btn) {

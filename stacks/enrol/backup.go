@@ -62,6 +62,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1376,6 +1377,67 @@ func (s *server) handleBackupForget(w http.ResponseWriter, r *http.Request) {
 	writeAudit(auditPath, auditEntry{
 		Action: "backup.forget", Actor: actor, Target: snapshotID,
 		Result: "ok",
+	})
+	http.Redirect(w, r, "/backup", http.StatusSeeOther)
+}
+
+// handleBackupForgetOlder bulk-forgets every snapshot older than `days`
+// across all stacks and tags (`restic forget --keep-within <days>d --prune`).
+// Days must be a positive integer; the form's `confirm` field must equal
+// the literal string "delete older than <days> days" (typed by the user
+// in a JS prompt) — both a server-side and a browser-side guard against
+// misclick. Synchronous: forget+prune on this repo is fast (~10 s), no
+// SSE machinery needed.
+func (s *server) handleBackupForgetOlder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	daysStr := strings.TrimSpace(r.Form.Get("days"))
+	days, err := strconv.Atoi(daysStr)
+	if err != nil || days < 1 {
+		http.Error(w, "days must be a positive integer", http.StatusBadRequest)
+		return
+	}
+	confirm := r.Form.Get("confirm")
+	expected := fmt.Sprintf("delete older than %d days", days)
+	if subtle.ConstantTimeCompare([]byte(confirm), []byte(expected)) != 1 {
+		http.Error(w, "confirmation token mismatch", http.StatusBadRequest)
+		return
+	}
+	release, acqErr := tryAcquire()
+	if acqErr != nil {
+		http.Error(w, acqErr.Error(), http.StatusConflict)
+		return
+	}
+	defer release()
+	actor := r.Header.Get("X-Enrol-User")
+	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	cmd := resticCmd(ctx, s.cfg, "forget",
+		"--keep-within", fmt.Sprintf("%dd", days),
+		"--group-by", "tags",
+		"--prune")
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		writeAudit(auditPath, auditEntry{
+			Action: "backup.forget", Actor: actor,
+			Result: "fail",
+			Note:   fmt.Sprintf("forget-older days=%d err=%v out=%s", days, runErr, strings.TrimSpace(string(out))),
+		})
+		http.Error(w, fmt.Sprintf("forget failed: %v\n%s", runErr, out), http.StatusInternalServerError)
+		return
+	}
+	writeAudit(auditPath, auditEntry{
+		Action: "backup.forget", Actor: actor,
+		Result: "ok",
+		Note:   fmt.Sprintf("forget-older days=%d out=%s", days, strings.TrimSpace(string(out))),
 	})
 	http.Redirect(w, r, "/backup", http.StatusSeeOther)
 }
