@@ -223,6 +223,21 @@
       <pre class="cmd">{{.OffHostHelp.ResticRestoreAllCmd}}</pre>
       <button type="button" class="copy-btn" data-copy="restoreAll">Copy</button>
     </div>
+
+    <h3># 5. OR restore EVERY stack from the on-VPS repo (run via SSH on the VPS)</h3>
+    <p class="hint">
+      Use this when the UI is unreachable but you can still SSH to the
+      VPS itself. Same shape as #4 but reads from the local restic repo
+      directly — no laptop mirror needed. Each stack lands in
+      <code>/tmp/restored-&lt;stack&gt;</code>; swap
+      <code>--target /tmp/restored-$s</code> for <code>--target /</code>
+      to overwrite in place (matches what the per-stack
+      <strong>Restore…</strong> buttons do).
+    </p>
+    <div class="cmd-wrap">
+      <pre class="cmd">{{.OffHostHelp.ResticRestoreAllLocalCmd}}</pre>
+      <button type="button" class="copy-btn" data-copy="restoreAllLocal">Copy</button>
+    </div>
   </details>
 </section>
 

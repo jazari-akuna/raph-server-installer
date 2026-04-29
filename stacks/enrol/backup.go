@@ -125,10 +125,11 @@ type BackupSnapshotView struct {
 // in server-side with the actual VPS hostname so there's no copy-paste
 // error from a hand-edited example.
 type OffHostCommandsView struct {
-	RsyncCmd            string
-	ResticCopyCmd       string
-	ResticRestoreCmd    string
-	ResticRestoreAllCmd string
+	RsyncCmd                 string
+	ResticCopyCmd            string
+	ResticRestoreCmd         string
+	ResticRestoreAllCmd      string
+	ResticRestoreAllLocalCmd string
 }
 
 // ---------------------------------------------------------------------------
@@ -1181,6 +1182,14 @@ func renderOffHostHelp(cfg config) OffHostCommandsView {
 	restoreAll := fmt.Sprintf(
 		"for s in %s; do restic -r ./local-backup-mirror restore latest --tag $s --target /tmp/restored-$s; done",
 		strings.Join(stackIDs, " "))
+	// Same shape but pointing at the on-VPS repo — for SSH-into-the-VPS
+	// disaster recovery when the UI is unreachable but the box itself
+	// is fine. Restores into /tmp/restored-<stack> for inspection; flip
+	// `--target /tmp/restored-$s` to `--target /` for in-place overwrite
+	// (which is what the per-stack UI [Restore...] buttons do).
+	restoreAllLocal := fmt.Sprintf(
+		"for s in %s; do RESTIC_PASSWORD_FILE=%s restic -r %s restore latest --tag $s --target /tmp/restored-$s; done",
+		strings.Join(stackIDs, " "), cfg.backupPasswordFile, cfg.backupRepoDir)
 	return OffHostCommandsView{
 		RsyncCmd: fmt.Sprintf(
 			"rsync -av --delete %s:%s/ ./local-backup-mirror/",
@@ -1188,8 +1197,9 @@ func renderOffHostHelp(cfg config) OffHostCommandsView {
 		ResticCopyCmd: fmt.Sprintf(
 			"restic -r sftp:%s:%s copy --from-password-file ~/.raph-restic-password --to-repo /tmp/local-mirror",
 			host, cfg.backupRepoDir),
-		ResticRestoreCmd:    "restic -r ./local-backup-mirror restore <snapshot-id> --target /tmp/restored --tag <stack>",
-		ResticRestoreAllCmd: restoreAll,
+		ResticRestoreCmd:         "restic -r ./local-backup-mirror restore <snapshot-id> --target /tmp/restored --tag <stack>",
+		ResticRestoreAllCmd:      restoreAll,
+		ResticRestoreAllLocalCmd: restoreAllLocal,
 	}
 }
 
