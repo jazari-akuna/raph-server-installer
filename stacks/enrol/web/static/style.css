@@ -34,8 +34,8 @@ header h1 { margin: 0; font-size: 1.1em; letter-spacing: 0.02em; }
 header h1 a { color: var(--fg); text-decoration: none; }
 header nav { display: flex; gap: 1em; flex: 1; }
 header nav a { color: var(--accent); text-decoration: none; }
-header .who { color: var(--muted); font-size: 0.9em; text-decoration: none; }
-header .who:hover { color: var(--accent); text-decoration: underline; }
+header .who { color: var(--accent); font-size: 0.9em; text-decoration: none; }
+header .who:hover { text-decoration: underline; }
 main { max-width: 880px; margin: 1.5em auto; padding: 0 1.5em; }
 section { margin-bottom: 2em; }
 h2 { font-size: 1.05em; border-bottom: 1px solid var(--border); padding-bottom: 0.25em; }
