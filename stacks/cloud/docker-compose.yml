@@ -171,6 +171,16 @@ services:
       # The data dir is the only place public-share download links land
       # without going through fpm, so nginx needs read access here too.
       - /srv/store/cloud-data:/var/www/html/data:ro
+      # Apps installed via Nextcloud's appstore land in custom_apps (the
+      # cloud-html named volume's /var/www/html/apps is read-only-from-
+      # the-image and Nextcloud refuses to write there). The fpm container
+      # bind-mounts /srv/store/cloud-apps → /var/www/html/custom_apps so
+      # appstore installs survive container rebuilds; the sidecar needs
+      # the SAME bind so it can serve those apps' static assets
+      # (icons/JS/CSS) directly off disk via try_files. Without this,
+      # /custom_apps/<app>/img/app.svg falls through to the PHP fallback
+      # which 404s — visible as a broken icon + blank page (Talk, etc).
+      - /srv/store/cloud-apps:/var/www/html/custom_apps:ro
       - ./conf/nginx.conf:/etc/nginx/nginx.conf:ro
 
     healthcheck:

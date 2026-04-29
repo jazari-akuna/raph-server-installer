@@ -186,7 +186,16 @@ log "==> creating /srv/store/cloud-* bind-mount targets"
 mkdir -p /srv/store/cloud-{data,config,apps,db}
 chown 33:33 /srv/store/cloud-{data,config,apps}
 chown 70:70 /srv/store/cloud-db
-chmod 0750 /srv/store/cloud-{data,config,apps,db}
+chmod 0750 /srv/store/cloud-{data,config,db}
+# cloud-apps must be world-readable (0755 / 0644): the FPM container
+# runs as www-data (uid 33) and writes here when an admin installs an
+# app from the Nextcloud appstore, but the cloud-web nginx sidecar
+# runs as the `nginx` user (uid 101 in the alpine image) and needs to
+# traverse the dir to serve the app's static assets directly off disk
+# (icons / JS / CSS via try_files). With 0750 the sidecar gets EACCES
+# on every /custom_apps/<app>/img/...svg request → blank Talk page +
+# broken icon, the most-recent regression we fixed manually.
+chmod 0755 /srv/store/cloud-apps
 
 # ──────────────────────────────────────────────────────────────────────────
 # Step 3.5 — generate Authelia secrets BEFORE compose-up authelia.
