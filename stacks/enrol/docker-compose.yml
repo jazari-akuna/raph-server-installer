@@ -160,7 +160,7 @@ services:
       ENROL_PEER_START: "10"
       ENROL_HEADER_USER: "Remote-User"
       ENROL_HEADER_GROUPS: "Remote-Groups"
-      ENROL_REQUIRED_GROUP: "admins"
+      ENROL_REQUIRED_GROUP: "admin"
       # Forward-auth secret: NPM injects X-Forward-Auth-Secret on every
       # protected request (see finalizeWireNPM), and enrol's auth gate
       # constant-time-compares against this env var. Without it an

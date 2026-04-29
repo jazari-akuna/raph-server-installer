@@ -462,7 +462,7 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	// reach Portainer at all — strongest possible enforcement).
 	groups := []string{"users"}
 	if isAdmin {
-		groups = []string{"admins"}
+		groups = []string{"admin"}
 	}
 	u := User{
 		Disabled: false, DisplayName: displayname, Password: hash,
@@ -606,12 +606,14 @@ type userDetailData struct {
 	TOTPEnabled   bool
 }
 
-// isAdminUser returns true iff the user has the `admins` Authelia group.
+// isAdminUser returns true iff the user has the `admin` Authelia group.
 // Single source-of-truth for the admin/non-admin distinction the
-// modernized /users form exposes as a checkbox.
+// modernized /users form exposes as a checkbox. Group name matches
+// Nextcloud's convention (the only consumer where group naming is
+// load-bearing — NC's hardcoded admin group is `admin`, singular).
 func isAdminUser(u User) bool {
 	for _, g := range u.Groups {
-		if g == "admins" {
+		if g == "admin" {
 			return true
 		}
 	}
@@ -681,7 +683,7 @@ func (s *server) handleUserEdit(w http.ResponseWriter, r *http.Request, name str
 	// directly. We don't try to be cleverer than that.
 	groups := []string{"users"}
 	if isAdmin {
-		groups = []string{"admins"}
+		groups = []string{"admin"}
 	}
 
 	db, err := loadUsersDB(s.cfg.usersDBPath)

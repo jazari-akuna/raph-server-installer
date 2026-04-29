@@ -1245,7 +1245,7 @@ func (s *server) finalizeWriteAdmin(st *setupState) error {
 		DisplayName: st.AdminDisplayName,
 		Password:    st.AdminPasswordHash,
 		Email:       st.AdminEmail,
-		Groups:      []string{"admins"},
+		Groups:      []string{"admin"},
 	}
 	if err := db.upsert(st.AdminUsername, u); err != nil {
 		return fmt.Errorf("upsert admin: %w", err)

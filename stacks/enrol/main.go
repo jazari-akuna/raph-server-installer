@@ -164,7 +164,7 @@ func loadConfig() config {
 		peerStart:         start,
 		headerUser:        envOr("ENROL_HEADER_USER", "Remote-User"),
 		headerGroups:      envOr("ENROL_HEADER_GROUPS", "Remote-Groups"),
-		requiredGroup:     envOr("ENROL_REQUIRED_GROUP", "admins"),
+		requiredGroup:     envOr("ENROL_REQUIRED_GROUP", "admin"),
 		forwardAuthSecret: os.Getenv("ENROL_FORWARD_AUTH_SECRET"),
 		templatesDir:      envOr("ENROL_TEMPLATES", "/app/web/templates"),
 		staticDir:         envOr("ENROL_STATIC", "/app/web/static"),

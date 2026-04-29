@@ -157,7 +157,7 @@ access_control:
     - domain: 'console.${DOMAIN}'
       policy: 'one_factor'
       subject:
-        - 'group:admins'
+        - 'group:admin'
 
 ###############################################################################
 # Session — cookies on the apex so subdomains share the SSO session
