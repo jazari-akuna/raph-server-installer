@@ -193,7 +193,7 @@ func loadConfig() config {
 		backupRepoDir:        envOr("ENROL_BACKUP_REPO_DIR", "/srv/store/enrol-backups/restic"),
 		backupPasswordFile:   envOr("ENROL_BACKUP_PASSWORD_FILE", "/etc/raph-installer/restic-password"),
 		backupResticBin:      envOr("ENROL_BACKUP_RESTIC_BIN", "restic"),
-		backupRetentionDaily: atoiOr(envOr("ENROL_BACKUP_KEEP_DAILY", "7"), 7),
+		backupRetentionDaily: atoiOr(envOr("ENROL_BACKUP_KEEP_DAILY", "10"), 10),
 	}
 }
 

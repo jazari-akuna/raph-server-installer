@@ -582,16 +582,20 @@ func listSnapshotsForTag(ctx context.Context, cfg config, tag string) ([]resticS
 // repoStats returns (sizeHuman, snapCount). Best-effort: any error returns
 // ("—", 0) so the page renders during bootstrap before the repo exists.
 func repoStats(ctx context.Context, cfg config) (string, int) {
-	cmd := resticCmd(ctx, cfg, "stats", "--json")
+	// raw-data mode reports actual on-disk bytes after dedup + zstd, which
+	// is what the operator cares about (and matches the storage page's du
+	// of the repo dir). Default mode reports "restored size" — the logical
+	// sum of all snapshots' file bytes — which can be 5–10× larger and
+	// gave the misleading "1 GB repo" reading when the disk was 90 MB.
+	cmd := resticCmd(ctx, cfg, "stats", "--mode", "raw-data", "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		return "—", 0
 	}
 	var stats struct {
-		TotalSize          int64 `json:"total_size"`
-		SnapshotsCount     int   `json:"snapshots_count"`
-		TotalFileCount     int64 `json:"total_file_count"`
-		TotalBlobCount     int64 `json:"total_blob_count"`
+		TotalSize      int64 `json:"total_size"`
+		SnapshotsCount int   `json:"snapshots_count"`
+		TotalBlobCount int64 `json:"total_blob_count"`
 	}
 	if err := json.Unmarshal(out, &stats); err != nil {
 		return "—", 0
@@ -1139,32 +1143,22 @@ func pickKindTag(tags []string, recipeID string) string {
 	return "—"
 }
 
-// nextScheduledRun shells out to `systemctl list-timers raph-backup.timer
-// --no-pager --output=json` and returns the next-fire time. Empty string
-// on any error (timer not yet installed, systemctl absent inside the
-// container, etc).
-func nextScheduledRun(ctx context.Context) string {
-	cmd := exec.CommandContext(ctx, "systemctl", "list-timers", "raph-backup.timer",
-		"--no-pager", "--output=json")
-	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"}
-	out, err := cmd.Output()
-	if err != nil {
-		return "—"
+// nextScheduledRun returns the next 03:00 UTC after now, formatted for
+// the dashboard. Originally shelled out to `systemctl list-timers
+// raph-backup.timer --no-pager --output=json`, but systemctl isn't
+// present inside the enrol container (it would need a host-systemd
+// d-bus socket bind, which we deliberately don't grant), so we compute
+// it from the timer's known cron expression instead. The host-side
+// raph-backup.timer is the source of truth — if an operator disables
+// it, this UI string won't notice; we accept that trade since the
+// timer is enabled at install time and there's no UI to disable it.
+func nextScheduledRun(_ context.Context) string {
+	now := time.Now().UTC()
+	next := time.Date(now.Year(), now.Month(), now.Day(), 3, 0, 0, 0, time.UTC)
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
 	}
-	var rows []struct {
-		Next string `json:"next"`
-	}
-	if err := json.Unmarshal(out, &rows); err != nil || len(rows) == 0 {
-		return "—"
-	}
-	if rows[0].Next == "" {
-		return "—"
-	}
-	t, err := time.Parse(time.RFC3339, rows[0].Next)
-	if err != nil {
-		return rows[0].Next
-	}
-	return t.UTC().Format("2006-01-02 15:04 UTC")
+	return next.Format("2006-01-02 15:04 UTC")
 }
 
 // renderOffHostHelp pre-renders the three off-host pull/restore commands
