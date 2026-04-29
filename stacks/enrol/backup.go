@@ -434,7 +434,31 @@ type resticSnapshot struct {
 	Hostname string    `json:"hostname"`   // we always pass --host=vps so this is constant.
 	Summary  *struct {
 		TotalBytesProcessed int64 `json:"total_bytes_processed"`
+		// DataAddedPacked is the compressed bytes this snapshot added to
+		// the repo on top of its parent — i.e. the "delta cost" of taking
+		// it. For a snapshot whose contents are mostly identical to its
+		// parent this is tiny (KB range) even when TotalBytesProcessed is
+		// hundreds of MB. Restic field name; we surface it as
+		// "compressed (uncompressed)" so the operator can see both at a
+		// glance.
+		DataAddedPacked int64 `json:"data_added_packed"`
 	} `json:"summary,omitempty"`
+}
+
+// formatSnapshotSize renders the per-snapshot size column as
+// "<compressed> (<uncompressed>)". Falls back to "—" when restic didn't
+// emit a summary (older snapshots from pre-0.17 restic, or inherited
+// snapshots from another tool). When the compressed delta is zero (no
+// new data — common for re-snapshots of unchanged content), shows
+// "0 B (<uncompressed>)" rather than blank, which is informative
+// (proves dedup worked).
+func formatSnapshotSize(s resticSnapshot) string {
+	if s.Summary == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%s (%s)",
+		formatBytes(s.Summary.DataAddedPacked),
+		formatBytes(s.Summary.TotalBytesProcessed))
 }
 
 // shortID returns the first 8 chars of the long restic id, matching what
@@ -459,14 +483,10 @@ func parseResticSnapshots(jsonBody []byte) ([]BackupSnapshotView, error) {
 	}
 	out := make([]BackupSnapshotView, 0, len(raw))
 	for _, s := range raw {
-		size := "—"
-		if s.Summary != nil {
-			size = formatBytes(s.Summary.TotalBytesProcessed)
-		}
 		out = append(out, BackupSnapshotView{
 			ID:        s.shortID(),
 			CreatedAt: s.Time.UTC().Format("2006-01-02 15:04 UTC"),
-			Size:      size,
+			Size:      formatSnapshotSize(s),
 			Tags:      s.Tags,
 		})
 	}
@@ -1098,20 +1118,14 @@ func (s *server) buildBackupPageView(ctx context.Context, expandID, csrf string)
 			latest := snaps[0]
 			kind := pickKindTag(latest.Tags, recipe.ID)
 			row.LastSnapshotAt = latest.Time.UTC().Format("2006-01-02 15:04") + " (" + kind + ")"
-			if latest.Summary != nil {
-				row.LastSnapshotSize = formatBytes(latest.Summary.TotalBytesProcessed)
-			}
+			row.LastSnapshotSize = formatSnapshotSize(latest)
 			if recipe.ID == expandID {
 				view := make([]BackupSnapshotView, 0, len(snaps))
 				for _, s := range snaps {
-					size := "—"
-					if s.Summary != nil {
-						size = formatBytes(s.Summary.TotalBytesProcessed)
-					}
 					view = append(view, BackupSnapshotView{
 						ID:        s.shortID(),
 						CreatedAt: s.Time.UTC().Format("2006-01-02 15:04 UTC"),
-						Size:      size,
+						Size:      formatSnapshotSize(s),
 						Tags:      s.Tags,
 					})
 				}
