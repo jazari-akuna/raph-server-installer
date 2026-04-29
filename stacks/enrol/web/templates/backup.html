@@ -31,7 +31,7 @@
   <table class="backup-summary">
     <tbody>
       <tr>
-        <th>Repo size</th>
+        <th>Repo size (on disk)</th>
         <td>{{if .RepoSize}}{{.RepoSize}}{{else}}—{{end}}</td>
         <th>Snapshots</th>
         <td>{{if .RepoSnapCount}}{{.RepoSnapCount}}{{else}}0{{end}}</td>
@@ -77,7 +77,7 @@
       <tr>
         <th>stack</th>
         <th>last snapshot</th>
-        <th>size</th>
+        <th>size (uncompressed)</th>
         <th>action</th>
       </tr>
     </thead>
@@ -121,7 +121,7 @@
                 <tr>
                   <th>id</th>
                   <th>created</th>
-                  <th>size</th>
+                  <th>size (uncompressed)</th>
                   <th>tags</th>
                   <th>action</th>
                 </tr>
