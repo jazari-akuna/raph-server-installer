@@ -85,7 +85,21 @@
     {{range $user := .Users}}
       {{$us := index $byName $user.Name}}
       <tr>
-        <td><a href="/users/{{$user.Name}}">{{$user.Name}}</a></td>
+        <td>
+          <a href="/users/{{$user.Name}}">{{$user.Name}}</a>
+          {{with $user.Banned}}
+          <br>
+          <span class="warn-inline" title="{{.Reason}} ({{.Source}})">
+            🚫 banned until {{.Expires.UTC.Format "15:04 UTC"}}
+          </span>
+          <form method="POST" action="/users/{{$user.Name}}/unban" style="display:inline;">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <button type="submit" class="warn-btn" style="padding:0.05em 0.4em; font-size:0.8em;">
+              Unban
+            </button>
+          </form>
+          {{end}}
+        </td>
         <td>{{$user.DisplayName}}</td>
         <td><code>{{$user.Email}}</code></td>
         <td>{{if $user.IsAdmin}}<strong>admin</strong>{{else}}user{{end}}</td>

@@ -178,6 +178,13 @@ services:
       # mount path), and the docker-exec target for TOTP generation.
       ENROL_USERS_DB: "/etc/authelia/users_db/users_database.yml"
       ENROL_AUTHELIA_CONTAINER: "authelia"
+      # Authelia's regulator stores rate-limit bans in a sqlite table
+      # (banned_user). The /users admin page reads it to show "Banned
+      # until X · [Unban]" inline per row, and the [Unban] button writes
+      # back via UPDATE … SET revoked=1. /opt/stacks/authelia/data is
+      # the sibling stack's bind for /var/lib/authelia, already RW from
+      # the /opt/stacks bind below — no new mount needed.
+      ENROL_AUTHELIA_STORAGE_DB: "/opt/stacks/authelia/data/db.sqlite3"
 
       # Launcher (post-login app tile grid). Lives under /srv/store; the
       # directory is bootstrapped on startup with the default tiles.

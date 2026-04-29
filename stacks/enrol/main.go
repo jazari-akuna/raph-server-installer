@@ -69,6 +69,7 @@ type config struct {
 	usersDBPath       string // /etc/authelia/users_database.yml inside container
 	autheliaContainer string // "authelia"
 	autheliaURL       string // base URL for proxying /api/firstfactor (loopback)
+	autheliaStorageDB string // path to authelia's sqlite db (regulator bans live in banned_user table)
 
 	// (Pre-Wave-1: LUKS storage layout fields lived here. With Nextcloud-
 	// managed cloud-data the per-user LUKS volumes are gone; the only
@@ -171,6 +172,7 @@ func loadConfig() config {
 		usersDBPath:       envOr("ENROL_USERS_DB", "/etc/authelia/users_database.yml"),
 		autheliaContainer: envOr("ENROL_AUTHELIA_CONTAINER", "authelia"),
 		autheliaURL:       envOr("ENROL_AUTHELIA_URL", "http://127.0.0.1:9091"),
+		autheliaStorageDB: envOr("ENROL_AUTHELIA_STORAGE_DB", "/opt/stacks/authelia/data/db.sqlite3"),
 		launcherDir:       envOr("ENROL_LAUNCHER_DIR", "/srv/store/enrol-launcher"),
 		peersArchiveDir:   envOr("ENROL_PEERS_ARCHIVE_DIR", "/srv/store/enrol-peers-archive"),
 

@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -358,6 +359,10 @@ type userRow struct {
 	Email       string
 	Groups      []string
 	IsAdmin     bool
+	// Banned is non-nil when this user has an active Authelia regulator
+	// ban (rate-limited after too many failed 1FA attempts). The template
+	// shows an inline "Banned until <X> · [Unban]" affordance when set.
+	Banned *userBan
 }
 
 func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash string) {
@@ -370,12 +375,24 @@ func (s *server) renderUsersList(w http.ResponseWriter, r *http.Request, flash s
 	names := db.listSorted()
 	rows := make([]userRow, 0, len(names))
 	specs := make([]storageUserSpec, 0, len(names))
+	// Best-effort ban lookup. If sqlite/the file is unreachable we
+	// degrade silently — the /users page still renders, just without
+	// the ban indicator. The unban form would also fail loudly on POST
+	// so the operator gets a real error there if needed.
+	banCtx, banCancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer banCancel()
+	bans, _ := activeUserBans(banCtx, s.cfg.autheliaStorageDB)
 	for _, name := range names {
 		u := db.Users[name]
-		rows = append(rows, userRow{
+		row := userRow{
 			Name: name, DisplayName: u.DisplayName, Email: u.Email,
 			Groups: u.Groups, IsAdmin: isAdminUser(u),
-		})
+		}
+		if b, ok := bans[name]; ok {
+			b := b
+			row.Banned = &b
+		}
+		rows = append(rows, row)
 		specs = append(specs, storageUserSpec{Name: name, Email: u.Email})
 	}
 	data := usersListData{
@@ -598,9 +615,34 @@ func (s *server) handleUserSub(w http.ResponseWriter, r *http.Request) {
 		s.handleUserTOTP(w, r, name)
 	case "delete":
 		s.handleUserDelete(w, r, name)
+	case "unban":
+		s.handleUserUnban(w, r, name)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleUserUnban revokes any active Authelia regulator ban for `name`.
+// POST-only, admin + CSRF (gated by the parent /users/ route handler).
+// Idempotent — a no-op when nothing's currently banned.
+func (s *server) handleUserUnban(w http.ResponseWriter, r *http.Request, name string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	actor := r.Header.Get("X-Enrol-User")
+	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if err := revokeUserBans(ctx, s.cfg.autheliaStorageDB, name); err != nil {
+		writeAudit(auditPath, auditEntry{Action: "user.unban", Actor: actor,
+			Target: name, Result: "fail", Note: err.Error()})
+		http.Error(w, "unban: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeAudit(auditPath, auditEntry{Action: "user.unban", Actor: actor,
+		Target: name, Result: "ok"})
+	http.Redirect(w, r, "/users", http.StatusSeeOther)
 }
 
 type userDetailData struct {

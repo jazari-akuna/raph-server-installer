@@ -107,6 +107,7 @@ RUN apt-get update \
         login \
         gettext-base \
         restic \
+        sqlite3 \
  && rm -rf /var/lib/apt/lists/*
 
 # docker-compose-plugin isn't in the Debian apt repo (it's only published in
