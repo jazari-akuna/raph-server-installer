@@ -46,6 +46,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -65,6 +66,25 @@ import (
 	"sync"
 	"time"
 )
+
+// backupStageDir is the per-recipe staging area where pg_dump writes its
+// .sql before restic captures it alongside the file paths in a SINGLE
+// snapshot. The dir is created 0700-root, populated, then removed in a
+// defer; the dump file lives on disk for ~1s while restic reads it.
+//
+// The earlier design pipelined pg_dump straight into `restic backup
+// --stdin` to keep the dump off disk, but that produced TWO snapshots
+// per backup operation (one for paths, one for stdin). Per the operator,
+// a single restic snapshot per backup is the correct shape — the dump
+// file goes through /tmp briefly so it can be a backup path alongside
+// recipe.Paths and restic captures everything in one invocation.
+//
+// Security trade-off documented in ADR-010: ~1s window where the dump
+// is on /tmp inside the enrol container, mode 0600 root, no bind to
+// host. The plaintext POSTGRES_PASSWORD already lives at
+// /opt/stacks/cloud/.env on the host, so the dump-on-tmp window is not
+// the weakest link.
+const backupStageDir = "/tmp/enrol-backup-stage"
 
 // ---------------------------------------------------------------------------
 // shared DTO (consumed by templates/backup.html via viewerData.Backup)
@@ -592,14 +612,14 @@ const backupHostTag = "vps"
 //
 // Pipeline:
 //  1. (optional) docker compose stop <recipe.StopServices>
-//  2. restic backup --tag <kind> --tag <recipe.id> --host vps <paths...>
-//  3. (optional) restic backup --stdin via docker exec ... pg_dump
-//  4. (optional) docker compose start <recipe.StopServices>
+//  2. (optional) docker exec pg_dump → /tmp/enrol-backup-stage/<id>/<id>-db.sql
+//  3. ONE restic backup --tag <kind> --tag <id> --host vps <paths...> [stagedir]
+//  4. cleanup the staging dir (defer)
+//  5. (optional) docker compose start <recipe.StopServices>
 //
-// Step 3 uses --stdin-from-command on restic versions that support it
-// (>= 0.16); on older restic we fall back to a Go-side io.Pipe wiring
-// pg_dump's stdout to restic's stdin. The probe is one-shot at startup
-// (`resticSupportsStdinFromCommand`) so we don't pay for it per-call.
+// Step 3 produces a single snapshot per backup operation regardless of
+// whether the recipe carries paths, a pg_dump, or both — see backupStageDir
+// for why we stage the dump on /tmp rather than streaming it via stdin.
 func runBackup(ctx context.Context, cfg config, recipe *backupRecipe, kind string, em sseEmitter) error {
 	if recipe == nil {
 		return errors.New("runBackup: nil recipe")
@@ -607,12 +627,12 @@ func runBackup(ctx context.Context, cfg config, recipe *backupRecipe, kind strin
 	step := recipe.ID + ":" + kind
 	em.Status(step, fmt.Sprintf("starting %s backup of %s", kind, recipe.Display))
 
-	// 1. Stop services if required (Authelia is the only one today).
+	// 1. Stop services if required (Authelia was the only one historically;
+	// today none are stopped — see ADR-010).
 	if len(recipe.StopServices) > 0 {
 		if err := composeServiceCmd(ctx, recipe, "stop", em); err != nil {
 			return fmt.Errorf("stop services: %w", err)
 		}
-		// Restart on any subsequent error AND on success.
 		defer func() {
 			if startErr := composeServiceCmd(context.Background(), recipe, "start", em); startErr != nil {
 				em.Log(fmt.Sprintf("warning: failed to restart %v: %v", recipe.StopServices, startErr))
@@ -620,9 +640,28 @@ func runBackup(ctx context.Context, cfg config, recipe *backupRecipe, kind strin
 		}()
 	}
 
-	// 2. File-system snapshot via `restic backup`.
-	if len(recipe.Paths) > 0 {
-		em.Status(step, "snapshotting paths via restic")
+	// 2. Stage the pg_dump (if any) into the recipe's tmpdir so restic
+	// can pick it up as just another path in step 3.
+	snapshotPaths := append([]string(nil), recipe.Paths...)
+	if recipe.PGDump != nil {
+		em.Status(step, "pg_dump → staging file")
+		stageDir := filepath.Join(backupStageDir, recipe.ID)
+		_ = os.RemoveAll(stageDir) // clear any stale leftovers from a prior crashed run
+		if err := os.MkdirAll(stageDir, 0o700); err != nil {
+			return fmt.Errorf("mkdir stage: %w", err)
+		}
+		defer os.RemoveAll(stageDir)
+		dumpPath := filepath.Join(stageDir, recipe.ID+"-db.sql")
+		if err := runPGDumpToFile(ctx, recipe.PGDump, dumpPath); err != nil {
+			return fmt.Errorf("pg_dump: %w", err)
+		}
+		snapshotPaths = append(snapshotPaths, stageDir)
+	}
+
+	// 3. Single restic snapshot covering the recipe paths + the staged
+	// pg_dump file (if any).
+	if len(snapshotPaths) > 0 {
+		em.Status(step, "snapshotting via restic")
 		args := []string{
 			"backup",
 			"--tag", kind,
@@ -630,18 +669,10 @@ func runBackup(ctx context.Context, cfg config, recipe *backupRecipe, kind strin
 			"--host", backupHostTag,
 			"--quiet",
 		}
-		args = append(args, recipe.Paths...)
+		args = append(args, snapshotPaths...)
 		cmd := resticCmd(ctx, cfg, args...)
 		if err := streamCmd(cmd, em); err != nil {
 			return fmt.Errorf("restic backup: %w", err)
-		}
-	}
-
-	// 3. Optional pg_dump streamed straight into restic.
-	if recipe.PGDump != nil {
-		em.Status(step, "pg_dump → restic")
-		if err := runPGDumpBackup(ctx, cfg, recipe, kind, em); err != nil {
-			return fmt.Errorf("pg_dump: %w", err)
 		}
 	}
 
@@ -649,102 +680,35 @@ func runBackup(ctx context.Context, cfg config, recipe *backupRecipe, kind strin
 	return nil
 }
 
-// runPGDumpBackup wires `docker exec ... pg_dump` to `restic backup --stdin`
-// without ever writing the .sql to disk. Falls back from
-// --stdin-from-command (restic >= 0.16) to a Go-side io.Pipe on older
-// versions; both produce identical snapshots.
-func runPGDumpBackup(ctx context.Context, cfg config, recipe *backupRecipe, kind string, em sseEmitter) error {
-	pwd, err := readPostgresPassword(recipe.PGDump.EnvFile)
+// runPGDumpToFile writes `pg_dump --clean` output to dumpPath (mode 0600).
+// Stderr is captured so a failed dump surfaces useful diagnostics in the
+// audit log rather than just an exit code.
+func runPGDumpToFile(ctx context.Context, pg *pgDump, dumpPath string) error {
+	pwd, err := readPostgresPassword(pg.EnvFile)
 	if err != nil {
-		return fmt.Errorf("read pg password from %s: %w", recipe.PGDump.EnvFile, err)
+		return fmt.Errorf("read pg password from %s: %w", pg.EnvFile, err)
 	}
 	if pwd == "" {
-		return fmt.Errorf("POSTGRES_PASSWORD not found in %s", recipe.PGDump.EnvFile)
+		return fmt.Errorf("POSTGRES_PASSWORD not found in %s", pg.EnvFile)
 	}
-	dumpFilename := recipe.ID + "-db.sql"
-
-	// Try --stdin-from-command first; the operand spec is:
-	//   restic backup --tag <kind> --tag <id> --host vps --stdin-from-command \
-	//     --stdin-filename <id>-db.sql -- docker exec -e PGPASSWORD=... \
-	//     <container> pg_dump --clean -U <user> <db>
-	// On restic >= 0.16 this is one process; the dump never touches disk
-	// AND restic captures the pg_dump exit code (so a half-dump fails
-	// the snapshot rather than silently committing a truncated file).
-	if resticSupportsStdinFromCommand(ctx, cfg) {
-		args := []string{
-			"backup",
-			"--tag", kind,
-			"--tag", recipe.ID,
-			"--host", backupHostTag,
-			"--quiet",
-			"--stdin-from-command",
-			"--stdin-filename", dumpFilename,
-			"--",
-			"docker", "exec",
-			"-e", "PGPASSWORD=" + pwd,
-			recipe.PGDump.Container,
-			"pg_dump", "--clean", "-U", recipe.PGDump.User, recipe.PGDump.DB,
-		}
-		cmd := resticCmd(ctx, cfg, args...)
-		return streamCmd(cmd, em)
-	}
-
-	// Fallback for older restic: pipe pg_dump → restic backup --stdin.
-	dumpCmd := exec.CommandContext(ctx, "docker", "exec",
-		"-e", "PGPASSWORD="+pwd,
-		recipe.PGDump.Container,
-		"pg_dump", "--clean", "-U", recipe.PGDump.User, recipe.PGDump.DB)
-	dumpCmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"}
-
-	resticArgs := []string{
-		"backup",
-		"--tag", kind,
-		"--tag", recipe.ID,
-		"--host", backupHostTag,
-		"--quiet",
-		"--stdin",
-		"--stdin-filename", dumpFilename,
-	}
-	resticBackup := resticCmd(ctx, cfg, resticArgs...)
-
-	stdout, err := dumpCmd.StdoutPipe()
+	f, err := os.OpenFile(dumpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return err
+		return fmt.Errorf("open %s: %w", dumpPath, err)
 	}
-	resticBackup.Stdin = stdout
-	if err := resticBackup.Start(); err != nil {
-		return err
-	}
-	if err := dumpCmd.Run(); err != nil {
-		_ = resticBackup.Process.Kill()
-		_, _ = resticBackup.Process.Wait()
-		return fmt.Errorf("pg_dump exited: %w", err)
-	}
-	return resticBackup.Wait()
-}
+	defer f.Close()
 
-// resticSupportsStdinFromCommand probes restic at most once and caches
-// the result. Strategy: run `restic backup --help` and look for the
-// "--stdin-from-command" string. Fast, no network, no docker.
-var (
-	resticStdinFromCommandOnce sync.Once
-	resticStdinFromCommandOK   bool
-)
-
-func resticSupportsStdinFromCommand(ctx context.Context, cfg config) bool {
-	resticStdinFromCommandOnce.Do(func() {
-		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(probeCtx, cfg.backupResticBin, "backup", "--help")
-		cmd.Env = resticEnv(cfg)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			// Tolerate failure: fall back to --stdin path below.
-			return
-		}
-		resticStdinFromCommandOK = strings.Contains(string(out), "--stdin-from-command")
-	})
-	return resticStdinFromCommandOK
+	cmd := exec.CommandContext(ctx, "docker", "exec",
+		"-e", "PGPASSWORD="+pwd,
+		pg.Container,
+		"pg_dump", "--clean", "-U", pg.User, pg.DB)
+	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"}
+	cmd.Stdout = f
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("pg_dump exit: %w (stderr: %s)", err, strings.TrimSpace(stderrBuf.String()))
+	}
+	return nil
 }
 
 // composeServiceCmd runs `docker compose -f <stack>/docker-compose.yml
@@ -880,7 +844,10 @@ func runPGDumpRestore(ctx context.Context, cfg config, recipe *backupRecipe, sna
 	if pwd == "" {
 		return fmt.Errorf("POSTGRES_PASSWORD not found in %s", recipe.PGDump.EnvFile)
 	}
-	dumpPath := "/" + recipe.ID + "-db.sql"
+	// The dump file lives inside the staging dir at backup time (see
+	// backupStageDir + runBackup step 2). Restic stores absolute paths,
+	// so the in-snapshot path is the same as where it was written.
+	dumpPath := filepath.Join(backupStageDir, recipe.ID, recipe.ID+"-db.sql")
 
 	dumpCmd := resticCmd(ctx, cfg, "dump", snapshotID, dumpPath)
 	psqlCmd := exec.CommandContext(ctx, "docker", "exec", "-i",
