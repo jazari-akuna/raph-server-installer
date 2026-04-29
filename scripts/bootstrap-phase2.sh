@@ -188,13 +188,24 @@ chown 33:33 /srv/store/cloud-{data,config,apps}
 chown 70:70 /srv/store/cloud-db
 chmod 0750 /srv/store/cloud-{data,config,db}
 # cloud-apps must be world-readable (0755 / 0644): the FPM container
-# runs as www-data (uid 33) and writes here when an admin installs an
-# app from the Nextcloud appstore, but the cloud-web nginx sidecar
-# runs as the `nginx` user (uid 101 in the alpine image) and needs to
-# traverse the dir to serve the app's static assets directly off disk
-# (icons / JS / CSS via try_files). With 0750 the sidecar gets EACCES
-# on every /custom_apps/<app>/img/...svg request → blank Talk page +
-# broken icon, the most-recent regression we fixed manually.
+# runs as www-data (uid 82 on the alpine image — NOT 33 like Debian)
+# and writes here when an admin installs an app from the Nextcloud
+# appstore, but the cloud-web nginx sidecar runs as the `nginx` user
+# (uid 101 in the alpine image) and needs to traverse the dir to
+# serve the app's static assets directly off disk (icons / JS / CSS
+# via try_files). With 0750 the sidecar gets EACCES on every
+# /custom_apps/<app>/img/...svg request → blank Talk page + broken
+# icon, the regression fixed by commit 2edd879. The FPM entrypoint
+# runs at umask 022 so newly-created files inside cloud-apps inherit
+# 0755/0644 — "other" gets r-x and nginx (uid 101) reads via the
+# "other" bits without needing an ACL or named-group hack.
+#
+# Companion fix lives in stacks/cloud/conf/nginx.conf: the static-
+# asset location regex must include `mjs` (and `cjs`/`flac`/`ogg`
+# for Talk audio). Otherwise modern Vue-based apps like Contacts,
+# whose main bundle is *.mjs, 404 their JS entrypoint and render
+# blank — same UX symptom as the EACCES problem above but a
+# completely separate root cause. See nginx.conf for the regex.
 chmod 0755 /srv/store/cloud-apps
 
 # ──────────────────────────────────────────────────────────────────────────
