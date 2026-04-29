@@ -5,13 +5,13 @@
 <section class="storage">
   <h2>storage</h2>
   <p class="hint">
-    {{gb .Storage.TotalBytes}}&nbsp;GB filesystem hosting <code>/srv/store</code>:
-    {{gb .Storage.UserOnDisk}}&nbsp;GB used by Nextcloud user data,
-    {{gb .Storage.SystemBytes}}&nbsp;GB by the system,
+    {{gb .Storage.TotalBytes}}&nbsp;GB filesystem,
+    {{gb (sub .Storage.TotalBytes .Storage.FreeBytes)}}&nbsp;GB used,
     {{gb .Storage.FreeBytes}}&nbsp;GB free.
   </p>
   <div class="bar">
-    <div class="seg seg-system" style="width:{{pct .Storage.SystemBytes .Storage.TotalBytes}}%" title="system {{gb .Storage.SystemBytes}} GB"></div>
+    <div class="seg seg-apps" style="width:{{pct .Storage.AppsBytes .Storage.TotalBytes}}%" title="apps {{gb .Storage.AppsBytes}} GB"></div>
+    <div class="seg seg-backups" style="width:{{pct .Storage.BackupsBytes .Storage.TotalBytes}}%" title="backups {{gb .Storage.BackupsBytes}} GB"></div>
     {{range .Storage.Users}}
       {{if .Exists}}
       <div class="seg seg-user" style="width:{{pct .OnDiskBytes $.Storage.TotalBytes}}%" title="{{.Name}} {{gb .OnDiskBytes}} GB on-disk"></div>
@@ -25,9 +25,15 @@
     </thead>
     <tbody>
       <tr>
-        <td><span class="swatch swatch-system"></span></td>
-        <td>apps (OS, docker, logs)</td>
-        <td>{{gb .Storage.SystemBytes}} GB</td>
+        <td><span class="swatch swatch-apps"></span></td>
+        <td>apps (OS, docker, logs, app state)</td>
+        <td>{{gb .Storage.AppsBytes}} GB</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><span class="swatch swatch-backups"></span></td>
+        <td>backups (restic repo)</td>
+        <td>{{gb .Storage.BackupsBytes}} GB</td>
         <td>—</td>
       </tr>
       {{range .Storage.Users}}

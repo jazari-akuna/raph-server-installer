@@ -71,6 +71,7 @@ func newServer(cfg config) (*server, error) {
 			}
 			return fmt.Sprintf("%.2f", 100*float64(part)/float64(whole))
 		},
+		"sub": func(a, b int64) int64 { return a - b },
 		// setupStepDone reports whether `target` is BEFORE `cur` in the
 		// canonical wizard order, i.e. has been left behind. Used by the
 		// progress indicator to render past-step ticks. Accepts the

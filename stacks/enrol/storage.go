@@ -36,7 +36,8 @@ type StorageInfo struct {
 	FreeBytes    int64  // bytes free to non-root
 	UserOnDisk   int64  // sum of per-user data dir bytes
 	NominalBytes int64  // sum of per-user configured quotas
-	SystemBytes  int64  // total - free - userOnDisk (everything else)
+	BackupsBytes int64  // restic repo + any sibling files under enrol-backups
+	AppsBytes    int64  // total - free - userOnDisk - backups (everything else: OS, docker, logs, app state)
 	Users        []UserStorage
 }
 
@@ -170,9 +171,16 @@ func storageSnapshot(cfg config, users []storageUserSpec, taskClient *TaskClient
 		si.NominalBytes += us.NominalBytes
 		si.Users = append(si.Users, us)
 	}
-	si.SystemBytes = si.TotalBytes - si.FreeBytes - si.UserOnDisk
-	if si.SystemBytes < 0 {
-		si.SystemBytes = 0
+	// Backups: walk the parent of the restic repo so any sidecar files
+	// (e.g. an off-host mirror staged next to it) are accounted for, not
+	// just the restic-internal pack files. Falls back gracefully when the
+	// dir is missing (fresh install before the first snapshot).
+	if cfg.backupRepoDir != "" {
+		si.BackupsBytes = backupOnDiskBytes(filepath.Dir(cfg.backupRepoDir))
+	}
+	si.AppsBytes = si.TotalBytes - si.FreeBytes - si.UserOnDisk - si.BackupsBytes
+	if si.AppsBytes < 0 {
+		si.AppsBytes = 0
 	}
 	return si
 }
@@ -242,6 +250,50 @@ func userOnDiskBytes(user string) (int64, bool) {
 	}
 	duCache[user] = duCacheEntry{bytes: n, exists: true, at: time.Now()}
 	return n, true
+}
+
+// backupOnDiskBytes returns the cached or freshly-derived size of the
+// backup directory (restic repo + any sibling staging). Mirrors the
+// duCache pattern so dashboard reloads don't re-shell. Missing dir
+// (fresh install) → 0.
+var (
+	backupCacheMu sync.Mutex
+	backupCacheAt time.Time
+	backupCacheB  int64
+)
+
+func backupOnDiskBytes(path string) int64 {
+	backupCacheMu.Lock()
+	defer backupCacheMu.Unlock()
+	if !backupCacheAt.IsZero() && time.Since(backupCacheAt) < duCacheTTL {
+		return backupCacheB
+	}
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		backupCacheB = 0
+		backupCacheAt = time.Now()
+		return 0
+	}
+	out, err := exec.Command("du", "-sb", path).Output()
+	if err != nil {
+		backupCacheB = 0
+		backupCacheAt = time.Now()
+		return 0
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 1 {
+		backupCacheB = 0
+		backupCacheAt = time.Now()
+		return 0
+	}
+	n, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		backupCacheB = 0
+		backupCacheAt = time.Now()
+		return 0
+	}
+	backupCacheB = n
+	backupCacheAt = time.Now()
+	return n
 }
 
 // runCommand runs `name args...` and returns nil on exit code 0. On

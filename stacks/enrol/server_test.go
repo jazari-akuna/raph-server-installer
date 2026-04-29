@@ -101,6 +101,7 @@ func TestPeerCreatedRendersSetupHelp(t *testing.T) {
 		"awgEnabled":    func() bool { return true },
 		"gb":            func(int64) string { return "0" },
 		"pct":           func(int64, int64) string { return "0" },
+		"sub":           func(a, b int64) int64 { return a - b },
 		"setupStepDone": func(any, string) bool { return false },
 		"prettyBytes":   func(int64) string { return "0" },
 		"storageByName": func([]UserStorage) map[string]UserStorage { return nil },
