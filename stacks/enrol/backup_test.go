@@ -256,7 +256,7 @@ func TestParseResticSnapshots(t *testing.T) {
 		{
 			ID:        "abcd1234",
 			CreatedAt: "2026-04-28 03:00 UTC",
-			Size:      "115 KB (312 MB)",
+			Size:      "— / 115 KB / 312 MB",
 			Tags:      []string{"cloud", "daily"},
 		},
 		{

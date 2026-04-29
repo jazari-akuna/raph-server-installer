@@ -446,19 +446,71 @@ type resticSnapshot struct {
 }
 
 // formatSnapshotSize renders the per-snapshot size column as
-// "<compressed> (<uncompressed>)". Falls back to "—" when restic didn't
-// emit a summary (older snapshots from pre-0.17 restic, or inherited
-// snapshots from another tool). When the compressed delta is zero (no
-// new data — common for re-snapshots of unchanged content), shows
-// "0 B (<uncompressed>)" rather than blank, which is informative
-// (proves dedup worked).
-func formatSnapshotSize(s resticSnapshot) string {
+// "<on-disk> / <added> / <full content>":
+//   - on-disk: bytes of unique blobs referenced by this snapshot (from
+//     restic stats <id> --mode raw-data). If this were the only snapshot
+//     in the repo, this is the disk it would consume. Summing these
+//     across snapshots OVER-counts shared blobs — that's why the repo
+//     total at the top is computed separately.
+//   - added: data_added_packed, the compressed bytes this snapshot
+//     wrote to the repo on top of its parent (marginal cost). Tiny for
+//     re-snapshots of mostly-unchanged trees.
+//   - full content: total_bytes_processed, the logical size of every
+//     file in the snapshot (what `restic restore` would write back).
+//
+// onDisk == -1 signals "lookup failed or not yet computed" → renders as
+// "—" in that slot. Summary == nil (very old snapshots without summary
+// metadata) collapses the whole cell to "—".
+func formatSnapshotSize(s resticSnapshot, onDisk int64) string {
 	if s.Summary == nil {
 		return "—"
 	}
-	return fmt.Sprintf("%s (%s)",
+	od := "—"
+	if onDisk >= 0 {
+		od = formatBytes(onDisk)
+	}
+	return fmt.Sprintf("%s / %s / %s",
+		od,
 		formatBytes(s.Summary.DataAddedPacked),
 		formatBytes(s.Summary.TotalBytesProcessed))
+}
+
+// snapshotOnDiskCache memoises per-snapshot raw-data sizes. Snapshot
+// IDs are content-addressed and immutable, so the size for a given ID
+// never changes once computed; we keep entries forever in process and
+// rebuild the map on container restart.
+var (
+	snapshotOnDiskCacheMu sync.Mutex
+	snapshotOnDiskCache   = map[string]int64{}
+)
+
+// snapshotOnDiskBytes returns the unique-blob size (raw-data mode) of
+// the named snapshot. Returns -1 on any error so callers can render "—"
+// without distinguishing failure modes (the user-facing column doesn't
+// care whether restic is missing or the snapshot was forgotten mid-page-render).
+func snapshotOnDiskBytes(ctx context.Context, cfg config, snapshotID string) int64 {
+	snapshotOnDiskCacheMu.Lock()
+	if v, ok := snapshotOnDiskCache[snapshotID]; ok {
+		snapshotOnDiskCacheMu.Unlock()
+		return v
+	}
+	snapshotOnDiskCacheMu.Unlock()
+
+	cmd := resticCmd(ctx, cfg, "stats", snapshotID, "--mode", "raw-data", "--json")
+	out, err := cmd.Output()
+	if err != nil {
+		return -1
+	}
+	var stats struct {
+		TotalSize int64 `json:"total_size"`
+	}
+	if err := json.Unmarshal(out, &stats); err != nil {
+		return -1
+	}
+	snapshotOnDiskCacheMu.Lock()
+	snapshotOnDiskCache[snapshotID] = stats.TotalSize
+	snapshotOnDiskCacheMu.Unlock()
+	return stats.TotalSize
 }
 
 // shortID returns the first 8 chars of the long restic id, matching what
@@ -486,7 +538,7 @@ func parseResticSnapshots(jsonBody []byte) ([]BackupSnapshotView, error) {
 		out = append(out, BackupSnapshotView{
 			ID:        s.shortID(),
 			CreatedAt: s.Time.UTC().Format("2006-01-02 15:04 UTC"),
-			Size:      formatSnapshotSize(s),
+			Size:      formatSnapshotSize(s, -1),
 			Tags:      s.Tags,
 		})
 	}
@@ -1100,6 +1152,56 @@ func (s *server) buildBackupPageView(ctx context.Context, expandID, csrf string)
 	}()
 	wg.Wait()
 
+	// First pass: figure out which snapshots are actually rendered on this
+	// page (one "latest" per recipe + all snapshots of the expanded recipe)
+	// and fan out parallel raw-data lookups for them. Cache hits are free
+	// after the first render so steady-state cost is just the new daily.
+	var visibleIDs []string
+	seen := map[string]bool{}
+	for i := range backupRecipes {
+		recipe := &backupRecipes[i]
+		snaps := results[i].snaps
+		if results[i].err != nil || len(snaps) == 0 {
+			continue
+		}
+		sort.Slice(snaps, func(a, b int) bool { return snaps[a].Time.After(snaps[b].Time) })
+		results[i].snaps = snaps
+		if !seen[snaps[0].ID] {
+			visibleIDs = append(visibleIDs, snaps[0].ID)
+			seen[snaps[0].ID] = true
+		}
+		if recipe.ID == expandID {
+			for _, s := range snaps {
+				if !seen[s.ID] {
+					visibleIDs = append(visibleIDs, s.ID)
+					seen[s.ID] = true
+				}
+			}
+		}
+	}
+	onDisk := map[string]int64{}
+	if len(visibleIDs) > 0 {
+		var mu sync.Mutex
+		var wg2 sync.WaitGroup
+		wg2.Add(len(visibleIDs))
+		for _, id := range visibleIDs {
+			go func(id string) {
+				defer wg2.Done()
+				v := snapshotOnDiskBytes(ctx, s.cfg, id)
+				mu.Lock()
+				onDisk[id] = v
+				mu.Unlock()
+			}(id)
+		}
+		wg2.Wait()
+	}
+	odFor := func(id string) int64 {
+		if v, ok := onDisk[id]; ok {
+			return v
+		}
+		return -1
+	}
+
 	rows := make([]BackupRecipeView, 0, len(backupRecipes))
 	for i := range backupRecipes {
 		recipe := &backupRecipes[i]
@@ -1112,20 +1214,17 @@ func (s *server) buildBackupPageView(ctx context.Context, expandID, csrf string)
 		}
 		snaps := results[i].snaps
 		if results[i].err == nil && len(snaps) > 0 {
-			sort.Slice(snaps, func(i, j int) bool {
-				return snaps[i].Time.After(snaps[j].Time)
-			})
 			latest := snaps[0]
 			kind := pickKindTag(latest.Tags, recipe.ID)
 			row.LastSnapshotAt = latest.Time.UTC().Format("2006-01-02 15:04") + " (" + kind + ")"
-			row.LastSnapshotSize = formatSnapshotSize(latest)
+			row.LastSnapshotSize = formatSnapshotSize(latest, odFor(latest.ID))
 			if recipe.ID == expandID {
 				view := make([]BackupSnapshotView, 0, len(snaps))
 				for _, s := range snaps {
 					view = append(view, BackupSnapshotView{
 						ID:        s.shortID(),
 						CreatedAt: s.Time.UTC().Format("2006-01-02 15:04 UTC"),
-						Size:      formatSnapshotSize(s),
+						Size:      formatSnapshotSize(s, odFor(s.ID)),
 						Tags:      s.Tags,
 					})
 				}
