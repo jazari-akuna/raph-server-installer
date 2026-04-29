@@ -45,6 +45,17 @@ services:
     # needed. Mutually exclusive with `networks:` and `ports:`.
     network_mode: host
 
+    # CAP_NET_ADMIN is required by `awg syncconf` to talk to the kernel
+    # WireGuard netlink socket — without it, peer-add silently fails to
+    # propagate to the live interface (the conf file is still appended,
+    # so the UI says success but the peer never actually gets handshaked
+    # by the server). This used to be implicitly granted by
+    # `privileged: true` (when LUKS was in the picture); removing
+    # privileged in 51a6cbe lost it. Re-grant just NET_ADMIN — narrowest
+    # capability that still lets the wg netlink calls work.
+    cap_add:
+      - NET_ADMIN
+
     volumes:
       # Source of truth for peers: gw0.conf + sidecar metadata + the
       # shared audit log (peers + users lifecycle entries).
