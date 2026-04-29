@@ -211,6 +211,18 @@
       <pre class="cmd">{{.OffHostHelp.ResticRestoreCmd}}</pre>
       <button type="button" class="copy-btn" data-copy="restore">Copy</button>
     </div>
+
+    <h3># 4. OR restore EVERY stack (latest snapshot of each) from the local mirror</h3>
+    <p class="hint">
+      Each stack lands in its own <code>/tmp/restored-&lt;stack&gt;</code>
+      directory. Inspect, then rsync the contents back to the VPS or
+      to a fresh box. Bring docker stacks up only after the on-disk
+      bind-mount targets are populated.
+    </p>
+    <div class="cmd-wrap">
+      <pre class="cmd">{{.OffHostHelp.ResticRestoreAllCmd}}</pre>
+      <button type="button" class="copy-btn" data-copy="restoreAll">Copy</button>
+    </div>
   </details>
 </section>
 

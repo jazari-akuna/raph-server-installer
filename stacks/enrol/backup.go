@@ -125,9 +125,10 @@ type BackupSnapshotView struct {
 // in server-side with the actual VPS hostname so there's no copy-paste
 // error from a hand-edited example.
 type OffHostCommandsView struct {
-	RsyncCmd         string
-	ResticCopyCmd    string
-	ResticRestoreCmd string
+	RsyncCmd            string
+	ResticCopyCmd       string
+	ResticRestoreCmd    string
+	ResticRestoreAllCmd string
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1170,17 @@ func nextScheduledRun(ctx context.Context) string {
 // substituted so there's no copy-paste error from a hand-edited example.
 func renderOffHostHelp(cfg config) OffHostCommandsView {
 	host := "root@" + cfg.domain
+	stackIDs := make([]string, 0, len(backupRecipes))
+	for i := range backupRecipes {
+		stackIDs = append(stackIDs, backupRecipes[i].ID)
+	}
+	// One-liner: iterate over all stacks and restore the latest snapshot
+	// of each into a per-stack target dir on the laptop. `latest` filters
+	// inside a tag so we get the newest snapshot per stack rather than
+	// the newest overall.
+	restoreAll := fmt.Sprintf(
+		"for s in %s; do restic -r ./local-backup-mirror restore latest --tag $s --target /tmp/restored-$s; done",
+		strings.Join(stackIDs, " "))
 	return OffHostCommandsView{
 		RsyncCmd: fmt.Sprintf(
 			"rsync -av --delete %s:%s/ ./local-backup-mirror/",
@@ -1176,7 +1188,8 @@ func renderOffHostHelp(cfg config) OffHostCommandsView {
 		ResticCopyCmd: fmt.Sprintf(
 			"restic -r sftp:%s:%s copy --from-password-file ~/.raph-restic-password --to-repo /tmp/local-mirror",
 			host, cfg.backupRepoDir),
-		ResticRestoreCmd: "restic -r ./local-backup-mirror restore <snapshot-id> --target /tmp/restored --tag <stack>",
+		ResticRestoreCmd:    "restic -r ./local-backup-mirror restore <snapshot-id> --target /tmp/restored --tag <stack>",
+		ResticRestoreAllCmd: restoreAll,
 	}
 }
 
