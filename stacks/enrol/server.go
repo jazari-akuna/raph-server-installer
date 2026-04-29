@@ -250,6 +250,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/backup/forget", requireAdmin(s.cfg, s.withCSRF(s.handleBackupForget)))
 	mux.HandleFunc("/backup/forget-older", requireAdmin(s.cfg, s.withCSRF(s.handleBackupForgetOlder)))
 	mux.HandleFunc("/backup/events", requireAdmin(s.cfg, s.handleBackupEvents))
+	mux.HandleFunc("/backup/download", requireAdmin(s.cfg, s.handleBackupDownload))
 
 	return s.setupRouteGate(mux)
 }

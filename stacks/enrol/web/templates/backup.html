@@ -49,6 +49,19 @@
     <button type="submit"{{if .InProgress}} disabled{{end}}>Backup all now</button>
   </form>
 
+  {{/* Download the entire restic repo + the password file as one zip
+       for off-host disaster recovery. The receiving end can restore
+       with the on-VPS-repo SSH command shown in the off-host section
+       below (point -r at ./restic and RESTIC_PASSWORD_FILE at
+       ./restic-password). Refuses while a backup/restore is in
+       progress to avoid capturing half-written packs. */}}
+  <a class="button{{if .InProgress}} disabled{{end}}"
+     href="/backup/download"
+     {{if .InProgress}}aria-disabled="true" tabindex="-1"{{end}}
+     title="Streams a zip of the restic repo + password file. Keep it on encrypted media — the password is in plaintext alongside the encrypted repo.">
+    Download backup (zip)
+  </a>
+
   {{/* Bulk-forget: drop every snapshot older than N days across all
        stacks and tags. The hidden `confirm` field is filled by JS in
        backup.js after a typed confirmation prompt; the server also
@@ -212,6 +225,16 @@
       recovery, mirror the repo to your laptop (rsync or restic copy) and
       restore from there.
     </p>
+
+    <h3># 0. OR (simplest) restore from the downloaded zip</h3>
+    <p class="hint">
+      Click <strong>Download backup (zip)</strong> at the top of the page,
+      then on the receiving box:
+    </p>
+    <div class="cmd-wrap">
+      <pre class="cmd">unzip enrol-backup-*.zip -d ./bundle &amp;&amp; for s in cloud task authelia ingress enrol; do RESTIC_PASSWORD_FILE=./bundle/restic-password restic -r ./bundle/restic restore latest --tag $s --target /tmp/restored-$s; done</pre>
+      <button type="button" class="copy-btn" data-copy="restoreFromZip">Copy</button>
+    </div>
 
     <h3># 1. Pull a copy from your laptop (rsync, fastest)</h3>
     <div class="cmd-wrap">

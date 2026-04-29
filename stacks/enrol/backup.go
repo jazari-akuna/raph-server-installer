@@ -45,6 +45,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
@@ -1547,6 +1548,135 @@ func (s *server) handleBackupForgetOlder(w http.ResponseWriter, r *http.Request)
 		Note:   fmt.Sprintf("forget-older days=%d out=%s", days, strings.TrimSpace(string(out))),
 	})
 	http.Redirect(w, r, "/backup", http.StatusSeeOther)
+}
+
+// handleBackupDownload streams a zip of the entire restic repo + the
+// password file so the operator can yank one self-contained DR bundle
+// off the box. Layout inside the zip:
+//
+//	restic-password
+//	restic/<entire repo tree>
+//
+// Restoring on a fresh box: unzip, then the SSH command block from
+// /backup ("restore EVERY stack from on-VPS repo") works verbatim once
+// you point RESTIC_PASSWORD_FILE at ./restic-password and -r at
+// ./restic.
+//
+// Caveats surfaced as 409 / no-cache headers:
+//   - Refuses while a backup or restore is in flight (the repo would
+//     be a moving target; the resulting zip might capture half-written
+//     pack files that restic later rejects).
+//   - The bundle is encrypted by restic AT REST but the password file
+//     is in plaintext alongside it — anyone who lays hands on the zip
+//     has everything. Keep it on encrypted media off-host. The
+//     download itself is gated by requireAdmin (same auth bar as
+//     restore) and the response is no-cache so a browser tab doesn't
+//     leak it into disk cache.
+func (s *server) handleBackupDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if op := globalOpTracker.current(); op != nil {
+		http.Error(w, "a backup or restore op is in progress; try again when it completes",
+			http.StatusConflict)
+		return
+	}
+	repoDir := s.cfg.backupRepoDir
+	pwFile := s.cfg.backupPasswordFile
+	if _, err := os.Stat(repoDir); err != nil {
+		http.Error(w, "restic repo not initialised yet: "+err.Error(),
+			http.StatusServiceUnavailable)
+		return
+	}
+	if _, err := os.Stat(pwFile); err != nil {
+		http.Error(w, "restic password file missing: "+err.Error(),
+			http.StatusServiceUnavailable)
+		return
+	}
+
+	filename := fmt.Sprintf("enrol-backup-%s.zip", time.Now().UTC().Format("2006-01-02-150405"))
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	auditPath := filepath.Join(s.cfg.awgDir, "peers-audit.log")
+	writeAudit(auditPath, auditEntry{
+		Action: "backup.download", Actor: r.Header.Get(s.cfg.headerUser),
+		Target: "all", Result: "ok",
+	})
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	// Password file at the top level — restoring is one less path to
+	// remember if it's right next to the repo.
+	if err := zipAddFile(zw, pwFile, "restic-password"); err != nil {
+		log.Printf("backup download: zip password: %v", err)
+		return
+	}
+
+	// Walk the repo. We deliberately do NOT use filepath.Walk's lexical
+	// order rewrite for the zip — restic's pack files don't care, and
+	// streaming-as-walked keeps memory bounded on multi-GB repos.
+	walkErr := filepath.Walk(repoDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(repoDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		// Skip restic locks — they're per-process and a stale one in the
+		// zip would just confuse the operator on the receiving side.
+		if strings.HasPrefix(rel, "locks"+string(os.PathSeparator)) {
+			return nil
+		}
+		zipName := filepath.ToSlash(filepath.Join("restic", rel))
+		if info.IsDir() {
+			_, err := zw.Create(zipName + "/")
+			return err
+		}
+		return zipAddFile(zw, path, zipName)
+	})
+	if walkErr != nil {
+		// Headers + some bytes already flushed — best we can do is log;
+		// the client will see a truncated zip and the audit log already
+		// recorded "ok" optimistically. Trade we accept to keep the
+		// streaming response simple.
+		log.Printf("backup download: walk %s: %v", repoDir, walkErr)
+	}
+}
+
+// zipAddFile copies one filesystem file into the zip writer at the
+// supplied archive path. Streaming, so a 10 GB repo doesn't balloon
+// memory.
+func zipAddFile(zw *zip.Writer, fsPath, zipPath string) error {
+	st, err := os.Stat(fsPath)
+	if err != nil {
+		return err
+	}
+	hdr, err := zip.FileInfoHeader(st)
+	if err != nil {
+		return err
+	}
+	hdr.Name = zipPath
+	hdr.Method = zip.Deflate
+	dst, err := zw.CreateHeader(hdr)
+	if err != nil {
+		return err
+	}
+	src, err := os.Open(fsPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	_, err = io.Copy(dst, src)
+	return err
 }
 
 // handleBackupEvents streams the buffered + live event log for one op.
