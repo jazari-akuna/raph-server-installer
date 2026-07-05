@@ -129,12 +129,20 @@ if [[ "$SKIP_GW0" != "1" ]]; then
   log "==> verifying amneziawg kernel module"
   if [[ "${TEST_MODE:-0}" == "1" ]]; then
     log "    TEST_MODE: skipping modinfo/modprobe amneziawg (DKMS not built in container)"
-  else
-    if ! modinfo amneziawg >/dev/null 2>&1; then
+  elif ! modinfo amneziawg >/dev/null 2>&1; then
+    # On a FRESH install nothing has installed the DKMS package yet —
+    # install-gw0.sh (step 2, below) adds the PPA and builds it, with
+    # its own ground-truth verification + remediation block. Only fail
+    # here when gw0 was already provisioned by a previous run (i.e. an
+    # upgrade/reboot path where a previously-working module vanished,
+    # which typically means a kernel bump broke the DKMS build).
+    if [[ -f /etc/amnezia/amneziawg/gw0.conf ]]; then
       fail "amneziawg kernel module not present after reboot — DKMS build failed. \
 Inspect /var/lib/dkms/amneziawg/*/build/make.log and the install-gw0.sh \
 remediation block."
     fi
+    log "    module not present yet (fresh install) — install-gw0.sh below will build it"
+  else
     log "    amneziawg modinfo OK"
 
     # Don't load it pre-emptively — install-gw0.sh / awg-quick will pull it in
