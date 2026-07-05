@@ -107,7 +107,7 @@ User data lives in plaintext on the host's encrypted-at-rest filesystem (Layerst
 
 **Decision.** Multi-stack / multi-wave deliveries land as ONE commit at the end, not one-commit-per-agent or one-commit-per-wave.
 
-Author `mail@raph.io`, standard `Co-Authored-By: Claude Opus 4.7 (1M context)` footer. Commit message body summarises the whole delivery: which stacks changed, which were torn out, which user-facing surface changed.
+Author is the operator's git identity, standard `Co-Authored-By: Claude Opus 4.7 (1M context)` footer. Commit message body summarises the whole delivery: which stacks changed, which were torn out, which user-facing surface changed.
 
 **Why.** Operator preference. Bisect-friendliness traded for a clean PR/release-notes story. The wave-by-wave detail is in the plan files at `/root/.claude/plans/`.
 
