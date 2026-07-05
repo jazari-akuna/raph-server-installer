@@ -208,7 +208,8 @@ func (s *server) verifyCertIssued(domain string) error {
 	return nil
 }
 
-// verifyNPMRoutes asserts the five required proxy hosts exist in NPM. Logs
+// verifyNPMRoutes asserts the required proxy hosts exist in NPM (auth,
+// enrol, console always; cloud + task unless skipped via opt-out). Logs
 // in with the wizard-rotated admin (operator's email + plaintext from the
 // in-memory cache); if the cache is empty (post-finalize wipe, or operator
 // didn't re-walk /setup/admin) returns a clear "re-enter password" error.
@@ -236,9 +237,16 @@ func (s *server) verifyNPMRoutes(ctx context.Context, st *setupState) error {
 	want := []string{
 		"auth." + st.Domain,
 		"enrol." + st.Domain,
-		"cloud." + st.Domain,
 		"console." + st.Domain,
-		"task." + st.Domain,
+	}
+	// cloud + task are opt-out stacks (SKIP_CLOUD / SKIP_TASK); when
+	// skipped, finalizeWireNPM never creates their hosts so requiring
+	// them here would wedge finalize permanently.
+	if !s.cfg.skipCloud {
+		want = append(want, "cloud."+st.Domain)
+	}
+	if !s.cfg.skipTask {
+		want = append(want, "task."+st.Domain)
 	}
 	have := map[string]bool{}
 	for _, h := range hosts {

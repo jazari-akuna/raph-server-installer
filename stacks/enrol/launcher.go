@@ -1,8 +1,9 @@
 // launcher.go — app launcher (post-login landing).
 //
 // Tile grid of apps backed by <launcherDir>/apps.json + per-app icons under
-// <launcherDir>/icons/<id>.<ext>. The dir is bootstrapped with four default
-// tiles (cloud, enrol-users, console, task) whose PNGs are seeded from the
+// <launcherDir>/icons/<id>.<ext>. The dir is bootstrapped with the default
+// tiles (cloud, enrol-users, console, task — cloud/task omitted when the
+// stack is opted out) whose PNGs are seeded from the
 // image repo at /app/web/static/launcher-defaults/<id>.png on first run; if
 // a copy fails the tile falls back to CSS-initials.
 //
@@ -112,7 +113,7 @@ func saveLauncher(dir string, apps []LauncherApp) error {
 	return os.Rename(tmp, filepath.Join(dir, "apps.json"))
 }
 
-func bootstrapLauncher(dir, domain string) error {
+func bootstrapLauncher(dir, domain string, skipCloud, skipTask bool) error {
 	if err := os.MkdirAll(filepath.Join(dir, "icons"), 0o750); err != nil {
 		return fmt.Errorf("mkdir launcher dir: %w", err)
 	}
@@ -123,11 +124,16 @@ func bootstrapLauncher(dir, domain string) error {
 		return err
 	}
 	icons := seedDefaultIcons(dir, "/app/web/static/launcher-defaults")
-	defaults := []LauncherApp{
-		{ID: "cloud", Name: "Cloud", URL: "https://cloud." + domain + "/", Icon: icons["cloud"]},
-		{ID: "enrol-users", Name: "Enrol", URL: "https://enrol." + domain + "/users", Icon: icons["enrol-users"]},
-		{ID: "console", Name: "Console", URL: "https://console." + domain + "/", Icon: icons["console"]},
-		{ID: "task", Name: "Tasks", URL: "https://task." + domain + "/", Icon: icons["task"]},
+	var defaults []LauncherApp
+	if !skipCloud {
+		defaults = append(defaults, LauncherApp{ID: "cloud", Name: "Cloud", URL: "https://cloud." + domain + "/", Icon: icons["cloud"]})
+	}
+	defaults = append(defaults,
+		LauncherApp{ID: "enrol-users", Name: "Enrol", URL: "https://enrol." + domain + "/users", Icon: icons["enrol-users"]},
+		LauncherApp{ID: "console", Name: "Console", URL: "https://console." + domain + "/", Icon: icons["console"]},
+	)
+	if !skipTask {
+		defaults = append(defaults, LauncherApp{ID: "task", Name: "Tasks", URL: "https://task." + domain + "/", Icon: icons["task"]})
 	}
 	return saveLauncher(dir, defaults)
 }

@@ -130,7 +130,7 @@ func newServer(cfg config) (*server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse templates %s: %w", pattern, err)
 	}
-	if err := bootstrapLauncher(cfg.launcherDir, cfg.domain); err != nil {
+	if err := bootstrapLauncher(cfg.launcherDir, cfg.domain, cfg.skipCloud, cfg.skipTask); err != nil {
 		return nil, fmt.Errorf("bootstrap launcher: %w", err)
 	}
 	if err := ensureArchiveDir(cfg); err != nil {

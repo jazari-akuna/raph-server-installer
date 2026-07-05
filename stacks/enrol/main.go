@@ -76,6 +76,16 @@ type config struct {
 	// host-side path the dashboard cares about is /srv/store/cloud-data,
 	// hardcoded in storage.go's cloudDataRoot const.)
 
+	// App opt-outs (ENROL_SKIP_CLOUD / ENROL_SKIP_TASK, threaded from
+	// /opt/stacks/.env's SKIP_CLOUD / SKIP_TASK via docker-compose).
+	// When true, the finalize pipeline does not wire the corresponding
+	// NPM proxy host, the launcher omits the default tile, and the
+	// backup recipe list drops the stack. All the runtime integrations
+	// (occ shell-outs, task DB stats) already degrade gracefully when
+	// the containers are absent, so no further gating is needed.
+	skipCloud bool
+	skipTask  bool
+
 	// Launcher (post-login app tile grid).
 	launcherDir string // /srv/store/enrol-launcher
 
@@ -167,6 +177,8 @@ func loadConfig() config {
 		headerGroups:      envOr("ENROL_HEADER_GROUPS", "Remote-Groups"),
 		requiredGroup:     envOr("ENROL_REQUIRED_GROUP", "admin"),
 		forwardAuthSecret: os.Getenv("ENROL_FORWARD_AUTH_SECRET"),
+		skipCloud:         envBool("ENROL_SKIP_CLOUD"),
+		skipTask:          envBool("ENROL_SKIP_TASK"),
 		templatesDir:      envOr("ENROL_TEMPLATES", "/app/web/templates"),
 		staticDir:         envOr("ENROL_STATIC", "/app/web/static"),
 		usersDBPath:       envOr("ENROL_USERS_DB", "/etc/authelia/users_database.yml"),
@@ -197,6 +209,17 @@ func loadConfig() config {
 		backupResticBin:      envOr("ENROL_BACKUP_RESTIC_BIN", "restic"),
 		backupRetentionDaily: atoiOr(envOr("ENROL_BACKUP_KEEP_DAILY", "10"), 10),
 	}
+}
+
+// envBool reports whether the named env var holds an affirmative value.
+// Anything other than "1"/"true"/"yes" (case-insensitive) — including
+// unset/empty — is false, so a missing var means "feature installed".
+func envBool(k string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(k))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
 }
 
 // atoiOr returns the integer parse of s, or def on any error / blank.

@@ -161,6 +161,11 @@ services:
       ENROL_HEADER_USER: "Remote-User"
       ENROL_HEADER_GROUPS: "Remote-Groups"
       ENROL_REQUIRED_GROUP: "admin"
+      # App opt-outs, persisted to /opt/stacks/.env by bootstrap.sh. When
+      # "1", the wizard's finalize skips the corresponding NPM proxy host,
+      # the launcher omits the tile, and the backup page drops the recipe.
+      ENROL_SKIP_CLOUD: "${SKIP_CLOUD:-0}"
+      ENROL_SKIP_TASK: "${SKIP_TASK:-0}"
       # Forward-auth secret: NPM injects X-Forward-Auth-Secret on every
       # protected request (see finalizeWireNPM), and enrol's auth gate
       # constant-time-compares against this env var. Without it an

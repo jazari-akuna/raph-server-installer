@@ -86,6 +86,11 @@ every config decision interactively and explains what each step does.
    on a 2 vCPU host (longer if a kernel reboot is needed for the
    AmneziaWG DKMS module).
 
+   Optional app opt-outs: `export SKIP_CLOUD=1` skips the file-storage
+   stack (Nextcloud), `export SKIP_TASK=1` skips the project tracker
+   (Vikunja). Add either line above the `curl | bash` line. Everything
+   else (SSO, gateway, admin UI) installs as normal.
+
 4. **Open the wizard** at `https://setup.<your-domain>/` (or
    `https://<vps-ip>/` with the `Host: setup.<your-domain>` header if DNS
    is still propagating). The wizard ships behind a self-signed cert

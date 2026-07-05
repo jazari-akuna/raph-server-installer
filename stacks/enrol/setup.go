@@ -1139,7 +1139,7 @@ func (s *server) runFinalize(
 
 	// 6. wire NPM proxy hosts.
 	if !st.CompletedSteps.NPMRoutesWired {
-		status("npm", "wiring NPM proxy hosts (auth/enrol/cloud/console/task)")
+		status("npm", "wiring NPM proxy hosts")
 		if err := s.finalizeWireNPM(ctx, st, logLine); err != nil {
 			return wrapErr("npm", err)
 		}
@@ -1645,9 +1645,10 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 	// forward-auth secret because cloud.<domain> doesn't run forward-auth.
 	advNextcloud := npmAdvNextcloudTmpl
 
-	// The four proxy hosts. Order matches wire-npm-routes.sh; the
+	// The proxy hosts. Order matches wire-npm-routes.sh; the
 	// advanced_config strings are byte-for-byte identical so cookies and
-	// in-flight Authelia sessions survive the swap-over.
+	// in-flight Authelia sessions survive the swap-over. cloud + task are
+	// appended conditionally below (skipCloud / skipTask opt-outs).
 	hosts := []ProxyHost{
 		{
 			DomainNames:           []string{"auth." + st.Domain},
@@ -1685,6 +1686,23 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			AdvancedConfig:        advFwdAuth,
 		},
 		{
+			DomainNames:           []string{"console." + st.Domain},
+			ForwardScheme:         "https",
+			ForwardHost:           "console",
+			ForwardPort:           9443,
+			BlockExploits:         true,
+			AllowWebsocketUpgrade: true,
+			CertificateID:         certID,
+			SSLForced:             true,
+			HTTP2Support:          true,
+			HSTSEnabled:           true,
+			AdvancedConfig:        advFwdAuth,
+		},
+	}
+	if s.cfg.skipCloud {
+		logLine("npm: SKIP_CLOUD=1 — not wiring cloud." + st.Domain)
+	} else {
+		hosts = append(hosts, ProxyHost{
 			DomainNames:   []string{"cloud." + st.Domain},
 			ForwardScheme: "http",
 			// Nextcloud's web frontend container (the apache-php image).
@@ -1700,21 +1718,12 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			HTTP2Support:          true,
 			HSTSEnabled:           true,
 			AdvancedConfig:        advNextcloud,
-		},
-		{
-			DomainNames:           []string{"console." + st.Domain},
-			ForwardScheme:         "https",
-			ForwardHost:           "console",
-			ForwardPort:           9443,
-			BlockExploits:         true,
-			AllowWebsocketUpgrade: true,
-			CertificateID:         certID,
-			SSLForced:             true,
-			HTTP2Support:          true,
-			HSTSEnabled:           true,
-			AdvancedConfig:        advFwdAuth,
-		},
-		{
+		})
+	}
+	if s.cfg.skipTask {
+		logLine("npm: SKIP_TASK=1 — not wiring task." + st.Domain)
+	} else {
+		hosts = append(hosts, ProxyHost{
 			// task.<domain> → task-app:3456 (Vikunja's unified Go
 			// binary serves API + Vue frontend). No forward-auth:
 			// Vikunja manages its own session via OIDC against Authelia
@@ -1733,7 +1742,7 @@ func (s *server) finalizeWireNPM(ctx context.Context, st *setupState, logLine fu
 			HTTP2Support:          true,
 			HSTSEnabled:           true,
 			AdvancedConfig:        npmAdvTaskTmpl,
-		},
+		})
 	}
 
 	for _, h := range hosts {

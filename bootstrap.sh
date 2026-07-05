@@ -145,6 +145,14 @@ export ADMIN_USERS_SSH="${ADMIN_USERS_SSH:-$ADMIN_USERS}"
 # pre-seeds it we honour it. Default to the conventional postmaster@.
 export ADMIN_EMAIL="${ADMIN_EMAIL:-admin@${DOMAIN}}"
 
+# App opt-outs. SKIP_CLOUD=1 leaves out the file-storage stack (cloud);
+# SKIP_TASK=1 leaves out the project-tracker stack (task). Both default
+# to installed. Persisted to /opt/stacks/.env below so Phase 2 (which
+# runs post-reboot from systemd, without the operator's shell env) and
+# the enrol wizard see the same choice.
+export SKIP_CLOUD="${SKIP_CLOUD:-0}"
+export SKIP_TASK="${SKIP_TASK:-0}"
+
 # Defaults for placeholder-required vars so render-templates.sh doesn't
 # blow up before the wizard supplies the real values. The wizard re-renders
 # templates at the end of Phase 2 (via render-templates.sh) with the real
@@ -312,6 +320,8 @@ DOMAIN='${DOMAIN}'
 ADMIN_EMAIL='${ADMIN_EMAIL}'
 ADMIN_USERS='${ADMIN_USERS}'
 ADMIN_USERS_SSH='${ADMIN_USERS_SSH}'
+SKIP_CLOUD='${SKIP_CLOUD}'
+SKIP_TASK='${SKIP_TASK}'
 ENROL_DOMAIN='${DOMAIN}'
 SETUP_TOKEN='${SETUP_TOKEN}'
 QEDGE_PASSWORD='${QEDGE_PASSWORD}'

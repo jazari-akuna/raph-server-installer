@@ -176,11 +176,24 @@ fi
 # Step 3 — cloud (Nextcloud) bind-mount targets.
 # ──────────────────────────────────────────────────────────────────────────
 
+# App opt-outs, persisted to /opt/stacks/.env by bootstrap.sh (Phase 1)
+# so they survive the reboot into this unit. SKIP_CLOUD=1 leaves out the
+# file-storage stack entirely; SKIP_TASK=1 leaves out the project tracker
+# (the task stack is deployed post-wizard per stacks/task/README.md, but
+# the flag also stops the wizard from wiring its proxy host — see
+# stacks/enrol/setup.go finalizeWireNPM). The .env was sourced above, so
+# operator-persisted values win over these defaults.
+SKIP_CLOUD="${SKIP_CLOUD:-0}"
+SKIP_TASK="${SKIP_TASK:-0}"
+
 # Per ADR-001, Nextcloud's persistent state lives on host bind-mounts under
 # /srv/store/cloud-* so backup is one rsync + a pg_dump (see docs/backups.md).
 # The Postgres image refuses to init if /var/lib/postgresql/data exists with
 # the wrong perms; same goes for Nextcloud's www-data writes. Pre-create the
 # four targets with the right uid/gid before compose-up cloud below.
+if [[ "$SKIP_CLOUD" == "1" ]]; then
+  log "==> SKIP_CLOUD=1 — skipping cloud bind-mount targets"
+else
 strict_step "create cloud bind-mount targets"
 log "==> creating /srv/store/cloud-* bind-mount targets"
 mkdir -p /srv/store/cloud-{data,config,apps,db}
@@ -207,6 +220,7 @@ chmod 0750 /srv/store/cloud-{data,config,db}
 # blank — same UX symptom as the EACCES problem above but a
 # completely separate root cause. See nginx.conf for the regex.
 chmod 0755 /srv/store/cloud-apps
+fi
 
 # ──────────────────────────────────────────────────────────────────────────
 # Step 3.5 — generate Authelia secrets BEFORE compose-up authelia.
@@ -322,7 +336,11 @@ fi
 
 compose_up ingress
 compose_up authelia
-compose_up cloud
+if [[ "$SKIP_CLOUD" == "1" ]]; then
+  log "==> SKIP_CLOUD=1 — skipping cloud stack"
+else
+  compose_up cloud
+fi
 compose_up console
 compose_up enrol
 

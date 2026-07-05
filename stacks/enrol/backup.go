@@ -160,10 +160,12 @@ type backupRecipe struct {
 	Restorable   bool     // false for "enrol" — can't safely restore self mid-stream.
 }
 
-// backupRecipes is the canonical list driving the UI table, the CLI
-// iteration, and the recipe-id whitelist for restore. Add a new stack
-// here. Display strings camouflage the upstream image identity (ADR-002).
-var backupRecipes = []backupRecipe{
+// allBackupRecipes is the canonical list of every stack the installer
+// knows how to snapshot. Add a new stack here. Display strings camouflage
+// the upstream image identity (ADR-002). The ACTIVE list (backupRecipes,
+// below) filters this by the app opt-outs so a SKIP_CLOUD / SKIP_TASK
+// install doesn't show (and nightly-fail) recipes for absent stacks.
+var allBackupRecipes = []backupRecipe{
 	{
 		ID:           "cloud",
 		Display:      "Cloud (Nextcloud)",
@@ -204,6 +206,27 @@ var backupRecipes = []backupRecipe{
 		Restorable: false,
 		Paths:      []string{"/srv/store/enrol-launcher", "/srv/store/enrol-peers-archive", "/etc/raph-installer", "/opt/stacks/.env"},
 	},
+}
+
+// backupRecipes is the active list driving the UI table, the CLI
+// iteration, and the recipe-id whitelist for restore. Filtered once at
+// process start from allBackupRecipes by the ENROL_SKIP_CLOUD /
+// ENROL_SKIP_TASK opt-outs (same env vars loadConfig reads — evaluated
+// here directly because the CLI path and tests construct configs of
+// their own).
+var backupRecipes = activeBackupRecipes()
+
+func activeBackupRecipes() []backupRecipe {
+	skipCloud := envBool("ENROL_SKIP_CLOUD")
+	skipTask := envBool("ENROL_SKIP_TASK")
+	out := make([]backupRecipe, 0, len(allBackupRecipes))
+	for _, r := range allBackupRecipes {
+		if (r.ID == "cloud" && skipCloud) || (r.ID == "task" && skipTask) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // recipeByID returns the matching recipe by id, or nil if unknown.
