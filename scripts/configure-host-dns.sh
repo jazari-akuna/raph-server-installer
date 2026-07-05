@@ -36,9 +36,17 @@ die() { printf '[configure-host-dns] ERROR: %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "must run as root"
 
 # Sanity: systemd-resolved must be present + active. Most Ubuntu LTS
-# images have it on by default; older Debian or container hosts may not.
+# images have it on by default, but some provider images (e.g. DMIT)
+# ship it masked with a static /etc/resolv.conf. This script is a DNS
+# CACHE OPTIMIZATION for peers — without it, new peer .conf files fall
+# back to public resolvers (enrol's renderClientConf default), which
+# works fine. So skip with a warning rather than failing the install.
 if ! systemctl is-active --quiet systemd-resolved; then
-  die "systemd-resolved is not active — install systemd-resolved or set DNS manually"
+  log "WARNING: systemd-resolved is not active — skipping the peer DNS-cache setup."
+  log "         Peers will use public DNS resolvers. To enable the shared cache:"
+  log "         systemctl unmask systemd-resolved && systemctl enable --now systemd-resolved"
+  log "         then re-run this script."
+  exit 0
 fi
 
 # Drop-in config: bind the stub resolver to GW0_ADDR (in addition to
