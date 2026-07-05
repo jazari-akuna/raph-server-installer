@@ -222,11 +222,18 @@ DOMAIN_NAMES_JSON="$(jq -nc --arg setup "$SETUP_HOST" '[$setup]')"
 #   - Default proxy_buffering=on collects the entire SSE response before
 #     forwarding, defeating the streaming entirely. Disable it for /events
 #     specifically and for the host as a whole (defence in depth).
-# X-Forward-Auth-Secret: injected on every request so enrol's requireAuth
-# (when it eventually fronts wizard endpoints) accepts the proxied request.
+# X-Forward-Auth-Secret: enrol's requireSetupToken fails closed without it,
+# so EVERY proxied request must carry it. The header MUST be set inside the
+# location blocks, not at server{} level: nginx's proxy_set_header does not
+# merge across levels — NPM's default `location /` declares its own
+# proxy_set_header directives (Upgrade/Connection + proxy.conf), which
+# discards everything inherited from server{}, silently dropping the secret
+# and 401-ing the whole wizard. We therefore ship our own `location /`
+# (NPM's template skips its default location when advanced_config contains
+# one) that replicates proxy.conf and adds the header.
 # We single-quote the value in the nginx fragment; the secret is hex-encoded
 # (alnum-only) so no nginx-config-special characters can appear inside.
-ADVANCED_CONFIG="$(printf 'proxy_read_timeout 600s;\nproxy_send_timeout 600s;\nproxy_buffering off;\nproxy_cache off;\nchunked_transfer_encoding on;\nproxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\nlocation /setup/events {\n    proxy_pass http://$server:$port;\n    proxy_set_header Host $host;\n    proxy_http_version 1.1;\n    proxy_set_header Connection '"'"''"'"';\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_buffering off;\n    proxy_cache off;\n    proxy_read_timeout 1h;\n    chunked_transfer_encoding on;\n}\n' "$FORWARD_AUTH_SECRET" "$FORWARD_AUTH_SECRET")"
+ADVANCED_CONFIG="$(printf 'proxy_read_timeout 600s;\nproxy_send_timeout 600s;\nproxy_buffering off;\nproxy_cache off;\nchunked_transfer_encoding on;\nlocation /setup/events {\n    proxy_pass http://$server:$port;\n    proxy_set_header Host $host;\n    proxy_http_version 1.1;\n    proxy_set_header Connection '"'"''"'"';\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_buffering off;\n    proxy_cache off;\n    proxy_read_timeout 1h;\n    chunked_transfer_encoding on;\n}\nlocation / {\n    include conf.d/include/proxy.conf;\n    proxy_set_header X-Forward-Auth-Secret '"'"'%s'"'"';\n    proxy_buffering off;\n    proxy_cache off;\n    proxy_read_timeout 600s;\n    proxy_send_timeout 600s;\n    chunked_transfer_encoding on;\n}\n' "$FORWARD_AUTH_SECRET" "$FORWARD_AUTH_SECRET")"
 
 PAYLOAD="$(jq -nc \
     --argjson names "$DOMAIN_NAMES_JSON" \
