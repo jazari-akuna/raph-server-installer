@@ -25,9 +25,12 @@ if [[ "${SKIP_GW0:-0}" == "1" ]]; then
   exit 0
 fi
 
-# Preflight: only checks for the gw0=ON path.
+# Preflight: only checks for the gw0=ON path. add-apt-repository and dkms
+# are deliberately NOT required here — this script installs them itself
+# (software-properties-common + the DKMS build prereqs below), so requiring
+# them up-front would fail every fresh turnkey install.
 require_root
-require_cmd apt-get add-apt-repository dkms install awk sed od ip systemctl modinfo
+require_cmd apt-get install awk sed od ip systemctl modinfo
 
 REPO_HOST_DIR="/root/host"
 # amneziawg-tools ships its config under /etc/amnezia/amneziawg/, not
