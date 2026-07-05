@@ -1174,8 +1174,11 @@ type peersListData struct {
 	ViewerIsAdmin bool
 	Groups        []peerGroup
 	Users         []string
-	Tags          []string
-	Flash         string
+	// DefaultTag pre-fills the free-text device-name input with a random
+	// animal name; the full peer name becomes "<user>-<DefaultTag>" unless
+	// the user types their own.
+	DefaultTag string
+	Flash      string
 }
 
 // setupHelpData feeds web/templates/_setup-help.html. Everything is
@@ -1365,7 +1368,7 @@ func (s *server) renderPeerList(w http.ResponseWriter, r *http.Request, flash st
 		ViewerIsAdmin: isAdmin,
 		Groups:        groups,
 		Users:         knownUsers,
-		Tags:          []string{"laptop", "phone", "tablet", "other"},
+		DefaultTag:    randomAnimal(),
 		Flash:         flash,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1419,7 +1422,7 @@ func (s *server) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := strings.TrimSpace(r.Form.Get("user"))
-	tag := strings.TrimSpace(r.Form.Get("device_tag"))
+	tag := normalizeDeviceTag(r.Form.Get("device_tag"))
 	actor := r.Header.Get("X-Enrol-User")
 	// Non-admins can only enrol devices for themselves: ignore whatever
 	// the form posts and pin user=actor. Admins keep the dropdown.

@@ -46,11 +46,12 @@
   <h2>add device</h2>
   <p class="hint">
     {{if .ViewerIsAdmin}}
-      Pick the user the device belongs to, then a device tag. The peer
-      name is built as <code>&lt;user&gt;-&lt;tag&gt;</code> automatically.
+      Pick the user the device belongs to, then name the device anything
+      you like. The peer name is built as
+      <code>&lt;user&gt;-&lt;name&gt;</code> automatically.
     {{else}}
-      Pick a device tag — the peer name is built as
-      <code>{{.User}}-&lt;tag&gt;</code> automatically. After creating,
+      Name the device anything you like — the peer name is built as
+      <code>{{.User}}-&lt;name&gt;</code> automatically. After creating,
       download the <code>.conf</code> (or scan the QR) into AmneziaWG
       on your laptop or phone.
     {{end}}
@@ -69,10 +70,10 @@
          just so the form posts something familiar. */}}
     <input type="hidden" name="user" value="{{.User}}">
     {{end}}
-    <label>device tag
-      <select name="device_tag" required>
-        {{range .Tags}}<option value="{{.}}">{{.}}</option>{{end}}
-      </select>
+    <label>device name
+      <input type="text" name="device_tag" value="{{.DefaultTag}}"
+             maxlength="32" required
+             title="letters, digits, spaces and hyphens; up to 32 chars">
     </label>
     <button type="submit">add</button>
   </form>

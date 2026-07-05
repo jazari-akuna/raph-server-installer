@@ -326,7 +326,8 @@ Carried over from prior version. Sidecar JSON map keyed by public key:
 ```go
 type Peer struct {
     Name      string  // "<user>-<tag>"
-    DeviceTag string  // laptop | phone | tablet | other
+    DeviceTag string  // free-form user-chosen name, normalized to [a-z0-9-]
+                      // (default suggestion: random animal name)
     User      string  // derived from Name prefix; "" if unmanaged
     PublicKey string
     IP        string

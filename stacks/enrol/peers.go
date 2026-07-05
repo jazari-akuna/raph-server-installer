@@ -59,9 +59,58 @@ func peerNameFor(user, tag string) (string, error) {
 		return "", fmt.Errorf("invalid username %q", user)
 	}
 	if !validDeviceTag(tag) {
-		return "", fmt.Errorf("invalid device tag %q (allowed: a-z 0-9, 1..16 chars)", tag)
+		return "", fmt.Errorf("invalid device name %q (allowed: letters, digits, spaces and hyphens; up to 32 chars)", tag)
 	}
 	return user + "-" + tag, nil
+}
+
+// normalizeDeviceTag maps free-form operator input onto the device-tag
+// alphabet: lowercase, spaces/underscores/dots become hyphens, runs of
+// hyphens collapse, leading/trailing hyphens are stripped. "My Phone 2"
+// → "my-phone-2". Validation (validDeviceTag) happens after this, so
+// anything still out-of-alphabet is rejected rather than silently dropped.
+func normalizeDeviceTag(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '_', '.':
+			return '-'
+		}
+		return r
+	}, s)
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "-")
+	}
+	return strings.Trim(s, "-")
+}
+
+// animalNames feeds the default device-name suggestion on the /peers
+// "add device" form: "<username>-<random animal>". Single-word, lowercase,
+// tag-alphabet-safe.
+var animalNames = []string{
+	"alpaca", "badger", "beaver", "bison", "bobcat", "camel", "capybara",
+	"caracal", "cheetah", "chinchilla", "cougar", "coyote", "dingo",
+	"dolphin", "donkey", "falcon", "fennec", "ferret", "gazelle", "gecko",
+	"gibbon", "giraffe", "heron", "hedgehog", "ibex", "iguana", "jackal",
+	"jaguar", "kestrel", "kiwi", "koala", "lemur", "leopard", "llama",
+	"lynx", "macaw", "manatee", "marmot", "meerkat", "mongoose", "moose",
+	"narwhal", "ocelot", "octopus", "okapi", "osprey", "otter", "owl",
+	"panda", "pangolin", "panther", "pelican", "penguin", "puffin",
+	"quokka", "rabbit", "raccoon", "raven", "seal", "serval", "skunk",
+	"sloth", "stoat", "tapir", "toucan", "walrus", "weasel", "wombat",
+	"yak", "zebra",
+}
+
+// randomAnimal picks a uniformly random entry from animalNames. Uses
+// crypto/rand because it's already imported for keygen; the cost is
+// irrelevant at form-render frequency.
+func randomAnimal() string {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return animalNames[0]
+	}
+	n := int(b[0])<<8 | int(b[1])
+	return animalNames[n%len(animalNames)]
 }
 
 // metaStore — sidecar JSON keyed by public key.
@@ -513,7 +562,12 @@ func renderClientConf(p peer, pc *parsedConf, cfg config) string {
 var (
 	rePeerName    = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,64}$`)
 	reUsername    = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
-	reDeviceTag   = regexp.MustCompile(`^[a-z0-9]{1,16}$`)
+	// Device tags are free-form (users name devices whatever they want),
+	// constrained to a URL/filename/nginx-comment-safe alphabet after
+	// normalizeDeviceTag has mapped spaces etc. onto hyphens. Must start
+	// with an alphanumeric so "<user>-<tag>" never contains "--" at the
+	// join (peer.User() splits on the FIRST hyphen either way).
+	reDeviceTag   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	reEmail       = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 	reDisplayName = regexp.MustCompile(`^[\p{L}\p{N} ._'\-]{1,64}$`)
 )
